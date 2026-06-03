@@ -15,11 +15,23 @@ at::Tensor torchvulkan::binary_op_vulkan(
         at::Tensor out = fallback(self.cpu(), other.cpu());
         return out.to(self.device());
     }
+
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+    uint32_t alignment = device->properties.limits.minStorageBufferOffsetAlignment;
     
     at::Tensor self_dtype = self.to(promoted_type);
-    at::Tensor other_dtype = other.to(self_dtype.options());
-    at::Tensor out;
+    size_t self_offset_bytes = self_dtype.storage_offset() * self_dtype.element_size();
+    if (self_offset_bytes % alignment != 0) {
+        self_dtype = self_dtype.clone();
+    }
 
+    at::Tensor other_dtype = other.to(self_dtype.options());
+    size_t other_offset_bytes = other_dtype.storage_offset() * other_dtype.element_size();
+    if (other_offset_bytes % alignment != 0) {
+        other_dtype = other_dtype.clone();
+    }
+    
+    at::Tensor out;
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(out)
@@ -38,7 +50,6 @@ at::Tensor torchvulkan::binary_op_vulkan(
         return out.to(self.device());
     }
 
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t vecSize = get_dtype_vec_size(promoted_type);
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted_type, vecSize);
 
@@ -112,10 +123,17 @@ at::Tensor torchvulkan::binary_op_vulkan(
         at::Tensor out = fallback(self.cpu(), other);
         return out.to(self.device());
     }
+
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+    uint32_t alignment = device->properties.limits.minStorageBufferOffsetAlignment;
     
     at::Tensor self_dtype = self.to(promoted_type);
+    size_t self_offset_bytes = self_dtype.storage_offset() * self_dtype.element_size();
+    if (self_offset_bytes % alignment != 0) {
+        self_dtype = self_dtype.clone();
+    }
+    
     at::Tensor out;
-
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(out)
@@ -133,7 +151,6 @@ at::Tensor torchvulkan::binary_op_vulkan(
         return out.to(self.device());
     }
     
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t vecSize = get_dtype_vec_size(promoted_type);
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted_type, vecSize);
 

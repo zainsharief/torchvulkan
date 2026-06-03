@@ -75,6 +75,7 @@ def generate_shaders(src: Path, out: Path) -> dict:
             
             render_kwargs = {f"d{i+1}": dt['dtype'] for i, dt in enumerate(dtype)}
             render_kwargs |= {f"v{i+1}": calculate_vecsize(dt['bytes']) for i, dt in enumerate(dtype)}
+            render_kwargs |= {f"b{i+1}" : dt['bytes'] for i, dt in enumerate(dtype)}
             spv_code = template.render(render_kwargs | UTILS | shader['kwargs'])
 
             with open(filename, 'w') as f:

@@ -64,6 +64,27 @@ public:
         return *this;
     }
 
+    PushConstantBuilder& push_scalar(const at::Scalar& value, at::ScalarType dtype)
+    {
+        switch (dtype) {
+            case at::kByte: push(value.to<uint8_t>()); break;
+            case at::kChar: push(value.to<int8_t>()); break;
+            case at::kShort: push(value.to<int16_t>()); break;
+            case at::kInt: push(value.to<int32_t>()); break;
+            case at::kLong: push(value.to<int64_t>()); break;
+            case at::kBool: push(value.to<bool>()); break;
+            case at::kHalf: push(value.to<c10::Half>()); break;
+            case at::ScalarType::UInt16: push(value.to<uint16_t>()); break;
+            case at::ScalarType::UInt32: push(value.to<uint32_t>()); break;
+            case at::ScalarType::UInt64: push(value.to<uint64_t>()); break;
+            case at::kDouble: push(value.to<double>()); break;
+            case at::kFloat: push(value.to<float>()); break;
+            default: TORCH_CHECK(false, "torchvulkan [ERROR]: Unsupported dtype for scalar value."); break;
+        }
+
+        return *this;
+    }
+
     const void* data() const { return buffer.data(); }
     size_t size() const { return current_size; }
 

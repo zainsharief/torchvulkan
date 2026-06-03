@@ -1,0 +1,66 @@
+#include "helpers/int_divider.slang.j2"
+
+[[vk::constant_id(0)]] const uint NDIM = 0; 
+[[vk::constant_id(1)]] const uint IS_CONTIG = 0; 
+[[vk::constant_id(2)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    IntDivider sizes[4];
+    uint4 strides;
+    uint numel;
+    uint padding;
+    {{ d1 }} fill_value;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+void fillKernel
+(
+    uint3 gi: SV_DispatchThreadID,
+    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor
+)
+{
+    uint idx = gi.x;
+    if (idx * {{ v1 }} >= pcs.numel) return;
+    tensor[idx] = (vector<{{ d1 }}, {{ v1 }}>)pcs.fill_value; 
+}
+
+void fillKernel<
+    let ndim : int
+>(
+    uint3 gi: SV_DispatchThreadID,
+    RWStructuredBuffer<{{ d1 }}> tensor
+)
+{
+    uint idx = gi.x;
+    if (idx >= pcs.numel) return;
+
+    uint linear_idx = idx;
+    uint idx_in = 0;
+
+    [unroll]
+    for (int i = 0; i < ndim; i++) {
+        uint next_linear_idx = fast_div(linear_idx, pcs.sizes[i]);
+        uint coord = linear_idx - (next_linear_idx * pcs.sizes[i].divisor);
+        linear_idx = next_linear_idx;
+        idx_in += coord * pcs.strides[i];
+    }
+
+    tensor[idx_in] = pcs.fill_value; 
+}
+
+[[vk::binding(0, 0)]] RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_contig;
+[[vk::binding(0, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_noncontig;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) 
+{
+    if (IS_CONTIG == 1) fillKernel(gi, tensor_contig);
+    else {
+        {% for dim in range(MAX_DIMS + 1) %} 
+        if (NDIM == {{ dim }}) fillKernel<{{ dim }}>(gi, tensor_noncontig);
+        {% endfor %}
+    }
+}

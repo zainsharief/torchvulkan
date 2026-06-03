@@ -1,0 +1,317 @@
+[[vk::constant_id(0)]] const int WG_x = 0;
+[[vk::constant_id(1)]] const int WG_y = 0;
+[[vk::constant_id(2)]] const int IS_ALIGNED = 1;
+[[vk::constant_id(3)]] const int HAS_BIAS = 0;
+
+struct TensorStrides {
+    uint batch;
+    uint row;
+    uint col;
+    uint padding;
+};
+
+struct PushConstants {
+    uint M;
+    uint N;
+    uint K;
+    uint padding;
+    TensorStrides strides_A;
+    TensorStrides strides_B;
+    TensorStrides strides_C;
+    TensorStrides strides_bias;
+    float alpha;
+    float beta;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+// must match the tile sizes defined in the shader - if you change one, change the other!
+static const int TILE_M = {{ 128 if b1 < 8 else 64 }};
+static const int TILE_N = 128;
+static const int TILE_K = 16;
+
+static const int THREAD_SIZE_M = TILE_M / TILE_K;
+static const int THREAD_SIZE_N = TILE_N / TILE_K;
+
+static const int VECTORS_PER_TILE_ROW_N = TILE_N / {{ v1 }};
+static const int VECTORS_PER_TILE_ROW_K = TILE_K / {{ v1 }};
+static const int VECTORS_PER_THREAD_ROW_M = THREAD_SIZE_N / {{ v1 }};
+
+// each 32-bit word is assigned to a given bank % 32, so to prevent
+// bank conflicts we pad the shared memory arrays by 1 element ({{ v1 }}) 
+// at the end of each row
+groupshared {{ d1 }} smemA[TILE_M][TILE_K + 1];
+groupshared vector<{{ d1 }}, {{ v1 }}> smemB[TILE_K][TILE_N / {{ v1 }}];
+
+void matmulKernel(
+    uint3 gi: SV_DispatchThreadID,
+    uint3 li: SV_GroupThreadID,
+    uint3 wg: SV_GroupID,
+    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a,
+    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b,
+    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out,
+    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias
+)
+{
+    vector<{{ d1 }}, {{ v1 }}> accum[THREAD_SIZE_M * (THREAD_SIZE_N / {{ v1 }})] = { 0 };
+
+    uint thread_idx = li.y * WG_x + li.x;
+    uint threads = WG_x * WG_y;
+    uint thread_row_start = li.y * THREAD_SIZE_M;
+    uint thread_col_start = li.x * THREAD_SIZE_N;
+
+    uint batch_idx = wg.z;
+    uint batch_offset_A = batch_idx * pcs.strides_A.batch;
+    uint batch_offset_B = batch_idx * pcs.strides_B.batch;
+    uint batch_offset_C = batch_idx * pcs.strides_C.batch;
+    uint batch_offset_bias = batch_idx * pcs.strides_bias.batch;
+
+    uint vectors_A = (TILE_M * TILE_K) / {{ v1 }};
+    uint vectors_B = (TILE_K * TILE_N) / {{ v1 }};
+    uint loads_per_thread_A = vectors_A / threads;
+    uint loads_per_thread_B = vectors_B / threads;
+
+    for (int k_block = 0; k_block < pcs.K; k_block += TILE_K) 
+    {
+        // loads a TILE_M x TILE_K block of A into shared memory
+        [unroll] for (int i = 0; i < loads_per_thread_A; ++i) 
+        {
+            uint load_idx = thread_idx + (i * threads);
+            uint row_A = load_idx / VECTORS_PER_TILE_ROW_K; 
+            uint col_A = (load_idx % VECTORS_PER_TILE_ROW_K) * {{ v1 }};
+
+            uint global_row = wg.y * TILE_M + row_A;
+            uint global_col = k_block + col_A;
+
+            vector<{{ d1 }}, {{ v1 }}> loaded_vec = { 0 };
+            if (global_row < pcs.M && global_col < pcs.K) {
+                uint flat_idx = batch_offset_A + (global_row * pcs.strides_A.row) + global_col;
+                loaded_vec = tensor_a[flat_idx / {{ v1 }}];
+            }
+
+            [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
+                smemA[row_A][col_A + v] = loaded_vec[v];
+            }
+        }
+
+        // loads a TILE_K x TILE_N block of B into shared memory
+        [unroll] for (int i = 0; i < loads_per_thread_B; ++i) 
+        {
+            uint load_idx = thread_idx + (i * threads);
+            uint row_B = load_idx / VECTORS_PER_TILE_ROW_N;
+            uint col_B = (load_idx % VECTORS_PER_TILE_ROW_N) * {{ v1 }};
+
+            uint global_row = k_block + row_B; 
+            uint global_col = wg.x * TILE_N + col_B;
+
+            vector<{{ d1 }}, {{ v1 }}> loaded_vec = { 0 };
+            if (global_row < pcs.K && global_col < pcs.N) {
+                uint flat_idx = batch_offset_B + (global_row * pcs.strides_B.row) + global_col;
+                loaded_vec = tensor_b[flat_idx / {{ v1 }}];
+            }
+        
+            uint vec_col = col_B / {{ v1 }}; 
+            smemB[row_B][vec_col] = loaded_vec;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        
+        // compute the matmul for this tile
+        for (int k = 0; k < TILE_K; k++) 
+        {    
+            vector<{{ d1 }}, {{ v1 }}> b_frag[THREAD_SIZE_N / {{ v1 }}]; 
+            
+            [unroll] for (int j = 0; j < THREAD_SIZE_N / {{ v1 }}; ++j) {
+                uint base_vec_col = (thread_col_start / {{ v1 }}) + j;
+                b_frag[j] = smemB[k][base_vec_col];
+            }
+
+            [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i) 
+            {
+                {{ d1 }} a_val = smemA[thread_row_start + i][k];
+                
+                [unroll] for (int j = 0; j < THREAD_SIZE_N / {{ v1 }}; ++j) {
+                    accum[i * VECTORS_PER_THREAD_ROW_M + j] += b_frag[j] * a_val;
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    uint global_row_start = wg.y * TILE_M + thread_row_start;
+    uint global_col_start = wg.x * TILE_N + thread_col_start;
+
+    // write the results back to global memory
+    [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i) 
+    {        
+        uint g_row = global_row_start + i;
+        [unroll] for (int j_vec = 0; j_vec < VECTORS_PER_THREAD_ROW_M; ++j_vec) 
+        {
+            uint g_col = global_col_start + (j_vec * {{ v1 }});    
+
+            if (g_row < pcs.M && g_col < pcs.N) {
+                vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * ({{ d1 }})pcs.alpha;
+                
+                if (HAS_BIAS) {
+                    uint bias_flat_idx = (batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col));
+                    result_vec += tensor_bias[bias_flat_idx / {{ v1 }}] * ({{ d1 }})pcs.beta;
+                }
+                
+                uint flat_idx = batch_offset_C + (g_row * pcs.strides_C.row) + g_col;
+                tensor_out[flat_idx / {{ v1 }}] = result_vec;
+            }
+        }
+    }
+}
+
+void matmulKernel(
+    uint3 gi: SV_DispatchThreadID,
+    uint3 li: SV_GroupThreadID,
+    uint3 wg: SV_GroupID,
+    StructuredBuffer<{{ d1 }}> tensor_a,
+    StructuredBuffer<{{ d1 }}> tensor_b,
+    RWStructuredBuffer<{{ d1 }}> tensor_out,
+    StructuredBuffer<{{ d1 }}> tensor_bias
+)
+{
+    vector<{{ d1 }}, {{ v1 }}> accum[THREAD_SIZE_M * (THREAD_SIZE_N / {{ v1 }})] = { 0 };
+
+    uint thread_idx = li.y * WG_x + li.x;
+    uint threads = WG_x * WG_y;
+    uint thread_row_start = li.y * THREAD_SIZE_M;
+    uint thread_col_start = li.x * THREAD_SIZE_N;
+
+    uint batch_idx = wg.z;
+    uint batch_offset_A = batch_idx * pcs.strides_A.batch;
+    uint batch_offset_B = batch_idx * pcs.strides_B.batch;
+    uint batch_offset_C = batch_idx * pcs.strides_C.batch;
+    uint batch_offset_bias = batch_idx * pcs.strides_bias.batch;
+
+    uint vectors_A = (TILE_M * TILE_K) / {{ v1 }};
+    uint vectors_B = (TILE_K * TILE_N) / {{ v1 }};
+    uint loads_per_thread_A = vectors_A / threads;
+    uint loads_per_thread_B = vectors_B / threads;
+
+    for (int k_block = 0; k_block < pcs.K; k_block += TILE_K) 
+    {
+        // loads a TILE_M x TILE_K block of A into shared memory
+        [unroll] for (int i = 0; i < loads_per_thread_A; ++i) 
+        {
+            uint load_idx = thread_idx + (i * threads);
+            uint row_A = load_idx / VECTORS_PER_TILE_ROW_K; 
+            uint col_A = (load_idx % VECTORS_PER_TILE_ROW_K) * {{ v1 }};
+
+            uint global_row = wg.y * TILE_M + row_A;
+            uint global_col = k_block + col_A;
+
+            [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
+                // Bounds check EACH element, safely handling non-multiples
+                if (global_row < pcs.M && (global_col + v) < pcs.K) {
+                    uint flat_idx = batch_offset_A + (global_row * pcs.strides_A.row) + ((global_col + v) * pcs.strides_A.col);
+                    smemA[row_A][col_A + v] = tensor_a[flat_idx];
+                } else {
+                    smemA[row_A][col_A + v] = ({{ d1 }})0; // Pad out-of-bounds with 0
+                }
+            }
+        }
+
+        // loads a TILE_K x TILE_N block of B into shared memory
+        [unroll] for (int i = 0; i < loads_per_thread_B; ++i) 
+        {
+            uint load_idx = thread_idx + (i * threads);
+            uint row_B = load_idx / VECTORS_PER_TILE_ROW_N;
+            uint col_B = (load_idx % VECTORS_PER_TILE_ROW_N) * {{ v1 }};
+
+            uint global_row = k_block + row_B; 
+            uint global_col = wg.x * TILE_N + col_B;
+
+            vector<{{ d1 }}, {{ v1 }}> loaded_vec = { 0 }; // initializes to 0
+            
+            [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
+                // Bounds check EACH element
+                if (global_row < pcs.K && (global_col + v) < pcs.N) {
+                    uint flat_idx = batch_offset_B + (global_row * pcs.strides_B.row) + ((global_col + v) * pcs.strides_B.col);
+                    loaded_vec[v] = tensor_b[flat_idx];
+                }
+            }
+        
+            uint vec_col = col_B / {{ v1 }}; 
+            smemB[row_B][vec_col] = loaded_vec;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        
+        // compute the matmul for this tile (EXACTLY THE SAME AS FAST PATH)
+        for (int k = 0; k < TILE_K; k++) 
+        {    
+            vector<{{ d1 }}, {{ v1 }}> b_frag[THREAD_SIZE_N / {{ v1 }}]; 
+            
+            [unroll] for (int j = 0; j < THREAD_SIZE_N / {{ v1 }}; ++j) {
+                uint base_vec_col = (thread_col_start / {{ v1 }}) + j;
+                b_frag[j] = smemB[k][base_vec_col];
+            }
+
+            [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i) 
+            {
+                {{ d1 }} a_val = smemA[thread_row_start + i][k];
+                
+                [unroll] for (int j = 0; j < THREAD_SIZE_N / {{ v1 }}; ++j) {
+                    accum[i * VECTORS_PER_THREAD_ROW_M + j] += b_frag[j] * a_val;
+                }
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    uint global_row_start = wg.y * TILE_M + thread_row_start;
+    uint global_col_start = wg.x * TILE_N + thread_col_start;
+
+    // write the results back to global memory
+    [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i) 
+    {        
+        uint g_row = global_row_start + i;
+        [unroll] for (int j_vec = 0; j_vec < VECTORS_PER_THREAD_ROW_M; ++j_vec) 
+        {
+            uint g_col_base = global_col_start + (j_vec * {{ v1 }});            
+            vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * ({{ d1 }})pcs.alpha;
+
+            [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
+                uint g_col = g_col_base + v;
+                if (g_row < pcs.M && g_col < pcs.N) {
+                    
+                    {{ d1 }} final_val = result_vec[v];
+                    
+                    if (HAS_BIAS) {
+                        uint bias_flat_idx = batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col);
+                        final_val += tensor_bias[bias_flat_idx] * ({{ d1 }})pcs.beta;
+                    }
+
+                    uint flat_idx = batch_offset_C + (g_row * pcs.strides_C.row) + (g_col * pcs.strides_C.col);
+                    tensor_out[flat_idx] = final_val;
+                }
+            }
+        }
+    }
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a;
+[[vk::binding(1, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b;
+[[vk::binding(2, 0)]] RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out;
+[[vk::binding(3, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias;
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a_scalar;
+[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b_scalar;
+[[vk::binding(2, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out_scalar;
+[[vk::binding(3, 0)]] StructuredBuffer<{{ d1 }}> tensor_bias_scalar;
+
+[shader("compute")]
+[numthreads(WG_x, WG_y, 1)]
+void main(
+    uint3 gi: SV_DispatchThreadID,
+    uint3 li: SV_GroupThreadID,
+    uint3 wg: SV_GroupID 
+) 
+{
+    if (IS_ALIGNED) matmulKernel(gi, li, wg, tensor_a, tensor_b, tensor_out, tensor_bias);
+    else matmulKernel(gi, li, wg, tensor_a_scalar, tensor_b_scalar, tensor_out_scalar, tensor_bias_scalar);
+}
