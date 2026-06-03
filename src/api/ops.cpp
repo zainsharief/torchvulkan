@@ -2,6 +2,7 @@
 #include <ATen/native/CPUFallback.h>
 #include "api/ops/factory.h"
 #include "api/ops/binary.h"
+#include "api/ops/unary.h"
 #include "api/ops/matmul.h"
 
 using namespace torchvulkan;
@@ -26,6 +27,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_copy_from", &copy_from_vulkan);
     m.impl("_copy_from_and_resize", &copy_from_and_resize_vulkan);
     m.impl("copy_", &copy_vulkan_);
+
+    // unary
+    m.impl("fill_.Scalar", &fill_scalar_vulkan);
+    m.impl("fill_.Tensor", &fill_tensor_vulkan);
+    m.impl("zero_", &zero_vulkan);
 
     // binary - Add
     m.impl("add.Tensor", &add_vulkan);

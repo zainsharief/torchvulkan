@@ -60,6 +60,11 @@ SHADERS = [
         'kwargs' : {}
     },
     {
+        'name' : 'fill.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {}
+    },
+    {
         'name' : 'matmul.slang.j2',
         'dtypes' : DTYPES,
         'kwargs' : {}
