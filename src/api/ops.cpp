@@ -64,4 +64,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 
     // matmul
     m.impl("mm", &mm_vulkan);
+    m.impl("bmm", &bmm_vulkan);
+    m.impl("matmul", &matmul_vulkan);
+    m.impl("addmm", &addmm_vulkan);
+    m.impl("baddbmm", &baddbmm_vulkan);
 }
