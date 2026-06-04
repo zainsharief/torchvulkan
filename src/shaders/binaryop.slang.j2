@@ -1,21 +1,22 @@
 {% include "helpers/int_divider.slang.j2" %}
 {% include "helpers/vulkan_arithmetic.slang.j2" %}
 
-[[vk::constant_id(0)]] const int OP_TYPE = 0;
-[[vk::constant_id(1)]] const bool IS_CONTIG = true;
-[[vk::constant_id(2)]] const int NDIM = 0;
-[[vk::constant_id(3)]] const int WG_x = 0;
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint IS_CONTIG = 0;
+[[vk::constant_id(2)]] const uint USE_SCALAR = 0;
+[[vk::constant_id(3)]] const uint NDIM = 0;
+[[vk::constant_id(4)]] const uint WG_x = 0;
 
 struct PushConstants
 {
-    uint numel;
-    float alpha;
-    float scalar_value;
-    int use_scalar;
     IntDivider sizes;
     uint4 strides_a;
     uint4 strides_b;
     uint4 strides_out;
+    uint numel;
+    uint pad;
+    {{ d1 }} alpha;
+    {{ d1 }} scalar_value;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
@@ -84,7 +85,7 @@ void baseBinaryKernel<
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_a,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_b,
     RWStructuredBuffer<vector<T, VEC_SIZE>> tensor_out,
-    vector<T, VEC_SIZE> alpha, vector<T, VEC_SIZE> scalar_value // pass them in to avoid intermediate int conversions during casting
+    T alpha, T scalar_value
 ) 
 {
     uint idx = gi.x;
@@ -92,7 +93,7 @@ void baseBinaryKernel<
 
     vector<T, VEC_SIZE> v1, v2, res;
     v1 = tensor_a[idx];
-    v2 = pcs.use_scalar == 1 ? scalar_value : tensor_b[idx];
+    v2 = USE_SCALAR != 0 ? scalar_value : tensor_b[idx];
 
     res = Op.eval(v1, v2, alpha);
 
@@ -114,7 +115,7 @@ void baseBinaryKernel<
     StructuredBuffer<T> tensor_a,
     StructuredBuffer<T> tensor_b,
     RWStructuredBuffer<T> tensor_out,
-    T alpha, T scalar_value // pass them in to avoid intermediate int conversions during casting
+    T alpha, T scalar_value
 )
 {
     uint idx = gi.x;
@@ -137,7 +138,7 @@ void baseBinaryKernel<
 
     T v1, v2;
     v1 = tensor_a[idx_a];
-    v2 = pcs.use_scalar == 1 ? scalar_value : tensor_b[idx_b];
+    v2 = USE_SCALAR != 0 ? scalar_value : tensor_b[idx_b];
 
     tensor_out[idx_out] = Op.eval(v1, v2, alpha);
 }
@@ -158,11 +159,19 @@ void main(uint3 gi: SV_DispatchThreadID) {
     {% for op in OPERATIONS %}
 
     {% if is_contig %}
-    if (IS_CONTIG && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(gi, tensor_a_contig, tensor_b_contig, tensor_out_contig, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.alpha, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.scalar_value);
+
+    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(
+        gi, tensor_a_contig, tensor_b_contig, tensor_out_contig, pcs.alpha, pcs.scalar_value
+    );
+
     {% else %}
+
     {% for dim in range(MAX_DIMS+1) %}
-    if (!IS_CONTIG && OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseBinaryKernel<{{ d1 }}, {{ dim }}, {{ op['struct'] }}<{{ d1 }}>>(gi, tensor_a_noncontig, tensor_b_noncontig, tensor_out_noncontig, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.alpha, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.scalar_value);
+    if (IS_CONTIG == 0 && OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseBinaryKernel<{{ d1 }}, {{ dim }}, {{ op['struct'] }}<{{ d1 }}>>(
+        gi, tensor_a_noncontig, tensor_b_noncontig, tensor_out_noncontig, pcs.alpha, pcs.scalar_value
+    );
     {% endfor %}
+
     {% endif %}
     
     {% endfor %}

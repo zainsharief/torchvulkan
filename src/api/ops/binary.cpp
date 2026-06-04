@@ -56,13 +56,15 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
     uint32_t op = static_cast<uint32_t>(operation);
+    uint32_t use_scalar = 0;
 
     SpecializationBuilder spd{};
     spd.push(op)
        .push(contiguous)
+       .push(use_scalar)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 9) | (out_dims << 5) | (contiguous << 4) | op;
+    uint32_t key = (workgroupSizeX << 10) | (out_dims << 6) | (use_scalar << 5) | (contiguous << 4) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     IntDivider sizes; 
@@ -86,15 +88,15 @@ at::Tensor torchvulkan::binary_op_vulkan(
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(numel)
-       .push(alpha.toFloat())
-       .push((float)1.0)
-       .push((int)0)
-       .push(sizes)
+    pcs.push(sizes)
        .push_array(strides_a)
        .push_array(strides_b)
-       .push_array(strides_out);
-    
+       .push_array(strides_out)
+       .push(numel)
+       .push((uint32_t)0) // pad to align to 8-bytes
+       .push_scalar(alpha, promoted_type)
+       .push_scalar((at::Scalar)0, promoted_type);
+           
     uint32_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
 
@@ -157,13 +159,15 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t contiguous = iter.is_contiguous();
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
     uint32_t op = static_cast<uint32_t>(operation);
+    uint32_t use_scalar = 1;
 
     SpecializationBuilder spd{};
     spd.push(op)
        .push(contiguous)
+       .push(use_scalar)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 9) | (out_dims << 5) | (contiguous << 4) | op;
+    uint32_t key = (workgroupSizeX << 10) | (out_dims << 6) | (use_scalar << 5) | (contiguous << 4) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     IntDivider sizes; 
@@ -185,14 +189,14 @@ at::Tensor torchvulkan::binary_op_vulkan(
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(numel)
-       .push(alpha.toFloat())
-       .push(other.toFloat())
-       .push((int)1)
-       .push(sizes)
+    pcs.push(sizes)
        .push_array(strides_a)
        .push_array(strides_b)
-       .push_array(strides_out);
+       .push_array(strides_out)
+       .push(numel)
+       .push((uint32_t)0) // pad to align to 8-bytes
+       .push_scalar(alpha, promoted_type)
+       .push_scalar(other, promoted_type);
 
     uint32_t numel_vec = !contiguous ? numel : (numel + (vecSize-1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;

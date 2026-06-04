@@ -102,7 +102,7 @@ class TestVulkanOps(TestCase):
                 self.assertEqual(actual, expected, atol=1e-2, rtol=1e-2)
                 continue
 
-            self.assertEqual(actual, expected, atol=1e-4, rtol=1e-6) # temporary fix
+            self.assertEqual(actual, expected)
             REMAINING_OPS.add(op.name)
 
     @classmethod
