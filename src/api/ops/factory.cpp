@@ -326,7 +326,7 @@ void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& 
     uint32_t key = (workgroupSizeX << 4) | out_dims;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    IntDivider sizes[MAX_DIMS];
+    IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
     
@@ -336,13 +336,13 @@ void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& 
     at::IntArrayRef iter_strides_in = iter.strides(1);
 
     for (int i = 0; i < out_dims; i++) {
-        sizes[i] = IntDivider(iter_shape[i]);
+        sizes.set(i, iter_shape[i]);
         strides_in[i] = iter_strides_in[i] / el_size;
         strides_out[i] = iter_strides_out[i] / el_size;
     }
-
+    
     PushConstantBuilder pcs{};
-    pcs.push_array(sizes)
+    pcs.push(sizes)
         .push_array(strides_in)
         .push_array(strides_out)
         .push(numel);
@@ -387,7 +387,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     uint32_t key = (isBoolCast << 8) | (workgroupSizeX << 4) | out_dims;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    IntDivider sizes[MAX_DIMS];
+    IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
     
@@ -398,13 +398,13 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     at::IntArrayRef iter_strides_in = iter.strides(1);
 
     for (int i = 0; i < out_dims; i++) {
-        sizes[i] = IntDivider(iter_shape[i]);
+        sizes.set(i, iter_shape[i]);
         strides_in[i] = iter_strides_in[i] / el_size_in;
         strides_out[i] = iter_strides_out[i] / el_size_out;
     }
 
     PushConstantBuilder pcs{};
-    pcs.push_array(sizes)
+    pcs.push(sizes)
         .push_array(strides_in)
         .push_array(strides_out)
         .push(numel);

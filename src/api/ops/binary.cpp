@@ -65,7 +65,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t key = (workgroupSizeX << 9) | (out_dims << 5) | (contiguous << 4) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    IntDivider sizes[MAX_DIMS];
+    IntDivider sizes; 
     uint32_t strides_a[MAX_DIMS] = {0};
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
@@ -78,7 +78,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
         at::IntArrayRef iter_strides_b = iter.strides(2);
 
         for (int i = 0; i < out_dims; i++) {
-            sizes[i] = IntDivider(iter_shape[i]);
+            sizes.set(i, iter_shape[i]);
             strides_a[i] = iter_strides_a[i] / el_size;
             strides_b[i] = iter_strides_b[i] / el_size;
             strides_out[i] = iter_strides_out[i] / el_size;
@@ -90,7 +90,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push(alpha.toFloat())
        .push((float)1.0)
        .push((int)0)
-       .push_array(sizes)
+       .push(sizes)
        .push_array(strides_a)
        .push_array(strides_b)
        .push_array(strides_out);
@@ -166,19 +166,19 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t key = (workgroupSizeX << 9) | (out_dims << 5) | (contiguous << 4) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    IntDivider sizes[MAX_DIMS];
+    IntDivider sizes; 
     uint32_t strides_a[MAX_DIMS] = {0};
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
-
+    
     if (!contiguous) {
         int64_t el_size = iter.element_size(0);
         at::IntArrayRef iter_shape = iter.shape();
         at::IntArrayRef iter_strides_out = iter.strides(0);
         at::IntArrayRef iter_strides_a = iter.strides(1);
 
-        for (int i = 0; i < out_dims; ++i) {
-            sizes[i] = IntDivider(iter_shape[i]);
+        for (int i = 0; i < out_dims; i++) {
+            sizes.set(i, iter_shape[i]);
             strides_a[i] = iter_strides_a[i] / el_size;
             strides_out[i] = iter_strides_out[i] / el_size;
         }
@@ -189,7 +189,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push(alpha.toFloat())
        .push(other.toFloat())
        .push((int)1)
-       .push_array(sizes)
+       .push(sizes)
        .push_array(strides_a)
        .push_array(strides_b)
        .push_array(strides_out);
