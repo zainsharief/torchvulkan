@@ -85,7 +85,7 @@ void baseBinaryKernel<
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_a,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_b,
     RWStructuredBuffer<vector<T, VEC_SIZE>> tensor_out,
-    T alpha, T scalar_value
+    vector<T, VEC_SIZE> alpha, vector<T, VEC_SIZE> scalar_value
 ) 
 {
     uint idx = gi.x;
