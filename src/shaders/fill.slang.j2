@@ -1,4 +1,4 @@
-#include "helpers/int_divider.slang.j2"
+{% include "helpers/int_divider.slang.j2" %}
 
 [[vk::constant_id(0)]] const uint NDIM = 0; 
 [[vk::constant_id(1)]] const uint IS_CONTIG = 0; 
@@ -6,7 +6,7 @@
 
 struct PushConstants
 {
-    IntDivider sizes[4];
+    IntDivider sizes;
     uint4 strides;
     uint numel;
     uint padding;
@@ -41,8 +41,8 @@ void fillKernel<
 
     [unroll]
     for (int i = 0; i < ndim; i++) {
-        uint next_linear_idx = fast_div(linear_idx, pcs.sizes[i]);
-        uint coord = linear_idx - (next_linear_idx * pcs.sizes[i].divisor);
+        uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
+        uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
         linear_idx = next_linear_idx;
         idx_in += coord * pcs.strides[i];
     }

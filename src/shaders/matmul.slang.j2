@@ -1,7 +1,7 @@
-[[vk::constant_id(0)]] const int WG_x = 0;
-[[vk::constant_id(1)]] const int WG_y = 0;
-[[vk::constant_id(2)]] const int IS_ALIGNED = 1;
-[[vk::constant_id(3)]] const int HAS_BIAS = 0;
+[[vk::constant_id(0)]] const uint WG_x = 0;
+[[vk::constant_id(1)]] const uint WG_y = 0;
+[[vk::constant_id(2)]] const uint IS_ALIGNED = 1;
+[[vk::constant_id(3)]] const uint HAS_BIAS = 0;
 
 struct TensorStrides {
     uint batch;
@@ -11,16 +11,16 @@ struct TensorStrides {
 };
 
 struct PushConstants {
-    uint M;
-    uint N;
-    uint K;
-    uint padding;
     TensorStrides strides_A;
     TensorStrides strides_B;
     TensorStrides strides_C;
     TensorStrides strides_bias;
-    float alpha;
-    float beta;
+    uint M;
+    uint N;
+    uint K;
+    uint padding;
+    {{ d1 }} alpha;
+    {{ d1 }} beta;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
@@ -150,11 +150,11 @@ void matmulKernel(
             uint g_col = global_col_start + (j_vec * {{ v1 }});    
 
             if (g_row < pcs.M && g_col < pcs.N) {
-                vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * ({{ d1 }})pcs.alpha;
+                vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * pcs.alpha;
                 
                 if (HAS_BIAS) {
                     uint bias_flat_idx = (batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col));
-                    result_vec += tensor_bias[bias_flat_idx / {{ v1 }}] * ({{ d1 }})pcs.beta;
+                    result_vec += tensor_bias[bias_flat_idx / {{ v1 }}] * pcs.beta;
                 }
                 
                 uint flat_idx = batch_offset_C + (g_row * pcs.strides_C.row) + g_col;
@@ -273,7 +273,7 @@ void matmulKernel(
         [unroll] for (int j_vec = 0; j_vec < VECTORS_PER_THREAD_ROW_M; ++j_vec) 
         {
             uint g_col_base = global_col_start + (j_vec * {{ v1 }});            
-            vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * ({{ d1 }})pcs.alpha;
+            vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * pcs.alpha;
 
             [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
                 uint g_col = g_col_base + v;
@@ -283,7 +283,7 @@ void matmulKernel(
                     
                     if (HAS_BIAS) {
                         uint bias_flat_idx = batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col);
-                        final_val += tensor_bias[bias_flat_idx] * ({{ d1 }})pcs.beta;
+                        final_val += tensor_bias[bias_flat_idx] * pcs.beta;
                     }
 
                     uint flat_idx = batch_offset_C + (g_row * pcs.strides_C.row) + (g_col * pcs.strides_C.col);

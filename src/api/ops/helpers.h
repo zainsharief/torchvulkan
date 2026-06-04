@@ -94,23 +94,30 @@ private:
 };
 
 struct IntDivider {
-    uint32_t divisor;
-    uint32_t multiplier;
-    uint32_t shift_val;
-    uint32_t pad;
+    uint32_t divisor[MAX_DIMS];
+    uint32_t multiplier[MAX_DIMS];
+    uint32_t shift_val[MAX_DIMS];
 
-    IntDivider() : divisor(1), multiplier(1), shift_val(0), pad(0) {}
-
-    IntDivider(uint32_t d) 
-        : divisor(d) 
-    {        
-        for (shift_val = 0; shift_val < 32; shift_val++) {
-            if ((1U << shift_val) >= d) break;
+    IntDivider() {
+        for (int i = 0; i < MAX_DIMS; ++i) {
+            divisor[i] = 1;
+            multiplier[i] = 1;
+            shift_val[i] = 0;
         }
+    }
+
+    void set(int idx, uint32_t d) {
+        divisor[idx] = d;
+        
+        uint32_t shift = 0;
+        for (shift = 0; shift < 32; shift++) {
+            if ((1U << shift) >= d) break;
+        }
+        shift_val[idx] = shift;
         
         uint64_t one = 1;
-        uint64_t magic = ((one << 32) * ((one << shift_val) - d)) / d + 1;
-        multiplier = static_cast<uint32_t>(magic);
+        uint64_t magic = ((one << 32) * ((one << shift) - d)) / d + 1;
+        multiplier[idx] = static_cast<uint32_t>(magic);
     }
 };
 

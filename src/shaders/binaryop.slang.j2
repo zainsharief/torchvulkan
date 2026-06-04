@@ -1,102 +1,25 @@
-#include "helpers/int_divider.slang.j2"
+{% include "helpers/int_divider.slang.j2" %}
+{% include "helpers/vulkan_arithmetic.slang.j2" %}
 
-interface IVulkanArithmetic
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint IS_CONTIG = 0;
+[[vk::constant_id(2)]] const uint USE_SCALAR = 0;
+[[vk::constant_id(3)]] const uint NDIM = 0;
+[[vk::constant_id(4)]] const uint WG_x = 0;
+
+struct PushConstants
 {
-    static This ext_pow(This a, This b);
-    static This ext_atan2(This a, This b);
-    static This ext_max(This a, This b);
-    static This ext_min(This a, This b);
-}
+    IntDivider sizes;
+    uint4 strides_a;
+    uint4 strides_b;
+    uint4 strides_out;
+    uint numel;
+    uint pad;
+    {{ d1 }} alpha;
+    {{ d1 }} scalar_value;
+};
 
-#define DEFINE_EXT_POW_ATAN2_FOR_FLOAT_TYPE(type) \
-extension type : IVulkanArithmetic \
-{ \
-    static type _safe_pow(type base, type exp) { \
-        if (sizeof(type) == 8) return type(pow(float(base), float(exp))); \
-        return pow(base, exp); \
-    } \
-    \
-    static type ext_pow(type a, type b) \
-    { \
-        if (b == type(0.0)) return type(1.0); \
-        else if (b == type(1.0)) return a; \
-        else if (b == type(2.0)) return a * a; \
-        else if (a == type(1.0)) return type(1.0); \
-        else if (isnan(a) || isnan(b)) return type(0.0) / type(0.0); \
-        else if (a == type(0.0)) { \
-            if (b < type(0.0)) return type(1.0) / type(0.0); \
-            return type(0.0); \
-        } \
-        else if (a > type(0.0)) { return _safe_pow(a, b); } \
-        else if (isinf(b)) { return _safe_pow(abs(a), b); } \
-        else if (frac(b) != type(0.0)) { return type(0.0) / type(0.0); /* NaN */ } \
-        type res = _safe_pow(abs(a), b); \
-        if (fmod(abs(b), type(2.0)) == type(1.0)) { return -res; } \
-        return res; \
-    } \
-    static type ext_atan2(type a, type b) { return (a == 0 && b == 0) ? 0 : atan2(a, b); } \
-    static type ext_max(type a, type b) { return max(a, b); } \
-    static type ext_min(type a, type b) { return min(a, b); } \
-}
-
-#define DEFINE_EXT_POW_ATAN2_FOR_INT_TYPE(type) \
-extension type : IVulkanArithmetic \
-{ \
-    static type ext_pow(type a, type b) \
-    { \
-        int32_t e = int32_t(b); \
-        if (e < 0) { \
-            if (a == type(1)) return type(1); \
-            if (int(a) == -1) return (e % 2 != 0) ? type(-1) : type(1); \
-            return type(0); \
-        } \
-        type res = type(1); \
-        type a_val = a; \
-        while (e > 0) { \
-            if ((e & 1) != 0) res *= a_val; \
-            a_val *= a_val; \
-            e >>= 1; \
-        } \
-        return res; \
-    } \
-    static type ext_atan2(type a, type b) { return type(0); } \
-    static type ext_max(type a, type b) { return max(a, b); } \
-    static type ext_min(type a, type b) { return min(a, b); } \
-}
-
-extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
-{
-    static vector<T, N> ext_pow(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_pow(a[i], b[i]);
-        }
-        return res;
-    }
-    static vector<T, N> ext_atan2(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_atan2(a[i], b[i]);
-        }
-        return res;
-    }
-    static vector<T, N> ext_max(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_max(a[i], b[i]);
-        return res;
-    }
-    static vector<T, N> ext_min(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
-        return res;
-    }
-}
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
 interface IBinaryOp<T>
 {
@@ -153,25 +76,6 @@ struct MinOp<T : IVulkanArithmetic> : IBinaryOp<T>
     static T eval(T a, T b, T alpha) { return T.ext_min(a, b); }
 }
 
-[[vk::constant_id(0)]] const int OP_TYPE = 0;
-[[vk::constant_id(1)]] const bool IS_CONTIG = true;
-[[vk::constant_id(2)]] const int NDIM = 0;
-[[vk::constant_id(3)]] const int WG_x = 0;
-
-struct PushConstants
-{
-    uint numel;
-    float alpha;
-    float scalar_value;
-    int use_scalar;
-    IntDivider sizes[4];
-    uint4 strides_a;
-    uint4 strides_b;
-    uint4 strides_out;
-};
-
-[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
-
 void baseBinaryKernel<
     T,
     let VEC_SIZE : int,
@@ -181,7 +85,7 @@ void baseBinaryKernel<
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_a,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_b,
     RWStructuredBuffer<vector<T, VEC_SIZE>> tensor_out,
-    vector<T, VEC_SIZE> alpha, vector<T, VEC_SIZE> scalar_value // pass them in to avoid intermediate int conversions during casting
+    vector<T, VEC_SIZE> alpha, vector<T, VEC_SIZE> scalar_value
 ) 
 {
     uint idx = gi.x;
@@ -189,7 +93,7 @@ void baseBinaryKernel<
 
     vector<T, VEC_SIZE> v1, v2, res;
     v1 = tensor_a[idx];
-    v2 = pcs.use_scalar == 1 ? scalar_value : tensor_b[idx];
+    v2 = USE_SCALAR != 0 ? scalar_value : tensor_b[idx];
 
     res = Op.eval(v1, v2, alpha);
 
@@ -211,7 +115,7 @@ void baseBinaryKernel<
     StructuredBuffer<T> tensor_a,
     StructuredBuffer<T> tensor_b,
     RWStructuredBuffer<T> tensor_out,
-    T alpha, T scalar_value // pass them in to avoid intermediate int conversions during casting
+    T alpha, T scalar_value
 )
 {
     uint idx = gi.x;
@@ -224,8 +128,8 @@ void baseBinaryKernel<
 
     [unroll]
     for (int i = 0; i < ndim; i++) {
-        uint next_linear_idx = fast_div(linear_idx, pcs.sizes[i]);
-        uint coord = linear_idx - (next_linear_idx * pcs.sizes[i].divisor);
+        uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
+        uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
         linear_idx = next_linear_idx;
         idx_a += coord * pcs.strides_a[i];
         idx_b += coord * pcs.strides_b[i];
@@ -234,16 +138,10 @@ void baseBinaryKernel<
 
     T v1, v2;
     v1 = tensor_a[idx_a];
-    v2 = pcs.use_scalar == 1 ? scalar_value : tensor_b[idx_b];
+    v2 = USE_SCALAR != 0 ? scalar_value : tensor_b[idx_b];
 
     tensor_out[idx_out] = Op.eval(v1, v2, alpha);
 }
-
-{% if d1 in ['float64_t', 'float32_t', 'float16_t'] %}
-DEFINE_EXT_POW_ATAN2_FOR_FLOAT_TYPE({{ d1 }})
-{% else %}
-DEFINE_EXT_POW_ATAN2_FOR_INT_TYPE({{ d1 }})
-{% endif %}
 
 [[vk::binding(0, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_contig;
 [[vk::binding(1, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_contig;
@@ -261,11 +159,19 @@ void main(uint3 gi: SV_DispatchThreadID) {
     {% for op in OPERATIONS %}
 
     {% if is_contig %}
-    if (IS_CONTIG && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(gi, tensor_a_contig, tensor_b_contig, tensor_out_contig, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.alpha, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.scalar_value);
+
+    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(
+        gi, tensor_a_contig, tensor_b_contig, tensor_out_contig, pcs.alpha, pcs.scalar_value
+    );
+
     {% else %}
+
     {% for dim in range(MAX_DIMS+1) %}
-    if (!IS_CONTIG && OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseBinaryKernel<{{ d1 }}, {{ dim }}, {{ op['struct'] }}<{{ d1 }}>>(gi, tensor_a_noncontig, tensor_b_noncontig, tensor_out_noncontig, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.alpha, {% if d1[0] == 'u' %} ({{ d1 }})({{ d1[1:] }}) {% else %} ({{ d1 }}) {% endif %}pcs.scalar_value);
+    if (IS_CONTIG == 0 && OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseBinaryKernel<{{ d1 }}, {{ dim }}, {{ op['struct'] }}<{{ d1 }}>>(
+        gi, tensor_a_noncontig, tensor_b_noncontig, tensor_out_noncontig, pcs.alpha, pcs.scalar_value
+    );
     {% endfor %}
+
     {% endif %}
     
     {% endfor %}

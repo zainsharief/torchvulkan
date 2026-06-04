@@ -107,8 +107,8 @@ at::Tensor torchvulkan::dispatch_matmul_shader(
     pcs.push_array(strides_b);
     pcs.push_array(strides_c);
     pcs.push_array(strides_bias);
-    pcs.push(alpha.toFloat());
-    pcs.push(beta.toFloat());
+    pcs.push_scalar(alpha, promoted_type);
+    pcs.push_scalar(beta, promoted_type);
     
     uint32_t groupX = (N + TILE_N - 1) / TILE_N;
     uint32_t groupY = (M + device_tile_m - 1) / device_tile_m;

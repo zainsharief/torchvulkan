@@ -1,0 +1,93 @@
+interface IVulkanArithmetic
+{
+    static This ext_pow(This a, This b);
+    static This ext_atan2(This a, This b);
+    static This ext_max(This a, This b);
+    static This ext_min(This a, This b);
+}
+
+extension {{ d1 }} : IVulkanArithmetic 
+{ 
+    {% if 'float' in d1 %}
+    static {{ d1 }} _safe_pow({{ d1 }} base, {{ d1 }} exp) { 
+        if (sizeof({{ d1 }}) == 8) return {{ d1 }}(pow(float(base), float(exp))); 
+        return pow(base, exp); 
+    } 
+    
+    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b) 
+    { 
+        if (b == {{ d1 }}(0.0)) return {{ d1 }}(1.0); 
+        else if (b == {{ d1 }}(1.0)) return a; 
+        else if (b == {{ d1 }}(2.0)) return a * a; 
+        else if (a == {{ d1 }}(1.0)) return {{ d1 }}(1.0); 
+        else if (isnan(a) || isnan(b)) return {{ d1 }}(0.0) / {{ d1 }}(0.0); 
+        else if (a == {{ d1 }}(0.0)) { 
+            if (b < {{ d1 }}(0.0)) return {{ d1 }}(1.0) / {{ d1 }}(0.0); 
+            return {{ d1 }}(0.0); 
+        } 
+        else if (a > {{ d1 }}(0.0)) { return _safe_pow(a, b); } 
+        else if (isinf(b)) { return _safe_pow(abs(a), b); } 
+        else if (frac(b) != {{ d1 }}(0.0)) { return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ } 
+        {{ d1 }} res = _safe_pow(abs(a), b); 
+        if (fmod(abs(b), {{ d1 }}(2.0)) == {{ d1 }}(1.0)) { return -res; } 
+        return res; 
+    } 
+    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return (a == 0 && b == 0) ? 0 : atan2(a, b); } 
+    {% else %}
+    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b) 
+    { 
+        int32_t e = int32_t(b); 
+        if (e < 0) { 
+            if (a == {{ d1 }}(1)) return {{ d1 }}(1); 
+            if (int(a) == -1) return (e % 2 != 0) ? {{ d1 }}(-1) : {{ d1 }}(1); 
+            return {{ d1 }}(0); 
+        } 
+        {{ d1 }} res = {{ d1 }}(1); 
+        {{ d1 }} a_val = a; 
+        while (e > 0) { 
+            if ((e & 1) != 0) res *= a_val; 
+            a_val *= a_val; 
+            e >>= 1; 
+        } 
+        return res; 
+    } 
+    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return {{ d1 }}(0); } 
+    {% endif %}
+
+    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { return max(a, b); } 
+    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { return min(a, b); } 
+}
+
+extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
+{
+    static vector<T, N> ext_pow(vector<T, N> a, vector<T, N> b)
+    {
+        vector<T, N> res;
+        [unroll]
+        for (int i = 0; i < N; i++) {
+            res[i] = T.ext_pow(a[i], b[i]);
+        }
+        return res;
+    }
+    static vector<T, N> ext_atan2(vector<T, N> a, vector<T, N> b)
+    {
+        vector<T, N> res;
+        [unroll]
+        for (int i = 0; i < N; i++) {
+            res[i] = T.ext_atan2(a[i], b[i]);
+        }
+        return res;
+    }
+    static vector<T, N> ext_max(vector<T, N> a, vector<T, N> b)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_max(a[i], b[i]);
+        return res;
+    }
+    static vector<T, N> ext_min(vector<T, N> a, vector<T, N> b)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
+        return res;
+    }
+}

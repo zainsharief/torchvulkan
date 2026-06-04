@@ -40,23 +40,23 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
     uint32_t key = (workgroupSizeX << 8) | (contiguous << 4) | out_dims;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    IntDivider sizes[MAX_DIMS];
+    IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};
     
+    int64_t el_size = iter.element_size(0);
+    at::IntArrayRef iter_shape = iter.shape();
+    at::IntArrayRef iter_strides_in = iter.strides(0);
+
     if (!contiguous) 
     {
-        int64_t el_size = iter.element_size(0);
-        at::IntArrayRef iter_shape = iter.shape();
-        at::IntArrayRef iter_strides_in = iter.strides(0);
-
         for (int i = 0; i < out_dims; i++) {
-            sizes[i] = IntDivider(iter_shape[i]);
+            sizes.set(i, iter_shape[i]);
             strides_in[i] = iter_strides_in[i] / el_size;
         }
     }
 
     PushConstantBuilder pcs{};
-    pcs.push_array(sizes)
+    pcs.push(sizes)
         .push_array(strides_in)
         .push(numel)
         .push((uint32_t)0) // padding
