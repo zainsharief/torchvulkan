@@ -1,102 +1,24 @@
 #include "helpers/int_divider.slang.j2"
+#include "helpers/vulkan_arithmetic.slang.j2"
 
-interface IVulkanArithmetic
+[[vk::constant_id(0)]] const int OP_TYPE = 0;
+[[vk::constant_id(1)]] const bool IS_CONTIG = true;
+[[vk::constant_id(2)]] const int NDIM = 0;
+[[vk::constant_id(3)]] const int WG_x = 0;
+
+struct PushConstants
 {
-    static This ext_pow(This a, This b);
-    static This ext_atan2(This a, This b);
-    static This ext_max(This a, This b);
-    static This ext_min(This a, This b);
-}
+    uint numel;
+    float alpha;
+    float scalar_value;
+    int use_scalar;
+    IntDivider sizes[4];
+    uint4 strides_a;
+    uint4 strides_b;
+    uint4 strides_out;
+};
 
-#define DEFINE_EXT_POW_ATAN2_FOR_FLOAT_TYPE(type) \
-extension type : IVulkanArithmetic \
-{ \
-    static type _safe_pow(type base, type exp) { \
-        if (sizeof(type) == 8) return type(pow(float(base), float(exp))); \
-        return pow(base, exp); \
-    } \
-    \
-    static type ext_pow(type a, type b) \
-    { \
-        if (b == type(0.0)) return type(1.0); \
-        else if (b == type(1.0)) return a; \
-        else if (b == type(2.0)) return a * a; \
-        else if (a == type(1.0)) return type(1.0); \
-        else if (isnan(a) || isnan(b)) return type(0.0) / type(0.0); \
-        else if (a == type(0.0)) { \
-            if (b < type(0.0)) return type(1.0) / type(0.0); \
-            return type(0.0); \
-        } \
-        else if (a > type(0.0)) { return _safe_pow(a, b); } \
-        else if (isinf(b)) { return _safe_pow(abs(a), b); } \
-        else if (frac(b) != type(0.0)) { return type(0.0) / type(0.0); /* NaN */ } \
-        type res = _safe_pow(abs(a), b); \
-        if (fmod(abs(b), type(2.0)) == type(1.0)) { return -res; } \
-        return res; \
-    } \
-    static type ext_atan2(type a, type b) { return (a == 0 && b == 0) ? 0 : atan2(a, b); } \
-    static type ext_max(type a, type b) { return max(a, b); } \
-    static type ext_min(type a, type b) { return min(a, b); } \
-}
-
-#define DEFINE_EXT_POW_ATAN2_FOR_INT_TYPE(type) \
-extension type : IVulkanArithmetic \
-{ \
-    static type ext_pow(type a, type b) \
-    { \
-        int32_t e = int32_t(b); \
-        if (e < 0) { \
-            if (a == type(1)) return type(1); \
-            if (int(a) == -1) return (e % 2 != 0) ? type(-1) : type(1); \
-            return type(0); \
-        } \
-        type res = type(1); \
-        type a_val = a; \
-        while (e > 0) { \
-            if ((e & 1) != 0) res *= a_val; \
-            a_val *= a_val; \
-            e >>= 1; \
-        } \
-        return res; \
-    } \
-    static type ext_atan2(type a, type b) { return type(0); } \
-    static type ext_max(type a, type b) { return max(a, b); } \
-    static type ext_min(type a, type b) { return min(a, b); } \
-}
-
-extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
-{
-    static vector<T, N> ext_pow(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_pow(a[i], b[i]);
-        }
-        return res;
-    }
-    static vector<T, N> ext_atan2(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_atan2(a[i], b[i]);
-        }
-        return res;
-    }
-    static vector<T, N> ext_max(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_max(a[i], b[i]);
-        return res;
-    }
-    static vector<T, N> ext_min(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
-        return res;
-    }
-}
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
 interface IBinaryOp<T>
 {
@@ -152,25 +74,6 @@ struct MinOp<T : IVulkanArithmetic> : IBinaryOp<T>
 {
     static T eval(T a, T b, T alpha) { return T.ext_min(a, b); }
 }
-
-[[vk::constant_id(0)]] const int OP_TYPE = 0;
-[[vk::constant_id(1)]] const bool IS_CONTIG = true;
-[[vk::constant_id(2)]] const int NDIM = 0;
-[[vk::constant_id(3)]] const int WG_x = 0;
-
-struct PushConstants
-{
-    uint numel;
-    float alpha;
-    float scalar_value;
-    int use_scalar;
-    IntDivider sizes[4];
-    uint4 strides_a;
-    uint4 strides_b;
-    uint4 strides_out;
-};
-
-[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
 void baseBinaryKernel<
     T,
@@ -238,12 +141,6 @@ void baseBinaryKernel<
 
     tensor_out[idx_out] = Op.eval(v1, v2, alpha);
 }
-
-{% if d1 in ['float64_t', 'float32_t', 'float16_t'] %}
-DEFINE_EXT_POW_ATAN2_FOR_FLOAT_TYPE({{ d1 }})
-{% else %}
-DEFINE_EXT_POW_ATAN2_FOR_INT_TYPE({{ d1 }})
-{% endif %}
 
 [[vk::binding(0, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_contig;
 [[vk::binding(1, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_contig;
