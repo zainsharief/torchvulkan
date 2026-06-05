@@ -133,7 +133,19 @@ void VulkanContext::createDeviceContexts()
         DeviceContext* context = new DeviceContext();
         context->physicalDevice = physicalDevice;
         context->computeQueueFamily = bestQueueFamily;
-        vkGetPhysicalDeviceProperties(physicalDevice, &context->properties);
+
+        VkPhysicalDeviceSubgroupProperties subgroupProps{};
+        subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+        subgroupProps.pNext = nullptr;
+
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &subgroupProps;
+
+        vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+
+        context->properties = props2.properties;        
+        context->subgroup_size = subgroupProps.subgroupSize;
 
         VkPhysicalDeviceMemoryProperties memProperties;
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
@@ -155,12 +167,8 @@ void VulkanContext::createDeviceWithExtensions()
     
     for (DeviceContext* device : devices) 
     { 
-        /*
-        soon we want:
-        - VK_KHR_cooperative_matrix
-        - VK_KHR_buffer_device_address
-        - VK_EXT_subgroup_size_control
-        */
+
+        std::vector<const char*> deviceExtensions;
 
         uint32_t extCount = 0;
         vkEnumerateDeviceExtensionProperties(device->physicalDevice, nullptr, &extCount, nullptr);
@@ -173,7 +181,10 @@ void VulkanContext::createDeviceWithExtensions()
         };
         
         // chain of feature structs to query what the device supports
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT supportedSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR supportedCoopMat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT supportedAtomicFloat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+        supportedAtomicFloat.pNext = &supportedCoopMat;
         VkPhysicalDeviceShaderIntegerDotProductFeatures supportedDotProduct{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
         supportedDotProduct.pNext = &supportedAtomicFloat;
         VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -193,6 +204,8 @@ void VulkanContext::createDeviceWithExtensions()
         }
 
         // chain of feature structs to enable the features we want (only the ones supported by the device)
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDeviceShaderAtomicFloatFeaturesEXT enableAtomicFloat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
         enableAtomicFloat.shaderBufferFloat32Atomics = supportedAtomicFloat.shaderBufferFloat32Atomics;
         enableAtomicFloat.shaderBufferFloat32AtomicAdd = supportedAtomicFloat.shaderBufferFloat32AtomicAdd;
@@ -223,6 +236,23 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
 
+        if (hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix) 
+        {
+            device->support_coopmat = true;
+            enableCoopMatrices.cooperativeMatrix = VK_TRUE;
+            enableAtomicFloat.pNext = &enableCoopMatrices;
+            deviceExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+            
+            if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl) 
+            {
+                device->support_subgroup_control = true;
+                enableSubgroupControl.subgroupSizeControl = VK_TRUE;
+                enableSubgroupControl.computeFullSubgroups = supportedSubgroupControl.computeFullSubgroups;
+                enableCoopMatrices.pNext = &enableSubgroupControl;
+                deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+            }
+        }
+
         // creating the device 
         VkDeviceQueueCreateInfo queueInfo{};
         queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -235,7 +265,6 @@ void VulkanContext::createDeviceWithExtensions()
         features2.features = enable10;
         features2.pNext = &enable11;
 
-        std::vector<const char*> deviceExtensions;
         deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
