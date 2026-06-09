@@ -242,7 +242,20 @@ void VulkanContext::createDeviceWithExtensions()
             enableCoopMatrices.cooperativeMatrix = VK_TRUE;
             enableAtomicFloat.pNext = &enableCoopMatrices;
             deviceExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
-            
+
+            uint32_t propertyCount = 0;
+            vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(device->physicalDevice, &propertyCount, nullptr);
+            std::vector<VkCooperativeMatrixPropertiesKHR> coopMatProperties;
+            coopMatProperties.resize(propertyCount);
+            vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(device->physicalDevice, &propertyCount, coopMatProperties.data());
+
+            for (int i = 0; i < propertyCount; ++i)
+            {
+                VkCooperativeMatrixPropertiesKHR property = coopMatProperties[i];
+                CoopMatConfig config{property.MSize, property.NSize, property.KSize};
+                device->cache.addCoopMatConfig(property.AType, property.BType, property.CType, property.ResultType, config);
+            }
+
             if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl) 
             {
                 device->support_subgroup_control = true;

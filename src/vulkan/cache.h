@@ -12,6 +12,10 @@
 #define VK_CHECK(x) \
     if (x != VK_SUCCESS) TORCH_CHECK(false, "torchvulkan [ERROR]: Vulkan error in Cache");
 
+struct CoopMatConfig {
+    uint32_t m, n, k;
+};
+
 class VulkanCache {
 public:
     void softClearCache();
@@ -28,6 +32,9 @@ public:
     void deleteBuffer(VulkanBuffer* buffer, MemoryUsage usage);
 
     ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);
+
+    void addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR bType, VkComponentTypeKHR cType, VkComponentTypeKHR resultType, CoopMatConfig config);
+    std::vector<CoopMatConfig> getCoopMatConfig(c10::ScalarType aType, c10::ScalarType bType, c10::ScalarType cType, c10::ScalarType resultType) const;
 
     void setDevice(VkDevice device) { device_ = device; }
     void setDeviceTable(VolkDeviceTable& table) { device_table = table; }
@@ -55,4 +62,5 @@ private:
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
     std::unordered_map<uint32_t, VkDescriptorSetLayout> descriptorSetLayoutCache;
     std::unordered_map<uint32_t, VkShaderModule> shaderModuleCache;
+    std::unordered_map<uint32_t, std::vector<CoopMatConfig>> coopMatCache;
 };

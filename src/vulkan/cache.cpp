@@ -266,6 +266,55 @@ ShaderSubmitInfo* VulkanCache::allocatePipeline(const torchvulkan::Shader shader
     return info;
 }
 
+inline c10::ScalarType component_to_torch_dtype(VkComponentTypeKHR dtype) 
+{
+    switch(dtype) {
+        case VK_COMPONENT_TYPE_FLOAT16_KHR: return at::ScalarType::Half;
+        case VK_COMPONENT_TYPE_FLOAT32_KHR: return at::ScalarType::Float;
+        case VK_COMPONENT_TYPE_FLOAT64_KHR: return at::ScalarType::Double;
+        case VK_COMPONENT_TYPE_SINT8_KHR: return at::ScalarType::Char;
+        case VK_COMPONENT_TYPE_SINT16_KHR: return at::ScalarType::Short;
+        case VK_COMPONENT_TYPE_SINT32_KHR: return at::ScalarType::Int;
+        case VK_COMPONENT_TYPE_SINT64_KHR: return at::ScalarType::Long;
+        case VK_COMPONENT_TYPE_UINT8_KHR: return at::ScalarType::Byte;
+        case VK_COMPONENT_TYPE_UINT16_KHR: return at::ScalarType::UInt16;
+        case VK_COMPONENT_TYPE_UINT32_KHR: return at::ScalarType::UInt32;
+        case VK_COMPONENT_TYPE_UINT64_KHR: return at::ScalarType::UInt64;
+        default: return c10::ScalarType::Undefined;
+    }
+}
+
+void VulkanCache::addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR bType, VkComponentTypeKHR cType, VkComponentTypeKHR resultType, CoopMatConfig config)
+{
+    auto comp_to_scalar = [](VkComponentTypeKHR dtype) -> uint8_t {
+        switch(dtype) {
+            case VK_COMPONENT_TYPE_FLOAT16_KHR: return static_cast<uint8_t>(at::ScalarType::Half);
+            case VK_COMPONENT_TYPE_FLOAT32_KHR: return static_cast<uint8_t>(at::ScalarType::Float);
+            case VK_COMPONENT_TYPE_FLOAT64_KHR: return static_cast<uint8_t>(at::ScalarType::Double);
+            case VK_COMPONENT_TYPE_SINT8_KHR:   return static_cast<uint8_t>(at::ScalarType::Char);
+            case VK_COMPONENT_TYPE_SINT16_KHR:  return static_cast<uint8_t>(at::ScalarType::Short);
+            case VK_COMPONENT_TYPE_SINT32_KHR:  return static_cast<uint8_t>(at::ScalarType::Int);
+            case VK_COMPONENT_TYPE_SINT64_KHR:  return static_cast<uint8_t>(at::ScalarType::Long);
+            case VK_COMPONENT_TYPE_UINT8_KHR:   return static_cast<uint8_t>(at::ScalarType::Byte);
+            case VK_COMPONENT_TYPE_UINT16_KHR:  return static_cast<uint8_t>(at::ScalarType::UInt16);
+            case VK_COMPONENT_TYPE_UINT32_KHR:  return static_cast<uint8_t>(at::ScalarType::UInt32);
+            case VK_COMPONENT_TYPE_UINT64_KHR:  return static_cast<uint8_t>(at::ScalarType::UInt64);
+            default:                            return static_cast<uint8_t>(c10::ScalarType::Undefined);
+        }
+    };
+    
+    uint32_t key = (comp_to_scalar(aType) << 24) | (comp_to_scalar(bType) << 16) | (comp_to_scalar(cType) << 8) | comp_to_scalar(resultType);
+    coopMatCache[key].push_back(config);
+}
+
+std::vector<CoopMatConfig> VulkanCache::getCoopMatConfig(c10::ScalarType aType, c10::ScalarType bType, c10::ScalarType cType, c10::ScalarType resultType) const
+{
+    uint32_t key = (static_cast<uint8_t>(aType) << 24) | (static_cast<uint8_t>(bType) << 16) | (static_cast<uint8_t>(cType) << 8) | static_cast<uint8_t>(resultType);
+    auto it = coopMatCache.find(key);
+    if (it != coopMatCache.end()) return it->second;
+    else return {};
+}
+
 void VulkanCache::softClearCache()
 {
     if (device_ == VK_NULL_HANDLE) return;
