@@ -281,6 +281,26 @@ const at::Tensor& torchvulkan::resize_vulkan(
     return self;
 }
 
+at::Tensor torchvulkan::view_vulkan(
+    const at::Tensor& self,
+    c10::SymIntArrayRef size)
+{
+    std::vector<int64_t> concrete_sizes;
+    concrete_sizes.reserve(size.size());
+    for (const auto& s : size) {
+        concrete_sizes.push_back(s.guard_int(__FILE__, __LINE__));
+    }
+    
+    auto stride = at::detail::computeStride(self.sizes(), self.strides(), concrete_sizes);
+    TORCH_CHECK(stride.has_value(), "torchvulkan [ERROR]: View size is not compatible with input tensor's size and stride.");
+    
+    at::Tensor result = self.alias();
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(concrete_sizes, stride.value());
+    result.unsafeGetTensorImpl()->set_storage_offset(self.storage_offset());
+    
+    return result;
+}
+
 at::Tensor torchvulkan::contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format) 
 {
     if (self.is_contiguous(memory_format)) return self;
