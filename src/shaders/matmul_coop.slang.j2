@@ -1,0 +1,150 @@
+{% include "helpers/int_divider.slang.j2" %}
+
+{% set WARPS_M = WARPS_M | default(2) %}
+{% set WARPS_N = WARPS_N | default(4) %}
+{% set WARP_FRAGS_M = WARP_FRAGS_M | default(4) %}
+{% set WARP_FRAGS_N = WARP_FRAGS_N | default(2) %}
+
+#define MMA_M {{ BLOCK_SIZE }}
+#define MMA_N {{ BLOCK_SIZE }}
+#define MMA_K {{ BLOCK_SIZE }}
+
+#define WARPS_M       {{ WARPS_M }}
+#define WARPS_N       {{ WARPS_N }}
+#define WARP_FRAGS_M  {{ WARP_FRAGS_M }}
+#define WARP_FRAGS_N  {{ WARP_FRAGS_N }}
+
+#define NUM_WARPS (WARPS_M * WARPS_N)
+#define BK        MMA_K
+
+#define TILE_M (WARPS_M * WARP_FRAGS_M * MMA_M)
+#define TILE_N (WARPS_N * WARP_FRAGS_N * MMA_N)
+
+[[vk::constant_id(0)]] const uint M_DIM = 0;
+[[vk::constant_id(1)]] const uint N_DIM = 0;
+[[vk::constant_id(2)]] const uint K_DIM = 0;
+[[vk::constant_id(3)]] const uint SUBGROUP_SIZE = 0;
+[[vk::constant_id(4)]] const uint WORKGROUP_SIZE = 0;
+
+struct PushConstants {
+    uint4 strides_a;
+    uint4 strides_b;
+    uint4 strides_out;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+groupshared {{ d1 }} smemA[TILE_M * (BK + 1)];
+groupshared {{ d1 }} smemB[BK * (TILE_N + 1)];
+groupshared {{ d1 }} smemZero[MMA_M * MMA_N];
+
+typealias MatA = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_M, MMA_K, linalg::CoopMatMatrixUse.MatrixA>;
+typealias MatB = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_K, MMA_N, linalg::CoopMatMatrixUse.MatrixB>;
+typealias MatC = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_M, MMA_N, linalg::CoopMatMatrixUse.MatrixAccumulator>;
+
+void matmulKernel(
+    uint3 wg: SV_GroupID,
+    uint  ti: SV_GroupIndex,
+    StructuredBuffer<{{ d1 }}> tensor_a,
+    StructuredBuffer<{{ d1 }}> tensor_b,
+    RWStructuredBuffer<{{ d1 }}> tensor_out
+)
+{
+    uint batch_offset_a = wg.z * pcs.strides_a[0];
+    uint batch_offset_b = wg.z * pcs.strides_b[0];
+    uint batch_offset_out = wg.z * pcs.strides_out[0];
+
+    uint tile_m = wg.y * TILE_M;
+    uint tile_n = wg.x * TILE_N;
+
+    uint warp_id  = ti / SUBGROUP_SIZE;
+    uint warp_row = warp_id >> {{ log2(WARPS_N) }};
+    uint warp_col = warp_id & {{ WARPS_N - 1 }};
+    uint warp_row_base = warp_row * WARP_FRAGS_M * MMA_M;
+    uint warp_col_base = warp_col * WARP_FRAGS_N * MMA_N;
+
+    uint total_threads = NUM_WARPS * SUBGROUP_SIZE;
+
+    // the fill operation is currently unsupported on spirv-cross, so we use this
+    [unroll] for (uint i = ti; i < (MMA_M * MMA_N); i += total_threads) {
+        smemZero[i] = ({{ d1 }})0;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    MatC acc[WARP_FRAGS_M][WARP_FRAGS_N];
+    [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+            acc[mi][nj] = acc[mi][nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemZero, 0, MMA_N);
+
+    for (uint k = 0; k < K_DIM; k += BK)
+    {
+        uint total_vec_threads_a = (TILE_M * BK) / {{ 128 // b1 }};
+        for (uint i = ti; i < total_vec_threads_a; i += total_threads) 
+        {
+            uint flat_smem_idx = i * {{ 128 // b1 }};            
+            uint r = flat_smem_idx >> {{ log2(BLOCK_SIZE) }};
+            uint c = flat_smem_idx & {{ BLOCK_SIZE - 1 }};
+            uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (k + c);
+            
+            [unroll] for (uint v = 0; v < {{ 128 // b1 }}; ++v) {
+                smemA[flat_smem_idx + v] = tensor_a[global_idx + v];
+            }
+        }
+
+        uint total_vec_threads_b = (BK * TILE_N) / {{ 128 // b1 }};
+        for (uint i = ti; i < total_vec_threads_b; i += total_threads) 
+        {
+            uint flat_smem_idx = i * {{ 128 // b1 }};            
+            uint r = flat_smem_idx >> {{ log2(WARPS_N * WARP_FRAGS_N * BLOCK_SIZE) }};
+            uint c = flat_smem_idx & {{ (WARPS_N * WARP_FRAGS_N * BLOCK_SIZE) - 1 }};
+            uint global_idx = batch_offset_b + (k + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2];
+
+            [unroll] for (uint v = 0; v < {{ 128 // b1 }}; ++v) {
+                smemB[flat_smem_idx + v] = tensor_b[global_idx + v];
+            }
+        }
+
+        GroupMemoryBarrierWithGroupSync();
+
+        MatA matA[WARP_FRAGS_M];
+        [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi) {
+            uint off = (warp_row_base + mi * MMA_M) * BK;
+            matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemA, off, BK);
+        }
+
+        MatB matB[WARP_FRAGS_N];
+        [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj) {
+            uint off = (warp_col_base + nj * MMA_N);
+            matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemB, off, TILE_N);
+        }
+
+        [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+            [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+                acc[mi][nj] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[mi][nj]);
+
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj) {
+            uint row = tile_m + warp_row_base + mi * MMA_M;
+            uint col = tile_n + warp_col_base + nj * MMA_N;
+            uint out_idx = batch_offset_out + row * pcs.strides_out[1] + col * pcs.strides_out[2];
+            acc[mi][nj].Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out[1]);
+        }
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
+[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
+[[vk::binding(2, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
+
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void main(
+    uint3 wg: SV_GroupID,
+    uint  ti: SV_GroupIndex
+)
+{
+    matmulKernel(wg, ti, tensor_a, tensor_b, tensor_out);
+}

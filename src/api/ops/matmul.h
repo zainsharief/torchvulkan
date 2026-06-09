@@ -12,6 +12,24 @@ namespace torchvulkan {
 at::Tensor dispatch_matmul_shader(
     const at::Tensor& self, 
     const at::Tensor& other,
+    const at::Tensor& bias,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    std::function<at::Tensor()> cpu_fallback
+);
+
+at::Tensor dispatch_matmul_coop_shader(
+    const at::Tensor& self, 
+    const at::Tensor& other,
+    const at::Tensor& bias_,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    std::function<at::Tensor()> cpu_fallback
+);
+
+at::Tensor dispatch_matmul_simd_shader(
+    const at::Tensor& self, 
+    const at::Tensor& other,
     const at::Tensor& bias_,
     const at::Scalar& alpha,
     const at::Scalar& beta,
