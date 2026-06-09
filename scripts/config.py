@@ -1,31 +1,31 @@
 SHADER_DIR = 'src/shaders'
 
 UNSIGNED_INTEGERS = [
-    [{'name' : 'u64', 'dtype' : 'uint64_t', 'bytes' : 8}],
-    [{'name' : 'u32', 'dtype' : 'uint32_t', 'bytes' : 4}],
-    [{'name' : 'u16', 'dtype' : 'uint16_t', 'bytes' : 2}],
-    [{'name' : 'u8',  'dtype' : 'uint8_t',  'bytes' : 1}]
+    [{'name' : 'u64', 'dtype' : 'uint64_t', 'bytes' : 8, 'kwargs' : {}}],
+    [{'name' : 'u32', 'dtype' : 'uint32_t', 'bytes' : 4, 'kwargs' : {}}],
+    [{'name' : 'u16', 'dtype' : 'uint16_t', 'bytes' : 2, 'kwargs' : {}}],
+    [{'name' : 'u8',  'dtype' : 'uint8_t',  'bytes' : 1, 'kwargs' : {}}]
 ]
 
 SIGNED_INTEGERS = [
-    [{'name' : 'i64', 'dtype' : 'int64_t', 'bytes' : 8}],
-    [{'name' : 'i32', 'dtype' : 'int32_t', 'bytes' : 4}],
-    [{'name' : 'i16', 'dtype' : 'int16_t', 'bytes' : 2}],
-    [{'name' : 'i8',  'dtype' : 'int8_t',  'bytes' : 1}]
+    [{'name' : 'i64', 'dtype' : 'int64_t', 'bytes' : 8, 'kwargs' : {}}],
+    [{'name' : 'i32', 'dtype' : 'int32_t', 'bytes' : 4, 'kwargs' : {}}],
+    [{'name' : 'i16', 'dtype' : 'int16_t', 'bytes' : 2, 'kwargs' : {}}],
+    [{'name' : 'i8',  'dtype' : 'int8_t',  'bytes' : 1, 'kwargs' : {}}]
 ]
 
 FLOATS = [
-    [{'name' : 'f64', 'dtype' : 'float64_t', 'bytes' : 8}],
-    [{'name' : 'f32', 'dtype' : 'float32_t', 'bytes' : 4}],
-    [{'name' : 'f16', 'dtype' : 'float16_t', 'bytes' : 2}]
+    [{'name' : 'f64', 'dtype' : 'float64_t', 'bytes' : 8, 'kwargs' : {}}],
+    [{'name' : 'f32', 'dtype' : 'float32_t', 'bytes' : 4, 'kwargs' : {}}],
+    [{'name' : 'f16', 'dtype' : 'float16_t', 'bytes' : 2, 'kwargs' : {}}]
 ]
 
 BYTES = [
-    [{'name' : '16', 'dtype' : 'uint4',    'bytes' : 16}],
-    [{'name' : '8',  'dtype' : 'uint64_t', 'bytes' : 8}],
-    [{'name' : '4',  'dtype' : 'uint32_t', 'bytes' : 4}],
-    [{'name' : '2',  'dtype' : 'uint16_t', 'bytes' : 2}],
-    [{'name' : '1',  'dtype' : 'uint8_t',  'bytes' : 1}]
+    [{'name' : '16', 'dtype' : 'uint4',    'bytes' : 16, 'kwargs' : {}}],
+    [{'name' : '8',  'dtype' : 'uint64_t', 'bytes' : 8,  'kwargs' : {}}],
+    [{'name' : '4',  'dtype' : 'uint32_t', 'bytes' : 4,  'kwargs' : {}}],
+    [{'name' : '2',  'dtype' : 'uint16_t', 'bytes' : 2,  'kwargs' : {}}],
+    [{'name' : '1',  'dtype' : 'uint8_t',  'bytes' : 1,  'kwargs' : {}}]
 ]
 
 INTEGERS = UNSIGNED_INTEGERS + SIGNED_INTEGERS
@@ -65,9 +65,14 @@ SHADERS = [
         'kwargs' : {}
     },
     {
-        'name' : 'matmul.slang.j2',
+        'name' : 'matmul_simd.slang.j2',
         'dtypes' : DTYPES,
         'kwargs' : {}
     },
+    {
+        'name' : 'matmul_coop.slang.j2',
+        'dtypes' : [[{**t[0], 'kwargs': {**t[0]['kwargs'], 'BLOCK_SIZE': s}}] for s in [8, 16, 32, 64] for t in DTYPES],
+        'kwargs' : {}
+    }
 ]
 
