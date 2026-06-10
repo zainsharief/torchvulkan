@@ -152,7 +152,7 @@ void matmulKernel(
             if (g_row < pcs.M && g_col < pcs.N) {
                 vector<{{ d1 }}, {{ v1 }}> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec] * pcs.alpha;
                 
-                if (HAS_BIAS) {
+                if (HAS_BIAS == 1) {
                     uint bias_flat_idx = (batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col));
                     result_vec += tensor_bias[bias_flat_idx / {{ v1 }}] * pcs.beta;
                 }
@@ -281,7 +281,7 @@ void matmulKernel(
                     
                     {{ d1 }} final_val = result_vec[v];
                     
-                    if (HAS_BIAS) {
+                    if (HAS_BIAS == 1) {
                         uint bias_flat_idx = batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col);
                         final_val += tensor_bias[bias_flat_idx] * pcs.beta;
                     }
@@ -312,6 +312,6 @@ void main(
     uint3 wg: SV_GroupID 
 ) 
 {
-    if (IS_ALIGNED) matmulKernel(gi, li, wg, tensor_a, tensor_b, tensor_out, tensor_bias);
+    if (IS_ALIGNED == 1) matmulKernel(gi, li, wg, tensor_a, tensor_b, tensor_out, tensor_bias);
     else matmulKernel(gi, li, wg, tensor_a_scalar, tensor_b_scalar, tensor_out_scalar, tensor_bias_scalar);
 }
