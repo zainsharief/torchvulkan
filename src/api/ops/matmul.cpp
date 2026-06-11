@@ -1,11 +1,6 @@
 #include <torch/extension.h>
 #include "api/ops/matmul.h"
 
-// must match the tile sizes defined in the shader - if you change one, change the other!
-static const uint32_t TILE_M = 128;
-static const uint32_t TILE_N = 128;
-static const uint32_t TILE_K = 16;
-
 at::Tensor torchvulkan::dispatch_matmul_shader(
     const at::Tensor& self, 
     const at::Tensor& other,
@@ -18,32 +13,6 @@ at::Tensor torchvulkan::dispatch_matmul_shader(
 
     if (device->support_coopmat) return dispatch_matmul_coop_shader(self, other, bias, alpha, beta, cpu_fallback);
     return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, cpu_fallback);
-}
-
-uint32_t best_block_size(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes)
-{
-    static constexpr std::array<uint32_t, 4> pref_1_byte = {64, 32, 16, 8}; // e.g., i8, u8
-    static constexpr std::array<uint32_t, 4> pref_2_byte = {32, 64, 16, 8}; // e.g., f16
-    static constexpr std::array<uint32_t, 4> pref_4_byte = {16, 32, 8, 64}; // e.g., f32
-    static constexpr std::array<uint32_t, 4> pref_8_byte = {8, 16, 32, 64}; // e.g., f64
-
-    const std::array<uint32_t, 4>* preferences = nullptr;
-
-    switch (c10::elementSize(dtype))
-    {
-        case 1: preferences = &pref_1_byte; break;
-        case 2: preferences = &pref_2_byte; break;
-        case 4: preferences = &pref_4_byte; break;
-        case 8: preferences = &pref_8_byte; break;
-        default: return 0;
-    }
-
-    for (uint32_t pref : *preferences)
-    {
-        if (std::find(available_sizes.begin(), available_sizes.end(), pref) != available_sizes.end()) return pref;
-    }
-
-    return 0; 
 }
 
 at::Tensor torchvulkan::dispatch_matmul_coop_shader(
@@ -71,14 +40,14 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
 
     for (CoopMatConfig c : config) 
     {
-        if (c.m != c.n || c.m != c.k) continue; // right now, we do not support differing block sizes
+        if (c.m != c.n || c.m != c.k) continue; // we do not support differing block_m and block_n sizes
         available_block_sizes.push_back(c.m);
     }
 
-    uint32_t block_size = best_block_size(promoted_type, available_block_sizes);
-    if (block_size == 0) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+    CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes);
+    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
 
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, block_size);
+    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
 
     bool self_unsqueezed = false;
     bool other_unsqueezed = false;
@@ -122,23 +91,25 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     PushConstantBuilder pcs{};
     pcs.push_array(strides_a)
        .push_array(strides_b)
-       .push_array(strides_out);
-
-    const uint32_t WORKGROUP_SIZE = 2 * 4 * device->subgroup_size;
-    SpecializationBuilder spd{};
-    spd.push(M)
+       .push_array(strides_out)
+       .push(M)
        .push(N)
-       .push(K)
-       .push(device->subgroup_size)
-       .push(WORKGROUP_SIZE);
-    uint32_t key = (M << 16) | (N << 12) | (K << 8) | (device->subgroup_size << 4) | WORKGROUP_SIZE;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+       .push(K);
 
+    SpecializationBuilder spd{};
+    spd.push(params->workgroup_size)
+       .push(params->subgroup_size)
+       .push(params->warps_m)
+       .push(params->warps_n)
+       .push(params->warp_frags_m)
+       .push(params->warp_frags_n)
+       .push(params->bk);
+    uint32_t key = (params->bk << 35) | (params->warp_frags_n << 31) | (params->warp_frags_m << 27) | (params->warps_n << 23) | (params->warps_m << 19) | (params->subgroup_size << 12) | (params->workgroup_size);
+    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
     VulkanShader shader(shader_id, specialization, device);
 
-    const uint32_t tile_m = block_size * 2 * 4;  // WARPS_M * WARP_FRAGS_M = 8  -> 128
-    const uint32_t tile_n = block_size * 4 * 2;  // WARPS_N * WARP_FRAGS_N = 8  -> 128
-
+    const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
+    const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
     uint32_t groupX = (N + tile_n - 1) / tile_n;
     uint32_t groupY = (M + tile_m - 1) / tile_m;
     uint32_t groupZ = B;
@@ -169,6 +140,11 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     const at::Scalar& beta,
     std::function<at::Tensor()> cpu_fallback)
 {
+    // must match the tile sizes defined in the shader - if you change one, change the other!
+    static const uint32_t TILE_M = 128;
+    static const uint32_t TILE_N = 128;
+    static const uint32_t TILE_K = 16;
+
     at::Tensor self = self_;
     at::Tensor other = other_;
     at::Tensor bias = bias_;

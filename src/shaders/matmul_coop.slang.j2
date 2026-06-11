@@ -1,51 +1,41 @@
 {% include "helpers/int_divider.slang.j2" %}
 
-{% set WARPS_M = WARPS_M | default(2) %}
-{% set WARPS_N = WARPS_N | default(4) %}
-{% set WARP_FRAGS_M = WARP_FRAGS_M | default(4) %}
-{% set WARP_FRAGS_N = WARP_FRAGS_N | default(2) %}
-
-#define MMA_M {{ BLOCK_SIZE }}
-#define MMA_N {{ BLOCK_SIZE }}
-#define MMA_K {{ BLOCK_SIZE }}
-
-#define WARPS_M       {{ WARPS_M }}
-#define WARPS_N       {{ WARPS_N }}
-#define WARP_FRAGS_M  {{ WARP_FRAGS_M }}
-#define WARP_FRAGS_N  {{ WARP_FRAGS_N }}
-
-#define NUM_WARPS (WARPS_M * WARPS_N)
-#define BK         32
-
-#define TILE_M (WARPS_M * WARP_FRAGS_M * MMA_M)
-#define TILE_N (WARPS_N * WARP_FRAGS_N * MMA_N)
+[[vk::constant_id(0)]] const uint WORKGROUP_SIZE = 128;
+[[vk::constant_id(1)]] const uint SUBGROUP_SIZE = 32;
+[[vk::constant_id(2)]] const uint WARPS_M = 2;
+[[vk::constant_id(3)]] const uint WARPS_N = 2;
+[[vk::constant_id(4)]] const uint WARP_FRAGS_M = 2;
+[[vk::constant_id(5)]] const uint WARP_FRAGS_N = 2;
+[[vk::constant_id(6)]] const uint BK = 16;
 
 #define PAD 4
-
-[[vk::constant_id(0)]] const uint M_DIM = 0;
-[[vk::constant_id(1)]] const uint N_DIM = 0;
-[[vk::constant_id(2)]] const uint K_DIM = 0;
-[[vk::constant_id(3)]] const uint SUBGROUP_SIZE = 0;
-[[vk::constant_id(4)]] const uint WORKGROUP_SIZE = 0;
 
 struct PushConstants {
     uint4 strides_a;
     uint4 strides_b;
     uint4 strides_out;
+    uint m_dim;
+    uint n_dim;
+    uint k_dim;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
-groupshared {{ d1 }} smemA[TILE_M * (BK + PAD)];
-groupshared {{ d1 }} smemB[BK * (TILE_N + PAD)];
+{% if os == 'darwin' %}
+groupshared {{ d1 }} zero_smem[{{ BLOCK_SIZE }} * {{ BLOCK_SIZE }}];
+{% else %}
+groupshared {{ d1 }} smemA[2 * (WARPS_M * WARP_FRAGS_M * {{ BLOCK_SIZE }}) * (BK + PAD)];
+groupshared {{ d1 }} smemB[2 * BK * ((WARPS_N * WARP_FRAGS_N * {{ BLOCK_SIZE }}) + PAD)];
+{% endif %}
 
-typealias MatA = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_M, MMA_K, linalg::CoopMatMatrixUse.MatrixA>;
-typealias MatB = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_K, MMA_N, linalg::CoopMatMatrixUse.MatrixB>;
-typealias MatC = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, MMA_M, MMA_N, linalg::CoopMatMatrixUse.MatrixAccumulator>;
-
-void matmulKernel(
+void matmulKernel<
+    let block_size: uint,
+    let block_size_acc: uint, 
+    let warp_frags_m: uint, 
+    let warp_frags_n: uint,
+>(
     uint3 wg: SV_GroupID,
-    uint  ti: SV_GroupIndex,
+    uint ti: SV_GroupIndex,
     StructuredBuffer<{{ d1 }}> tensor_a,
     StructuredBuffer<{{ d1 }}> tensor_b,
     RWStructuredBuffer<{{ d1 }}> tensor_out,
@@ -58,98 +48,186 @@ void matmulKernel(
     uint batch_offset_b = wg.z * pcs.strides_b[0];
     uint batch_offset_out = wg.z * pcs.strides_out[0];
 
-    uint tile_m = wg.y * TILE_M;
-    uint tile_n = wg.x * TILE_N;
+    uint tile_m = wg.y * (WARPS_M * warp_frags_m * block_size);
+    uint tile_n = wg.x * (WARPS_N * warp_frags_n * block_size);
 
     uint warp_id  = ti / SUBGROUP_SIZE;
     uint warp_row = warp_id / WARPS_N;
-    uint warp_col = warp_id % WARPS_N;
-    uint warp_row_base = warp_row * WARP_FRAGS_M * MMA_M;
-    uint warp_col_base = warp_col * WARP_FRAGS_N * MMA_N;
+    uint warp_col = warp_id % WARPS_M;
+    uint warp_row_base = warp_row * warp_frags_m * block_size;
+    uint warp_col_base = warp_col * warp_frags_n * block_size;
+    uint total_threads = WARPS_M * WARPS_N * SUBGROUP_SIZE;
 
-    uint total_threads = NUM_WARPS * SUBGROUP_SIZE;
+    linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> acc[warp_frags_m * warp_frags_n];
 
-    // the fill operation is currently unsupported on spirv-cross, so we resuse smemA
-    // should be safe as smemA size will always be larger than MMA_M * MMA_N
-    [unroll] for (uint i = ti; i < (MMA_M * MMA_N); i += total_threads) {
-        smemA[i] = ({{ d1 }})0;
+    {% if os == 'darwin' %}
+
+    for (uint i = ti; i < (block_size * block_size); i += total_threads) {
+        zero_smem[i] = ({{ d1 }})0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            uint flat_idx = mi * warp_frags_n + nj;
+            acc[flat_idx] = acc[flat_idx].Load<linalg::CoopMatMatrixLayout.RowMajor>(zero_smem, 0, block_size);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    
+    for (uint k = 0; k < pcs.k_dim; k += BK)
+    {
+        for (uint step = 0; step < BK; step += block_size_acc) 
+        {
+            linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+                uint row = tile_m + warp_row_base + mi * block_size;
+                uint col = k + step;
+                uint global_idx = batch_offset_a + row * pcs.strides_a[1] + col; 
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, global_idx, pcs.strides_a[1]);
+            }
+
+            linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+                uint row = k + step;
+                uint col = tile_n + warp_col_base + nj * block_size;
+                uint global_idx = batch_offset_b + row * pcs.strides_b[1] + col; 
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, global_idx, pcs.strides_b[1]);
+            }
+
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+                    uint flat_idx = mi * warp_frags_n + nj;
+                    acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[flat_idx]);
+                }
+            }
+        }
     }
 
+    {% else %}
+
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            uint flat_idx = mi * warp_frags_n + nj;
+            acc[flat_idx] = ({{ d1 }})0;
+        }
+    }
     GroupMemoryBarrierWithGroupSync();
 
-    MatC acc[WARP_FRAGS_M][WARP_FRAGS_N];
-    [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
-        [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
-            acc[mi][nj] = acc[mi][nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemA, 0, MMA_N);
+    uint smem_a_size = (WARPS_M * warp_frags_m * block_size) * (BK + PAD);
+    uint smem_b_size = BK * ((WARPS_N * warp_frags_n * block_size) + PAD);
+    uint total_vec_threads_a = smem_a_size / {{ v1 }};
+    uint total_vec_threads_b = smem_b_size / {{ v1 }};
+    
+    uint stage = 0;
 
-    GroupMemoryBarrierWithGroupSync();
-
-    uint total_vec_threads_a = (TILE_M * BK) / {{ v1 }};
-    uint total_vec_threads_b = (BK * TILE_N) / {{ v1 }};
-
-    for (uint k = 0; k < K_DIM; k += BK)
+    if (pcs.k_dim > 0) 
     {
-        for (uint i = ti; i < total_vec_threads_a; i += total_threads) 
-        {
+        uint smem_a_offset = 0;
+        uint smem_b_offset = 0;
+
+        for (uint i = ti; i < total_vec_threads_a; i += total_threads) {
             uint flat_smem_idx = i * {{ v1 }};            
             uint r = flat_smem_idx / BK;
             uint c = flat_smem_idx % BK; 
-            uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (k + c);
+            uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (0 + c); // K = 0
             vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
             
             uint padded_smem_idx = r * (BK + PAD) + c;
             [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                smemA[padded_smem_idx + v] = vec_val[v];
+                smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
             }
         }
 
-        for (uint i = ti; i < total_vec_threads_b; i += total_threads) 
-        {
+        for (uint i = ti; i < total_vec_threads_b; i += total_threads) {
             uint flat_smem_idx = i * {{ v1 }};            
-            uint r = flat_smem_idx / TILE_N;
-            uint c = flat_smem_idx % TILE_N;
-            uint global_idx = batch_offset_b + (k + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2];
+            uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+            uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+            uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2]; // K = 0
             vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
 
-            uint padded_smem_idx = r * (TILE_N + PAD) + c;
+            uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
             [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                smemB[padded_smem_idx + v] = vec_val[v];
+                smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    for (uint k = 0; k < pcs.k_dim; k += BK)
+    {
+        uint next_k = k + BK;
+        uint next_stage = stage ^ 1; 
+
+        if (next_k < pcs.k_dim) 
+        {
+            uint smem_a_offset = next_stage * smem_a_size;
+            uint smem_b_offset = next_stage * smem_b_size;
+
+            for (uint i = ti; i < total_vec_threads_a; i += total_threads) {
+                uint flat_smem_idx = i * {{ v1 }};            
+                uint r = flat_smem_idx / BK;
+                uint c = flat_smem_idx % BK; 
+                uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (next_k + c);
+                vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
+                
+                uint padded_smem_idx = r * (BK + PAD) + c;
+                [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
+                    smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
+                }
+            }
+
+            for (uint i = ti; i < total_vec_threads_b; i += total_threads) {
+                uint flat_smem_idx = i * {{ v1 }};            
+                uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+                uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+                uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2];
+                vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+
+                uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
+                [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
+                    smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+                }
             }
         }
 
-        GroupMemoryBarrierWithGroupSync();
+        uint current_smem_a_offset = stage * smem_a_size;
+        uint current_smem_b_offset = stage * smem_b_size;
 
-        [ForceUnroll] 
-        for (uint step = 0; step < BK; step += MMA_K) 
+        for (uint step = 0; step < BK; step += block_size_acc) 
         {
-            MatA matA[WARP_FRAGS_M];
-            [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi) {
-                uint off = (warp_row_base + mi * MMA_M) * (BK + PAD) + step;
+            linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+                uint off = current_smem_a_offset + (warp_row_base + mi * block_size) * (BK + PAD) + step;
                 matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemA, off, BK + PAD);
             }
 
-            MatB matB[WARP_FRAGS_N];
-            [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj) {
-                uint off = step * (TILE_N + PAD) + (warp_col_base + nj * MMA_N);
-                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemB, off, TILE_N + PAD);
+            linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+                uint off = current_smem_b_offset + step * ((WARPS_N * warp_frags_n * block_size) + PAD) + (warp_col_base + nj * block_size);
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemB, off, (WARPS_N * warp_frags_n * block_size) + PAD);
             }
 
-            [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi) {
-                [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj) {
-                    acc[mi][nj] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[mi][nj]);
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+                    uint flat_idx = mi * warp_frags_n + nj;
+                    acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[flat_idx]);
                 }
             }
         }
 
         GroupMemoryBarrierWithGroupSync();
+        stage = next_stage;
     }
+    {% endif %}
 
-    [ForceUnroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi) {
-        [ForceUnroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj) {
-            uint row = tile_m + warp_row_base + mi * MMA_M;
-            uint col = tile_n + warp_col_base + nj * MMA_N;
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            uint row = tile_m + warp_row_base + mi * block_size;
+            uint col = tile_n + warp_col_base + nj * block_size;
             uint out_idx = batch_offset_out + row * pcs.strides_out[1] + col * pcs.strides_out[2];
-            acc[mi][nj].Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out[1]);
+            uint flat_idx = mi * warp_frags_n + nj;
+            acc[flat_idx].Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out[1]);
         }
     }
 }
@@ -169,9 +247,22 @@ void main(
     uint  ti: SV_GroupIndex
 )
 {
-    matmulKernel(
-        wg, ti, 
-        tensor_a, tensor_b, tensor_out,
-        tensor_a_vec, tensor_b_vec, tensor_out_vec
-    );
+    {% for warp_frags_m in [2, 4] %}
+    {% for warp_frags_n in [2, 4] %}
+
+    if (
+        WARP_FRAGS_M == {{ warp_frags_m }} && WARP_FRAGS_N == {{ warp_frags_n }}
+    ) 
+    {
+        matmulKernel<
+            {{ BLOCK_SIZE }}, {{ BLOCK_SIZE }}, {{ warp_frags_m }}, {{ warp_frags_n }}
+        >(
+            wg, ti, 
+            tensor_a, tensor_b, tensor_out,
+            tensor_a_vec, tensor_b_vec, tensor_out_vec
+        );
+    }
+
+    {% endfor %}
+    {% endfor %}
 }

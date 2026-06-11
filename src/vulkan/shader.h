@@ -16,7 +16,7 @@ struct SpecializationArgs {
     const size_t* offsets = nullptr;
     const size_t* sizes = nullptr;
     const uint32_t numConstants = 0;
-    const uint32_t packedArgs = 0;
+    const uint64_t packedArgs = 0;
 };
 
 struct VulkanShader {

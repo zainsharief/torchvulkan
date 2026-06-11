@@ -315,6 +315,85 @@ std::vector<CoopMatConfig> VulkanCache::getCoopMatConfig(c10::ScalarType aType, 
     else return {};
 }
 
+CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes)
+{
+    auto it = coopMatParamCache.find((uint32_t)dtype);
+    if (it != coopMatParamCache.end()) return &it->second;
+
+    CoopMatParams& coopmat_params = coopMatParamCache[(uint32_t)dtype];
+    coopmat_params.is_valid = false;
+
+    uint32_t element_size = c10::elementSize(dtype);
+    uint32_t pad = 4;
+    
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+    uint32_t max_shared_memory = device->properties.limits.maxComputeSharedMemorySize;
+    uint32_t max_workgroup_size = device->properties.limits.maxComputeWorkGroupInvocations;
+    coopmat_params.subgroup_size = device->subgroup_size;
+
+    coopmat_params.workgroup_size = 128 > max_workgroup_size ? max_workgroup_size : 128;
+    coopmat_params.workgroup_size = (coopmat_params.workgroup_size / coopmat_params.subgroup_size) * coopmat_params.subgroup_size;
+    if (coopmat_params.workgroup_size == 0) return &coopmat_params;
+
+    uint32_t total_warps = coopmat_params.workgroup_size / coopmat_params.subgroup_size;
+    coopmat_params.warps_m = 1;
+    coopmat_params.warps_n = total_warps;
+    for (uint32_t i = static_cast<uint32_t>(std::sqrt(total_warps)); i > 0; --i) 
+    {
+        if (total_warps % i != 0) continue;
+        coopmat_params.warps_m = i;
+        coopmat_params.warps_n = total_warps / i;
+        break;
+    }
+
+    static constexpr std::array<uint32_t, 4> pref_1_byte = {64, 32, 16, 8};
+    static constexpr std::array<uint32_t, 4> pref_2_byte = {32, 64, 16, 8};
+    static constexpr std::array<uint32_t, 4> pref_4_byte = {16, 32, 8, 64};
+    static constexpr std::array<uint32_t, 4> pref_8_byte = {8, 16, 32, 64};
+    const std::array<uint32_t, 4>* preferences = nullptr;
+
+    switch (element_size)
+    {
+        case 1: preferences = &pref_1_byte; break;
+        case 2: preferences = &pref_2_byte; break;
+        case 4: preferences = &pref_4_byte; break;
+        case 8: preferences = &pref_8_byte; break;
+        default: return &coopmat_params;
+    }
+
+    for (uint32_t pref : *preferences)
+    {
+        if (std::find(available_sizes.begin(), available_sizes.end(), pref) != available_sizes.end()) 
+        {
+            coopmat_params.block_size = pref;
+            coopmat_params.block_size_acc = pref;
+            break;
+        }
+    }
+
+    coopmat_params.warp_frags_m = coopmat_params.block_size / coopmat_params.warps_m;
+    coopmat_params.warp_frags_n = coopmat_params.block_size_acc / coopmat_params.warps_n;
+
+    #if __APPLE__
+    coopmat_params.bk = 16;
+    #else
+    coopmat_params.bk = 64;
+    uint32_t shared_memory_use = (((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) * (coopmat_params.bk + pad)) + 
+                                 (coopmat_params.bk * ((coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size) + pad))) * element_size * 0.5;
+
+    while (shared_memory_use > max_shared_memory) 
+    {
+        if (coopmat_params.bk == 1) return &coopmat_params;
+        coopmat_params.bk /= 2;
+        shared_memory_use = (((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) * (coopmat_params.bk + pad)) + 
+                            (coopmat_params.bk * ((coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size) + pad))) * element_size * 0.5;
+    }
+    #endif
+
+    coopmat_params.is_valid = true;
+    return &coopmat_params;
+}
+
 void VulkanCache::softClearCache()
 {
     if (device_ == VK_NULL_HANDLE) return;

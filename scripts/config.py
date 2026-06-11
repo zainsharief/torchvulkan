@@ -1,3 +1,5 @@
+import sys
+
 SHADER_DIR = 'src/shaders'
 
 UNSIGNED_INTEGERS = [
@@ -72,7 +74,7 @@ SHADERS = [
     {
         'name' : 'matmul_coop.slang.j2',
         'dtypes' : [[{**t[0], 'kwargs': {**t[0]['kwargs'], 'BLOCK_SIZE': s}}] for s in [8, 16, 32, 64] for t in DTYPES],
-        'kwargs' : {}
+        'kwargs' : {'os': sys.platform}
     }
 ]
 
