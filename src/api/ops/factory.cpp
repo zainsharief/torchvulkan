@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/InferSize.h>
 #include "api/ops/factory.h"
 
 at::Tensor torchvulkan::empty_memory_format_vulkan(
@@ -290,7 +291,10 @@ at::Tensor torchvulkan::view_vulkan(
     for (const auto& s : size) {
         concrete_sizes.push_back(s.guard_int(__FILE__, __LINE__));
     }
-    
+
+    at::DimVector inferred_sizes = at::infer_size_dv(concrete_sizes, self.numel());
+    concrete_sizes.assign(inferred_sizes.begin(), inferred_sizes.end());
+
     auto stride = at::detail::computeStride(self.sizes(), self.strides(), concrete_sizes);
     TORCH_CHECK(stride.has_value(), "torchvulkan [ERROR]: View size is not compatible with input tensor's size and stride.");
     
