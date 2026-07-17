@@ -1,5 +1,3 @@
-{% include "helpers/int_divider.slang.j2" %}
-
 [[vk::constant_id(0)]] const uint WORKGROUP_SIZE = 128;
 [[vk::constant_id(1)]] const uint SUBGROUP_SIZE = 32;
 [[vk::constant_id(2)]] const uint WARPS_M = 2;
@@ -8,24 +6,47 @@
 [[vk::constant_id(5)]] const uint WARP_FRAGS_N = 2;
 [[vk::constant_id(6)]] const uint BK = 16;
 
+[[vk::constant_id(7)]] const uint HAS_ALPHA = 0;
+[[vk::constant_id(8)]] const uint HAS_BETA = 0;
+[[vk::constant_id(9)]] const uint HAS_BIAS = 0;
+
+[[vk::constant_id(10)]] const uint A_TRANSPOSED = 0;
+[[vk::constant_id(11)]] const uint B_TRANSPOSED = 0;
+[[vk::constant_id(12)]] const uint OUT_TRANSPOSED = 0;
+[[vk::constant_id(13)]] const uint BIAS_TRANSPOSED = 0;
+
 #define PAD 4
 
+struct TensorStrides {
+    uint batch;
+    uint row;
+    uint col;
+    uint padding;
+};
+
 struct PushConstants {
-    uint4 strides_a;
-    uint4 strides_b;
-    uint4 strides_out;
+    TensorStrides strides_a;
+    TensorStrides strides_b;
+    TensorStrides strides_out;
+    TensorStrides strides_bias;
     uint m_dim;
     uint n_dim;
     uint k_dim;
+    uint padding;
+    {{ d1 }} alpha;
+    {{ d1 }} beta;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
-{% if os == 'darwin' %}
-groupshared {{ d1 }} zero_smem[{{ BLOCK_SIZE }} * {{ BLOCK_SIZE }}];
-{% else %}
+{% if os != 'darwin' %}
+// we double buffer shared memory to avoid GPU starvation
 groupshared {{ d1 }} smemA[2 * (WARPS_M * WARP_FRAGS_M * {{ BLOCK_SIZE }}) * (BK + PAD)];
 groupshared {{ d1 }} smemB[2 * BK * ((WARPS_N * WARP_FRAGS_N * {{ BLOCK_SIZE }}) + PAD)];
+{% else %}
+// use shared memory to prevent overflow writes 
+groupshared {{ d1 }} smemTailA[(WARPS_M * WARP_FRAGS_M * {{ BLOCK_SIZE }}) * BK];
+groupshared {{ d1 }} smemTailB[BK * (WARPS_N * WARP_FRAGS_N * {{ BLOCK_SIZE }})];
 {% endif %}
 
 void matmulKernel<
@@ -39,14 +60,16 @@ void matmulKernel<
     StructuredBuffer<{{ d1 }}> tensor_a,
     StructuredBuffer<{{ d1 }}> tensor_b,
     RWStructuredBuffer<{{ d1 }}> tensor_out,
+    StructuredBuffer<{{ d1 }}> tensor_bias,
     StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_vec,
     StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_vec,
-    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out_vec
+    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out_vec,
+    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias_vec
 )
 {
-    uint batch_offset_a = wg.z * pcs.strides_a[0];
-    uint batch_offset_b = wg.z * pcs.strides_b[0];
-    uint batch_offset_out = wg.z * pcs.strides_out[0];
+    uint batch_offset_a = wg.z * pcs.strides_a.batch;
+    uint batch_offset_b = wg.z * pcs.strides_b.batch;
+    uint batch_offset_out = wg.z * pcs.strides_out.batch;
 
     uint tile_m = wg.y * (WARPS_M * warp_frags_m * block_size);
     uint tile_n = wg.x * (WARPS_N * warp_frags_n * block_size);
@@ -60,43 +83,104 @@ void matmulKernel<
 
     linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> acc[warp_frags_m * warp_frags_n];
 
-    {% if os == 'darwin' %}
-
-    for (uint i = ti; i < (block_size * block_size); i += total_threads) {
-        zero_smem[i] = ({{ d1 }})0;
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+    {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+        {
             uint flat_idx = mi * warp_frags_n + nj;
-            acc[flat_idx] = acc[flat_idx].Load<linalg::CoopMatMatrixLayout.RowMajor>(zero_smem, 0, block_size);
+            acc[flat_idx] = linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator>(0);
         }
     }
+
     GroupMemoryBarrierWithGroupSync();
+
+    {% if os == 'darwin' %}
     
     for (uint k = 0; k < pcs.k_dim; k += BK)
     {
-        for (uint step = 0; step < BK; step += block_size_acc) 
+        bool is_tail = (k + BK) > pcs.k_dim;
+
+        if (is_tail)
+        {
+            for (uint i = ti; i < (WARPS_M * warp_frags_m * block_size) * BK; i += total_threads)
+            {
+                uint r = i / BK;
+                uint c = i % BK;
+                uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                {{ d1 }} val = ({{ d1 }})0;
+                if ((k + c) < pcs.k_dim)
+                {
+                    uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (k + c) * pcs.strides_a.col;
+                    val = tensor_a[global_idx];
+                }
+                smemTailA[r * BK + c] = val;
+            }
+
+            for (uint i = ti; i < BK * (WARPS_N * warp_frags_n * block_size); i += total_threads)
+            {
+                uint r = i / (WARPS_N * warp_frags_n * block_size);
+                uint c = i % (WARPS_N * warp_frags_n * block_size);
+                uint b_col = min(tile_n + c, pcs.n_dim - 1);
+                {{ d1 }} val = ({{ d1 }})0;
+                if ((k + r) < pcs.k_dim)
+                {
+                    uint global_idx = batch_offset_b + (k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
+                    val = tensor_b[global_idx];
+                }
+                smemTailB[r * (WARPS_N * warp_frags_n * block_size) + c] = val;
+            }
+
+            GroupMemoryBarrierWithGroupSync();
+        }
+
+        for (uint step = 0; step < BK; step += block_size_acc)
         {
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
-            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-                uint row = tile_m + warp_row_base + mi * block_size;
-                uint col = k + step;
-                uint global_idx = batch_offset_a + row * pcs.strides_a[1] + col; 
-                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, global_idx, pcs.strides_a[1]);
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+            {
+                if (is_tail)
+                {
+                    uint off = (warp_row_base + mi * block_size) * BK + step;
+                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailA, off, BK);
+                }
+                else
+                {
+                    uint row = min(tile_m + warp_row_base + mi * block_size, pcs.m_dim - 1);
+                    uint col = k + step;
+                    uint global_idx = batch_offset_a + row * pcs.strides_a.row + col * pcs.strides_a.col;
+                    if (A_TRANSPOSED == 1) {
+                        matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, global_idx, pcs.strides_a.col);
+                    } else {
+                        matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, global_idx, pcs.strides_a.row);
+                    }
+                }
             }
 
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
-            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
-                uint row = k + step;
-                uint col = tile_n + warp_col_base + nj * block_size;
-                uint global_idx = batch_offset_b + row * pcs.strides_b[1] + col; 
-                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, global_idx, pcs.strides_b[1]);
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                if (is_tail)
+                {
+                    uint off = step * (WARPS_N * warp_frags_n * block_size) + (warp_col_base + nj * block_size);
+                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailB, off, (WARPS_N * warp_frags_n * block_size));
+                }
+                else
+                {
+                    uint row = k + step;
+                    uint col = min(tile_n + warp_col_base + nj * block_size, pcs.n_dim - 1);
+                    uint global_idx = batch_offset_b + row * pcs.strides_b.row + col * pcs.strides_b.col;
+                    if (B_TRANSPOSED == 1) {
+                        matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, global_idx, pcs.strides_b.col);
+                    } else {
+                        matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, global_idx, pcs.strides_b.row);
+                    }
+                }
             }
 
-            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+            {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+                {
                     uint flat_idx = mi * warp_frags_n + nj;
                     acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[flat_idx]);
                 }
@@ -104,15 +188,48 @@ void matmulKernel<
         }
     }
 
-    {% else %}
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+    {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+        {
+            uint flat_idx = mi * warp_frags_n + nj;            
+            uint row = tile_m + warp_row_base + mi * block_size;
+            uint col = tile_n + warp_col_base + nj * block_size;
 
-    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
-            uint flat_idx = mi * warp_frags_n + nj;
-            acc[flat_idx] = ({{ d1 }})0;
+            if (HAS_ALPHA == 1) 
+            {
+                acc[flat_idx] = acc[flat_idx] * pcs.alpha;
+            }
+
+            if (HAS_BETA == 1) 
+            {
+                uint c_idx = batch_offset_out + (row * pcs.strides_out.row) + (col * pcs.strides_out.col);
+                linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> matC;
+                if (OUT_TRANSPOSED == 1) {
+                    matC = matC.Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_out, c_idx, pcs.strides_out.col);
+                } else {
+                    matC = matC.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, c_idx, pcs.strides_out.row);
+                }
+                acc[flat_idx] = acc[flat_idx] + (matC * pcs.beta);
+            }
+
+            if (HAS_BIAS == 1)
+            {
+                uint bias_row = min(row, pcs.m_dim - 1);
+                uint bias_col = min(col, pcs.n_dim - 1);
+                uint bias_idx = (wg.z * pcs.strides_bias.batch) + (bias_row * pcs.strides_bias.row) + (bias_col * pcs.strides_bias.col);
+                linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> matBias;
+                if (BIAS_TRANSPOSED == 1) {
+                    matBias = matBias.Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_bias, bias_idx, pcs.strides_bias.col);
+                } else {
+                    matBias = matBias.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_bias, bias_idx, pcs.strides_bias.row);
+                }
+                acc[flat_idx] = acc[flat_idx] + (matBias * pcs.beta);
+            }
         }
     }
-    GroupMemoryBarrierWithGroupSync();
+
+    {% else %}
 
     uint smem_a_size = (WARPS_M * warp_frags_m * block_size) * (BK + PAD);
     uint smem_b_size = BK * ((WARPS_N * warp_frags_n * block_size) + PAD);
@@ -126,29 +243,113 @@ void matmulKernel<
         uint smem_a_offset = 0;
         uint smem_b_offset = 0;
 
-        for (uint i = ti; i < total_vec_threads_a; i += total_threads) {
-            uint flat_smem_idx = i * {{ v1 }};            
-            uint r = flat_smem_idx / BK;
-            uint c = flat_smem_idx % BK; 
-            uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (0 + c); // K = 0
-            vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
-            
-            uint padded_smem_idx = r * (BK + PAD) + c;
-            [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
+        if (A_TRANSPOSED == 1)
+        {
+            for (uint i = ti; i < total_vec_threads_a; i += total_threads)
+            {
+                [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                {
+                    uint flat_smem_idx = i * {{ v1 }} + v;
+                    uint r = flat_smem_idx / BK;
+                    uint c = flat_smem_idx % BK;
+                    uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                    {{ d1 }} val = ({{ d1 }})0;
+                    if ((0 + c) < pcs.k_dim)
+                    {
+                        uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (0 + c) * pcs.strides_a.col; // K = 0
+                        val = tensor_a[global_idx];
+                    }
+                    smemA[smem_a_offset + r * (BK + PAD) + c] = val;
+                }
+            }
+        }
+        else
+        {
+            for (uint i = ti; i < total_vec_threads_a; i += total_threads)
+            {
+                uint flat_smem_idx = i * {{ v1 }};
+                uint r = flat_smem_idx / BK;
+                uint c = flat_smem_idx % BK;
+                uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                uint padded_smem_idx = r * (BK + PAD) + c;
+
+                if ((0 + c + {{ v1 }}) <= pcs.k_dim)
+                {
+                    uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (0 + c); // K = 0
+                    vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
+                        smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
+                    }
+                }
+                else
+                {
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                    {
+                        uint k_idx = 0 + c + v;
+                        {{ d1 }} val = ({{ d1 }})0;
+                        if (k_idx < pcs.k_dim)
+                        {
+                            uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + k_idx;
+                            val = tensor_a[global_idx];
+                        }
+                        smemA[smem_a_offset + padded_smem_idx + v] = val;
+                    }
+                }
             }
         }
 
-        for (uint i = ti; i < total_vec_threads_b; i += total_threads) {
-            uint flat_smem_idx = i * {{ v1 }};            
-            uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
-            uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
-            uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2]; // K = 0
-            vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+        if (B_TRANSPOSED == 1)
+        {
+            for (uint i = ti; i < total_vec_threads_b; i += total_threads)
+            {
+                [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                {
+                    uint flat_smem_idx = i * {{ v1 }} + v;
+                    uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+                    uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+                    uint b_col = min(tile_n + c, pcs.n_dim - 1);
+                    {{ d1 }} val = ({{ d1 }})0;
+                    if ((0 + r) < pcs.k_dim)
+                    {
+                        uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + b_col * pcs.strides_b.col; // K = 0
+                        val = tensor_b[global_idx];
+                    }
+                    smemB[smem_b_offset + r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c] = val;
+                }
+            }
+        }
+        else
+        {
+            for (uint i = ti; i < total_vec_threads_b; i += total_threads)
+            {
+                uint flat_smem_idx = i * {{ v1 }};
+                uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+                uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+                uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
 
-            uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
-            [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+                if ((0 + r) >= pcs.k_dim)
+                {
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
+                        smemB[smem_b_offset + padded_smem_idx + v] = ({{ d1 }})0;
+                    }
+                }
+                else if ((tile_n + c + {{ v1 }}) <= pcs.n_dim)
+                {
+                    uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col; // K = 0
+                    vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
+                        smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+                    }
+                }
+                else
+                {
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                    {
+                        uint b_col = min(tile_n + c + v, pcs.n_dim - 1);
+                        uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + b_col * pcs.strides_b.col; // K = 0
+                        smemB[smem_b_offset + padded_smem_idx + v] = tensor_b[global_idx];
+                    }
+                }
             }
         }
         GroupMemoryBarrierWithGroupSync();
@@ -164,29 +365,116 @@ void matmulKernel<
             uint smem_a_offset = next_stage * smem_a_size;
             uint smem_b_offset = next_stage * smem_b_size;
 
-            for (uint i = ti; i < total_vec_threads_a; i += total_threads) {
-                uint flat_smem_idx = i * {{ v1 }};            
-                uint r = flat_smem_idx / BK;
-                uint c = flat_smem_idx % BK; 
-                uint global_idx = batch_offset_a + (tile_m + r) * pcs.strides_a[1] + (next_k + c);
-                vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
-                
-                uint padded_smem_idx = r * (BK + PAD) + c;
-                [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                    smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
+            if (A_TRANSPOSED == 1)
+            {
+                for (uint i = ti; i < total_vec_threads_a; i += total_threads)
+                {
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                    {
+                        uint flat_smem_idx = i * {{ v1 }} + v;
+                        uint r = flat_smem_idx / BK;
+                        uint c = flat_smem_idx % BK;
+                        uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                        {{ d1 }} val = ({{ d1 }})0;
+                        if ((next_k + c) < pcs.k_dim)
+                        {
+                            uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (next_k + c) * pcs.strides_a.col;
+                            val = tensor_a[global_idx];
+                        }
+                        smemA[smem_a_offset + r * (BK + PAD) + c] = val;
+                    }
+                }
+            }
+            else
+            {
+                for (uint i = ti; i < total_vec_threads_a; i += total_threads)
+                {
+                    uint flat_smem_idx = i * {{ v1 }};
+                    uint r = flat_smem_idx / BK;
+                    uint c = flat_smem_idx % BK;
+                    uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                    uint padded_smem_idx = r * (BK + PAD) + c;
+
+                    if ((next_k + c + {{ v1 }}) <= pcs.k_dim)
+                    {
+                        uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (next_k + c);
+                        vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
+                        [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                        {
+                            smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
+                        }
+                    }
+                    else
+                    {
+                        [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                        {
+                            uint k_idx = next_k + c + v;
+                            {{ d1 }} val = ({{ d1 }})0;
+                            if (k_idx < pcs.k_dim)
+                            {
+                                uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + k_idx;
+                                val = tensor_a[global_idx];
+                            }
+                            smemA[smem_a_offset + padded_smem_idx + v] = val;
+                        }
+                    }
                 }
             }
 
-            for (uint i = ti; i < total_vec_threads_b; i += total_threads) {
-                uint flat_smem_idx = i * {{ v1 }};            
-                uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
-                uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
-                uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b[1] + (tile_n + c) * pcs.strides_b[2];
-                vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+            if (B_TRANSPOSED == 1)
+            {
+                for (uint i = ti; i < total_vec_threads_b; i += total_threads)
+                {
+                    [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                    {
+                        uint flat_smem_idx = i * {{ v1 }} + v;
+                        uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+                        uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+                        uint b_col = min(tile_n + c, pcs.n_dim - 1);
+                        {{ d1 }} val = ({{ d1 }})0;
+                        if ((next_k + r) < pcs.k_dim)
+                        {
+                            uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
+                            val = tensor_b[global_idx];
+                        }
+                        smemB[smem_b_offset + r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c] = val;
+                    }
+                }
+            }
+            else
+            {
+                for (uint i = ti; i < total_vec_threads_b; i += total_threads)
+                {
+                    uint flat_smem_idx = i * {{ v1 }};
+                    uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
+                    uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
+                    uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
 
-                uint padded_smem_idx = r * ((WARPS_N * warp_frags_n * block_size) + PAD) + c;
-                [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
-                    smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+                    if ((next_k + r) >= pcs.k_dim)
+                    {
+                        [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                        {
+                            smemB[smem_b_offset + padded_smem_idx + v] = ({{ d1 }})0;
+                        }
+                    }
+                    else if ((tile_n + c + {{ v1 }}) <= pcs.n_dim)
+                    {
+                        uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col;
+                        vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+                        [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                        {
+                            smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
+                        }
+                    }
+                    else
+                    {
+                        [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
+                        {
+                            uint b_col = min(tile_n + c + v, pcs.n_dim - 1);
+                            uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
+                            smemB[smem_b_offset + padded_smem_idx + v] = tensor_b[global_idx];
+                        }
+                    }
                 }
             }
         }
@@ -197,19 +485,23 @@ void matmulKernel<
         for (uint step = 0; step < BK; step += block_size_acc) 
         {
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
-            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+            {
                 uint off = current_smem_a_offset + (warp_row_base + mi * block_size) * (BK + PAD) + step;
                 matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemA, off, BK + PAD);
             }
 
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
-            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+            {
                 uint off = current_smem_b_offset + step * ((WARPS_N * warp_frags_n * block_size) + PAD) + (warp_col_base + nj * block_size);
                 matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemB, off, (WARPS_N * warp_frags_n * block_size) + PAD);
             }
 
-            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+            {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+                {
                     uint flat_idx = mi * warp_frags_n + nj;
                     acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[flat_idx]);
                 }
@@ -219,15 +511,64 @@ void matmulKernel<
         GroupMemoryBarrierWithGroupSync();
         stage = next_stage;
     }
-    {% endif %}
 
-    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) {
-        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) {
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+    {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+        {
+            uint flat_idx = mi * warp_frags_n + nj;            
             uint row = tile_m + warp_row_base + mi * block_size;
             uint col = tile_n + warp_col_base + nj * block_size;
-            uint out_idx = batch_offset_out + row * pcs.strides_out[1] + col * pcs.strides_out[2];
+
+            if (HAS_ALPHA == 1) 
+            {
+                acc[flat_idx] = acc[flat_idx] * pcs.alpha;
+            }
+
+            if (HAS_BETA == 1) 
+            {
+                uint c_idx = batch_offset_out + (row * pcs.strides_out.row) + (col * pcs.strides_out.col);
+                linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> matC;
+                if (OUT_TRANSPOSED == 1) {
+                    matC = matC.Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_out, c_idx, pcs.strides_out.col);
+                } else {
+                    matC = matC.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, c_idx, pcs.strides_out.row);
+                }
+                acc[flat_idx] = acc[flat_idx] + (matC * pcs.beta);
+            }
+
+            if (HAS_BIAS == 1)
+            {
+                // bias is not padded to the tile size either - clamp separately from the (unclamped) row/col used for `out`.
+                uint bias_row = min(row, pcs.m_dim - 1);
+                uint bias_col = min(col, pcs.n_dim - 1);
+                uint bias_idx = (wg.z * pcs.strides_bias.batch) + (bias_row * pcs.strides_bias.row) + (bias_col * pcs.strides_bias.col);
+                linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size, linalg::CoopMatMatrixUse.MatrixAccumulator> matBias;
+                if (BIAS_TRANSPOSED == 1) {
+                    matBias = matBias.Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_bias, bias_idx, pcs.strides_bias.col);
+                } else {
+                    matBias = matBias.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_bias, bias_idx, pcs.strides_bias.row);
+                }
+                acc[flat_idx] = acc[flat_idx] + (matBias * pcs.beta);
+            }
+        }
+    }
+
+    {% endif %}
+
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi) 
+    {
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj) 
+        {
+            uint row = tile_m + warp_row_base + mi * block_size;
+            uint col = tile_n + warp_col_base + nj * block_size;
+            uint out_idx = batch_offset_out + row * pcs.strides_out.row + col * pcs.strides_out.col;
             uint flat_idx = mi * warp_frags_n + nj;
-            acc[flat_idx].Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out[1]);
+            if (OUT_TRANSPOSED == 1) {
+                acc[flat_idx].Store<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_out, out_idx, pcs.strides_out.col);
+            } else {
+                acc[flat_idx].Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out.row);
+            }
         }
     }
 }
@@ -235,10 +576,13 @@ void matmulKernel<
 [[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
 [[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
 [[vk::binding(2, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
+[[vk::binding(3, 0)]] StructuredBuffer<{{ d1 }}> tensor_bias;
 
 [[vk::binding(0, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_vec;
 [[vk::binding(1, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_vec;
 [[vk::binding(2, 0)]] RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out_vec;
+[[vk::binding(3, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias_vec;
+
 
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
@@ -258,8 +602,8 @@ void main(
             {{ BLOCK_SIZE }}, {{ BLOCK_SIZE }}, {{ warp_frags_m }}, {{ warp_frags_n }}
         >(
             wg, ti, 
-            tensor_a, tensor_b, tensor_out,
-            tensor_a_vec, tensor_b_vec, tensor_out_vec
+            tensor_a, tensor_b, tensor_out, tensor_bias,
+            tensor_a_vec, tensor_b_vec, tensor_out_vec, tensor_bias_vec
         );
     }
 

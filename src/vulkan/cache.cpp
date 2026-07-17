@@ -375,7 +375,19 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
     coopmat_params.warp_frags_n = coopmat_params.block_size_acc / coopmat_params.warps_n;
 
     #if __APPLE__
-    coopmat_params.bk = 16;
+    coopmat_params.bk = 16; // fixed for now, might need to change later
+    uint32_t darwin_shared_memory_use = coopmat_params.bk *
+        ((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) +
+         (coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size)) * element_size;
+
+    while (darwin_shared_memory_use > max_shared_memory)
+    {
+        if (coopmat_params.bk == 1) return &coopmat_params; // should never reach here
+        coopmat_params.bk /= 2;
+        darwin_shared_memory_use = coopmat_params.bk *
+            ((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) +
+             (coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size)) * element_size;
+    }
     #else
     coopmat_params.bk = 64;
     uint32_t shared_memory_use = (((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) * (coopmat_params.bk + pad)) + 
