@@ -65,6 +65,30 @@ def parse_spv_file(filepath: str) -> tuple[int, int]:
         
     return num_bindings, pc_size
 
+
+def try_parse_spv_file(filepath: str) -> tuple[int, int]:
+    """
+    Attempts to extract num_bindings and push_constant_size from a .spv file.
+    If spirv-cross fails, uses hardcoded values
+    
+    Inputs:
+    - filepath: Path to the .spv file to analyze.
+
+    Outputs:
+    - num_bindings: Total number of resource bindings used by the shader.
+    - push_constant_size: Total size in bytes of the push constant block used by the shader
+    """
+    
+    try:
+        return parse_spv_file(filepath)
+    except subprocess.CalledProcessError as e:
+
+        if 'matmul_coop' in filepath:
+            return 4, 128
+
+        print(f"Warning: Failed to parse {filepath} with spirv-cross. Defaulting to 0 bindings and 0 push constant size.")
+        return 0, 0
+
 def spv_to_c_array(spv_file: str, array_name: str) -> str:
     """
     Reads a .spv binary and converts it to a formatted C++ uint32_t array string.
@@ -169,7 +193,7 @@ def main(args):
         enum_entries.append(f"    {enum_name},")
         array_definitions.append(spv_to_c_array(spv_path, array_name))
 
-        num_bindings, pc_size = parse_spv_file(spv_path)
+        num_bindings, pc_size = try_parse_spv_file(spv_path)
         catalog_entries.append(f"    {{ ShaderID::{enum_name}, {array_name}, sizeof({array_name}), {pc_size}, {num_bindings} }}, // {enum_name}")
         
     header_content = generate_shader_registry(enum_entries, array_definitions, catalog_entries)

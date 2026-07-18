@@ -57,7 +57,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list http://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
           sudo apt-get update
           sudo apt-get install -y vulkan-sdk mesa-vulkan-drivers
           vulkaninfo --summary
@@ -94,6 +94,7 @@ jobs:
           
           echo "VULKAN_SDK=C:\VulkanSDK\$sdkVersion" >> $env:GITHUB_ENV
           echo "C:\VulkanSDK\$sdkVersion\Bin" >> $env:GITHUB_PATH
+          echo "C:\slang\bin" >> $env:GITHUB_PATH
 
       - name: Install PyTorch and Build Dependencies
         run: |
@@ -102,8 +103,10 @@ jobs:
           pip install pytest pytest-instafail setuptools wheel ninja expecttest numpy
 
       - name: Build TorchVulkan
+        env:
+            SKBUILD_CMAKE_GENERATOR: Ninja
         run: |
-          pip install -e .
+          pip install --no-cache-dir -e .
 
       - name: Run Pytest
         env:

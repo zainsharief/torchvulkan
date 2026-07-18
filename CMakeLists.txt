@@ -7,7 +7,7 @@ find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 find_program(SLANGC_EXE slangc REQUIRED)
 find_program(SPIRV_CROSS_EXE spirv-cross REQUIRED)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(src/shaders)
@@ -23,6 +23,6 @@ target_include_directories(torchvulkan_lib PRIVATE src/ extern/vma extern/volk $
 
 target_compile_definitions(torchvulkan_lib PRIVATE VK_NO_PROTOTYPES TORCH_EXTENSION_NAME=_C)
 
-target_compile_features(torchvulkan_lib PRIVATE cxx_std_17)
+target_compile_features(torchvulkan_lib PRIVATE cxx_std_20)
 
 install(TARGETS torchvulkan_lib DESTINATION torchvulkan)
