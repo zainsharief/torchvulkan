@@ -22,15 +22,16 @@ struct DeviceContext {
 
     bool support_float64 = false;
     bool support_int64 = false;
-
     bool support_float32 = false;
     bool support_int32 = false;
-
     bool support_float16 = false;
     bool support_bfloat16 = false;
     bool support_int16 = false;
-
     bool support_int8 = false;
+
+    bool support_coopmat = false;
+    bool support_subgroup_control = false;
+    uint32_t subgroup_size = 0;
 
     VkCommandBuffer getCommandBuffer();
     void flush();

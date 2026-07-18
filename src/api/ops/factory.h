@@ -57,6 +57,11 @@ const at::Tensor& resize_vulkan(
     c10::optional<at::MemoryFormat> memory_format
 );
 
+at::Tensor view_vulkan(
+    const at::Tensor& self,
+    c10::SymIntArrayRef size
+);
+
 at::Tensor contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format);
 at::Tensor clone_vulkan(const at::Tensor& self, c10::optional<at::MemoryFormat> memory_format);
 

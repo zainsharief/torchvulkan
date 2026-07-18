@@ -4,6 +4,7 @@
 #include "api/ops/binary.h"
 #include "api/ops/unary.h"
 #include "api/ops/matmul.h"
+#include "api/ops/linalg.h"
 
 using namespace torchvulkan;
 
@@ -22,6 +23,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("empty_strided", &empty_strided_vulkan);
     m.impl("as_strided", &as_strided_vulkan);
     m.impl("resize_", &resize_vulkan);
+    m.impl("view", &view_vulkan);
     m.impl("contiguous", &contiguous_vulkan);
     m.impl("clone", &clone_vulkan);
     m.impl("_copy_from", &copy_from_vulkan);
@@ -68,4 +70,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("matmul", &matmul_vulkan);
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);
+    m.impl("addr", &addr_vulkan);
+    m.impl("bilinear", &bilinear_vulkan);
 }
