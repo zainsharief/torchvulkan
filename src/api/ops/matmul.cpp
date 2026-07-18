@@ -88,13 +88,21 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     if (M == 0 || N == 0 || B == 0) return at::empty({B, M, N}, self_.options()).reshape(out_shape);
     if (K == 0) return at::zeros({B, M, N}, self_.options()).reshape(out_shape);
 
-    std::vector<int64_t> batch_expand_shape(batch_shape);
-    batch_expand_shape.push_back(-1);
-    batch_expand_shape.push_back(-1);
+    std::vector<int64_t> self_expand_shape(batch_shape);
+    self_expand_shape.push_back(M);
+    self_expand_shape.push_back(K);
 
-    at::Tensor self_b = self.to(promoted_type).expand(batch_expand_shape).reshape({B, M, K});
-    at::Tensor other_b = other.to(self_b.options()).expand(batch_expand_shape).reshape({B, K, N});
-    at::Tensor bias_b = has_bias ? bias_.to(self_b.options()).expand(batch_expand_shape).reshape({B, M, N}) : bias_;
+    std::vector<int64_t> other_expand_shape(batch_shape);
+    other_expand_shape.push_back(K);
+    other_expand_shape.push_back(N);
+
+    std::vector<int64_t> bias_expand_shape(batch_shape);
+    bias_expand_shape.push_back(M);
+    bias_expand_shape.push_back(N);
+
+    at::Tensor self_b = self.to(promoted_type).expand(self_expand_shape).reshape({B, M, K});
+    at::Tensor other_b = other.to(self_b.options()).expand(other_expand_shape).reshape({B, K, N});
+    at::Tensor bias_b = has_bias ? bias_.to(self_b.options()).expand(bias_expand_shape).reshape({B, M, N}) : bias_;
 
     const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
     const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
@@ -193,7 +201,7 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     at::Tensor self = self_;
     at::Tensor other = other_;
     at::Tensor bias = bias_;
-    uint32_t bias_defined = (bias_.defined() && beta.toDouble() != 0.0) ? 1 : 0;
+    uint32_t has_bias = (bias_.defined() && beta.toDouble() != 0.0) ? 1 : 0;
     
     bool self_unsqueezed = false;
     bool other_unsqueezed = false;
@@ -240,13 +248,22 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
         device_tile_m /= 2;
     }
         
-    std::vector<int64_t> batch_expand_shape(batch_shape);
-    batch_expand_shape.push_back(-1);
-    batch_expand_shape.push_back(-1);
+    std::vector<int64_t> self_expand_shape(batch_shape);
+    self_expand_shape.push_back(M);
+    self_expand_shape.push_back(K);
 
-    at::Tensor self_b = self.to(promoted_type).expand(batch_expand_shape).reshape({B, M, K});
-    at::Tensor other_b = other.to(self_b.options()).expand(batch_expand_shape).reshape({B, K, N});
-    at::Tensor bias_b = bias_defined ? bias.to(self_b.options()).expand(batch_expand_shape).reshape({B, M, N}) : bias;
+    std::vector<int64_t> other_expand_shape(batch_shape);
+    other_expand_shape.push_back(K);
+    other_expand_shape.push_back(N);
+
+    std::vector<int64_t> bias_expand_shape(batch_shape);
+    bias_expand_shape.push_back(M);
+    bias_expand_shape.push_back(N);
+
+    at::Tensor self_b = self.to(promoted_type).expand(self_expand_shape).reshape({B, M, K});
+    at::Tensor other_b = other.to(self_b.options()).expand(other_expand_shape).reshape({B, K, N});
+    at::Tensor bias_b = has_bias ? bias_.to(self_b.options()).expand(bias_expand_shape).reshape({B, M, N}) : bias_;
+
     at::Tensor out = at::empty({B, M, N}, self_b.options());
     if (beta.toFloat() == 0) out.zero_();
 
@@ -258,22 +275,22 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
 
     uint32_t workgroupSizeX = 16; 
     uint32_t workgroupSizeY = 16; 
-    uint32_t isBiasAligned = bias_defined ? bias_b.is_contiguous() : 1;
+    uint32_t isBiasAligned = has_bias ? bias_b.is_contiguous() : 1;
     uint32_t isAligned = (K % TILE_K == 0) && self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
 
     SpecializationBuilder spd{};
     spd.push(workgroupSizeX)
        .push(workgroupSizeY)
        .push(isAligned)
-       .push(bias_defined);
-    uint32_t key = (bias_defined << 12) | (isAligned << 8) | (workgroupSizeX << 4) | workgroupSizeY;
+       .push(has_bias);
+    uint32_t key = (has_bias << 12) | (isAligned << 8) | (workgroupSizeX << 4) | workgroupSizeY;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
     uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
     uint32_t strides_c[4] = {static_cast<uint32_t>(out.stride(0)), static_cast<uint32_t>(out.stride(1)), static_cast<uint32_t>(out.stride(2)), 0};
     uint32_t strides_bias[4] = {0, 0, 0, 0};
-    if (bias_defined) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
+    if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
 
     PushConstantBuilder pcs{};
     pcs.push_array(strides_a);
@@ -296,7 +313,7 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     shader.dispatch(
         &pcs, 
         pcs.size(), 
-        {self_b, other_b, out, bias_defined ? bias_b : out}, 
+        {self_b, other_b, out, has_bias ? bias_b : out}, 
         groupX, groupY, groupZ
     );
 
