@@ -282,6 +282,25 @@ const at::Tensor& torchvulkan::resize_vulkan(
     return self;
 }
 
+at::Tensor torchvulkan::reshape_alias_vulkan(
+    const at::Tensor& self, 
+    c10::SymIntArrayRef sizes, 
+    c10::SymIntArrayRef strides) 
+{
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::TensorImpl::VIEW,
+        c10::Storage(self.storage()),
+        self.key_set(),
+        self.dtype()
+    );
+    
+    auto* result_impl = result.unsafeGetTensorImpl();
+    result_impl->set_storage_offset(self.storage_offset());
+    result_impl->set_sizes_and_strides(sizes, strides);
+    
+    return result;
+}
+
 at::Tensor torchvulkan::view_vulkan(
     const at::Tensor& self,
     c10::SymIntArrayRef size)

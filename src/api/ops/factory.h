@@ -57,6 +57,12 @@ const at::Tensor& resize_vulkan(
     c10::optional<at::MemoryFormat> memory_format
 );
 
+at::Tensor reshape_alias_vulkan(
+    const at::Tensor& self, 
+    c10::SymIntArrayRef sizes, 
+    c10::SymIntArrayRef strides
+); 
+
 at::Tensor view_vulkan(
     const at::Tensor& self,
     c10::SymIntArrayRef size
