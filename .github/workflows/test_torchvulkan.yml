@@ -99,7 +99,7 @@ jobs:
       - name: Install PyTorch and Build Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
           pip install pytest pytest-instafail setuptools wheel ninja expecttest numpy
 
       - name: Build TorchVulkan
