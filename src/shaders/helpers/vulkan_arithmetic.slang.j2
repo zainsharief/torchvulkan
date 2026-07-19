@@ -4,6 +4,7 @@ interface IVulkanArithmetic
     static This ext_atan2(This a, This b);
     static This ext_max(This a, This b);
     static This ext_min(This a, This b);
+    static This ext_zero();
 }
 
 extension {{ d1 }} : IVulkanArithmetic 
@@ -54,8 +55,9 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return {{ d1 }}(0); } 
     {% endif %}
 
-    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { return max(a, b); } 
-    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { return min(a, b); } 
+    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { return max(a, b); }
+    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { return min(a, b); }
+    static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
 }
 
 extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
@@ -88,6 +90,12 @@ extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
     {
         vector<T, N> res;
         [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
+        return res;
+    }
+    static vector<T, N> ext_zero()
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_zero();
         return res;
     }
 }

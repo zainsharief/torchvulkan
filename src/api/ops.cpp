@@ -35,6 +35,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("fill_.Scalar", &fill_scalar_vulkan);
     m.impl("fill_.Tensor", &fill_tensor_vulkan);
     m.impl("zero_", &zero_vulkan);
+    m.impl("relu", &relu_vulkan);
 
     // binary - Add
     m.impl("add.Tensor", &add_vulkan);

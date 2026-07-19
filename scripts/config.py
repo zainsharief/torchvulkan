@@ -57,6 +57,13 @@ SHADERS = [
         'kwargs' : {}
     },
     {
+        'name' : 'unaryop.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'ReluOp'}
+                ]}
+    },
+    {
         'name' : 'cast.slang.j2',
         'dtypes' : DTYPES_SUPERSET,
         'kwargs' : {}
