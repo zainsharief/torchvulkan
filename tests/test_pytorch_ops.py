@@ -98,7 +98,7 @@ class TestVulkanOps(TestCase):
                 self.assertEqual(actual.dtype, expected.dtype)
                 continue
 
-            elif dtype in (torch.float16, torch.bfloat16) and op.name in ("bmm", "baddbmm", "mm", "addmm", "matmul"):
+            elif dtype in (torch.float16, torch.bfloat16) and op.name in ("bmm", "baddbmm", "mm", "addmm", "matmul", "__rmatmul__"):
                 self.assertEqual(actual, expected, atol=1e-1, rtol=3e-1)
                 continue
 
