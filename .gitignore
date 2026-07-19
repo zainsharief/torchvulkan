@@ -2,6 +2,9 @@
 torchvulkan/_version.py
 src/shaders/shader_registry.h
 
+# testing data
+data/
+
 # python
 .venv/
 venv/
