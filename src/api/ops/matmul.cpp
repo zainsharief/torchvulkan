@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include "api/ops/matmul.h"
+#include "api/ops/binary.h"
 
 namespace {
 
@@ -27,7 +28,7 @@ MatmulOperands prepare_matmul_operands(
         result.self_b = self.to(promoted_type).unsqueeze(0);
         result.other_b = other.to(result.self_b.options()).unsqueeze(0);
 
-        if (has_bias) {
+        if (!has_bias) {
             result.bias_b = bias_;
             return result;
         }
@@ -111,6 +112,12 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes);
     if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
 
+    if (bias_.defined()) {
+        at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
+        if (beta.toDouble() == 0.0) return out;
+        return add_vulkan(out, bias_.to(out.scalar_type()), beta);
+    }
+
     uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
     uint32_t has_bias = (bias_.defined()) ? 1 : 0;
     uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
@@ -159,13 +166,42 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
         return (bias_b * beta).reshape(out_shape);
     }
 
+    const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
+    const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
+
+    const uint32_t target_grid = 32;
+    uint32_t grid = ((M + tile_m - 1) / tile_m) * ((N + tile_n - 1) / tile_n) * (uint32_t)B;
+    uint32_t split = 1;
+    if (B == 1 && grid < target_grid && K >= 4096 && self.storage_offset() == 0 && other.storage_offset() == 0) {
+        while (split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
+               ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512) {
+            split *= 2;
+        }
+    }
+
+    if (split > 1) {
+        at::Tensor a2 = self.reshape({(int64_t)M, (int64_t)K});
+        at::Tensor b2 = other.reshape({(int64_t)K, (int64_t)N});
+        int64_t ks = K / split;
+        at::Tensor a_chunks = a2.as_strided({split, (int64_t)M, ks}, {ks * a2.stride(1), a2.stride(0), a2.stride(1)});
+        at::Tensor b_chunks = b2.as_strided({split, ks, (int64_t)N}, {ks * b2.stride(0), b2.stride(0), b2.stride(1)});
+
+        at::Tensor partial = dispatch_matmul_coop_shader(a_chunks, b_chunks, {}, alpha, 0, cpu_fallback);
+        for (int64_t s = split / 2; s >= 1; s /= 2) {
+            partial = add_vulkan(partial.narrow(0, 0, s), partial.narrow(0, s, s), 1);
+        }
+
+        at::Tensor out = partial.reshape(out_shape);
+        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1);
+        else if (self_unsqueezed) out = out.squeeze(-2);
+        else if (other_unsqueezed) out = out.squeeze(-1);
+        return out;
+    }
+
     MatmulOperands ops = prepare_matmul_operands(self, other, bias_, has_bias, promoted_type, M, K, N, B, batch_shape);
     at::Tensor self_b = ops.self_b;
     at::Tensor other_b = ops.other_b;
     at::Tensor bias_b = ops.bias_b;
-
-    const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
-    const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
     uint32_t M_padded = ((M + tile_m - 1) / tile_m) * tile_m;
     uint32_t N_padded = ((N + tile_n - 1) / tile_n) * tile_n;
     at::Tensor out = at::empty({B, M_padded, N_padded}, self_b.options());
@@ -184,8 +220,9 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     uint32_t m_aligned = (M % tile_m == 0) ? 1 : 0;
     uint32_t n_aligned = (N % tile_n == 0) ? 1 : 0;
 
-    if ((!self.is_contiguous() && !self_transposed) || (!other.is_contiguous() && !other_transposed) || 
-        (!out.is_contiguous() && !out_transposed) || (has_bias && !bias_b.is_contiguous() && !bias_transposed)) {
+    auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
+    if (!coop_loadable(self_b) || !coop_loadable(other_b) || !coop_loadable(out) ||
+        (has_bias && !coop_loadable(bias_b))) {
         return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
     }
     
