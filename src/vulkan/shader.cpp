@@ -14,6 +14,11 @@ void VulkanShader::dispatch(
     at::TensorList tensors,
     uint32_t groupX, uint32_t groupY, uint32_t groupZ) 
 {
+    size_t dispatch_bytes = 0;
+    for (const at::Tensor& t : tensors) dispatch_bytes += t.storage().nbytes();
+    if (device->pending_bytes > DeviceContext::PENDING_BYTES_FLUSH_THRESHOLD) device->flush();
+    device->pending_bytes += dispatch_bytes;
+
     VkCommandBuffer cmd = device->getCommandBuffer();
     device->device_table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, submitInfo->pipeline);
     

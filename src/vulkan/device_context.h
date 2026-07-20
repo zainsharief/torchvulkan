@@ -33,6 +33,9 @@ struct DeviceContext {
     bool support_subgroup_control = false;
     uint32_t subgroup_size = 0;
 
+    static constexpr size_t PENDING_BYTES_FLUSH_THRESHOLD = 256ull << 20;
+    size_t pending_bytes = 0;
+
     VkCommandBuffer getCommandBuffer();
     void flush();
     ~DeviceContext();

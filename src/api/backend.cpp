@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "torchvulkan backend";
@@ -17,6 +18,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     });
 
     m.def("empty_cache", []() {
-        VulkanContext::Instance().CurrentDeviceContext()->cache.clearCache();
+        DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+        device->flush();
+        globalVulkanAllocator.clearResources();
+        device->cache.clearCache();
     });
 }

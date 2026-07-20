@@ -14,8 +14,9 @@ VkCommandBuffer DeviceContext::getCommandBuffer()
     return cmd;
 }
 
-void DeviceContext::flush() 
+void DeviceContext::flush()
 {
+    pending_bytes = 0;
     if (cmd == VK_NULL_HANDLE) return;
         
     device_table.vkEndCommandBuffer(cmd);
@@ -28,14 +29,17 @@ void DeviceContext::flush()
     VkFence fence = cache.allocateFence();
 
     std::unique_lock<std::mutex> lock(mutex_);
-    device_table.vkQueueSubmit(computeQueue, 1, &submitInfo, fence);
+    VkResult submit_result = device_table.vkQueueSubmit(computeQueue, 1, &submitInfo, fence);
     lock.unlock();
 
     cache.deleteCommandBuffer(cmd);
     cmd = VK_NULL_HANDLE;
 
-    if (device_table.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-        TORCH_CHECK(false, "torchvulkan [ERROR]: Wait for fence failed");
+    TORCH_CHECK(submit_result == VK_SUCCESS, "torchvulkan [ERROR]: vkQueueSubmit failed with VkResult ", submit_result);
+
+    VkResult wait_result = device_table.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (wait_result != VK_SUCCESS) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Wait for fence failed with VkResult ", wait_result);
     }
 
     cache.deleteFence(fence);
