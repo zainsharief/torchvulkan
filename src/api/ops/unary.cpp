@@ -14,7 +14,7 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
     uint32_t numel = iter.numel();
     if (numel == 0) return self;
     
-    if (!is_dtype_supported(iter.dtype()) || !is_dtype_supported(value.type())) {
+    if (!is_dtype_supported(iter.dtype())) {
         TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", iter.dtype(), ". Falling back to CPU.");
         at::Tensor cpu_temp = self.to(at::kCPU);
         cpu_temp.fill_(value);        
