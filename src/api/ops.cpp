@@ -25,11 +25,15 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("resize_", &resize_vulkan);
     m.impl("_reshape_alias", &reshape_alias_vulkan);
     m.impl("view", &view_vulkan);
+    m.impl("t", &t_vulkan);
+    m.impl("transpose.int", &transpose_int_vulkan);
+    m.impl("permute", &permute_vulkan);
     m.impl("contiguous", &contiguous_vulkan);
     m.impl("clone", &clone_vulkan);
     m.impl("_copy_from", &copy_from_vulkan);
     m.impl("_copy_from_and_resize", &copy_from_and_resize_vulkan);
     m.impl("copy_", &copy_vulkan_);
+    m.impl("_local_scalar_dense", &local_scalar_dense_vulkan);
 
     // unary
     m.impl("fill_.Scalar", &fill_scalar_vulkan);

@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/InferSize.h>
+#include <ATen/WrapDimUtils.h>
 #include "api/ops/factory.h"
 
 at::Tensor torchvulkan::empty_memory_format_vulkan(
@@ -301,6 +302,45 @@ at::Tensor torchvulkan::reshape_alias_vulkan(
     return result;
 }
 
+at::Tensor torchvulkan::t_vulkan(const at::Tensor& self)
+{
+    TORCH_CHECK(self.dim() <= 2, "torchvulkan [ERROR]: t() expects a tensor with <= 2 dimensions.");
+    if (self.dim() < 2) return self.alias();
+    return transpose_int_vulkan(self, 0, 1);
+}
+
+at::Tensor torchvulkan::transpose_int_vulkan(const at::Tensor& self, int64_t dim0, int64_t dim1)
+{
+    int64_t ndim = self.dim();
+    dim0 = c10::maybe_wrap_dim(dim0, ndim);
+    dim1 = c10::maybe_wrap_dim(dim1, ndim);
+
+    if (dim0 == dim1) return self.alias();
+
+    std::vector<int64_t> sizes(self.sizes().begin(), self.sizes().end());
+    std::vector<int64_t> strides(self.strides().begin(), self.strides().end());
+    std::swap(sizes[dim0], sizes[dim1]);
+    std::swap(strides[dim0], strides[dim1]);
+
+    return self.as_strided(sizes, strides, self.storage_offset());
+}
+
+at::Tensor torchvulkan::permute_vulkan(const at::Tensor& self, c10::IntArrayRef dims)
+{
+    int64_t ndim = self.dim();
+    TORCH_CHECK((int64_t)dims.size() == ndim, "torchvulkan [ERROR]: permute dims size does not match tensor dimensions.");
+
+    std::vector<int64_t> sizes(ndim);
+    std::vector<int64_t> strides(ndim);
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t d = c10::maybe_wrap_dim(dims[i], ndim);
+        sizes[i] = self.size(d);
+        strides[i] = self.stride(d);
+    }
+
+    return self.as_strided(sizes, strides, self.storage_offset());
+}
+
 at::Tensor torchvulkan::view_vulkan(
     const at::Tensor& self,
     c10::SymIntArrayRef size)
@@ -324,7 +364,12 @@ at::Tensor torchvulkan::view_vulkan(
     return result;
 }
 
-at::Tensor torchvulkan::contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format) 
+at::Scalar torchvulkan::local_scalar_dense_vulkan(const at::Tensor& self)
+{
+    return self.cpu().item();
+}
+
+at::Tensor torchvulkan::contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format)
 {
     if (self.is_contiguous(memory_format)) return self;
     at::Tensor result = at::empty_like(self, self.options().memory_format(memory_format));
