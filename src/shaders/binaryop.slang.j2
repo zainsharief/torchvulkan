@@ -76,6 +76,11 @@ struct MinOp<T : IVulkanArithmetic> : IBinaryOp<T>
     static T eval(T a, T b, T alpha) { return T.ext_min(a, b); }
 }
 
+struct ThresholdBackwardOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_threshold_backward(a, b, alpha); }
+}
+
 void baseBinaryKernel<
     T,
     let VEC_SIZE : int,

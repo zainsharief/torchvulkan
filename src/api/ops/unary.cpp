@@ -155,14 +155,57 @@ void torchvulkan::dispatch_unary_shader(
     );
 }
 
-at::Tensor torchvulkan::relu_vulkan(const at::Tensor& self)
+at::Tensor torchvulkan::unary_op_vulkan(
+    const at::Tensor& self,
+    UnaryOp operation,
+    const std::function<at::Tensor(const at::Tensor&)>& fallback)
 {
     if (!is_dtype_supported(self.scalar_type())) {
         TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
-        return at::relu(self.cpu()).to(self.device());
+        return fallback(self.cpu()).to(self.device());
     }
 
     at::Tensor out = at::empty_like(self);
-    dispatch_unary_shader(self, out, UnaryOp::RELU);
+    dispatch_unary_shader(self, out, operation);
     return out;
+}
+
+namespace {
+
+at::Tensor promote_to_float(const at::Tensor& self)
+{
+    if (self.is_floating_point() || self.is_complex()) return self;
+    return self.to(c10::typeMetaToScalarType(at::get_default_dtype()));
+}
+
+} // namespace
+
+at::Tensor torchvulkan::relu_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::RELU, [](const at::Tensor& a) { return at::relu(a); });
+}
+
+at::Tensor torchvulkan::exp_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::EXP, [](const at::Tensor& a) { return at::exp(a); });
+}
+
+at::Tensor torchvulkan::log_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::LOG, [](const at::Tensor& a) { return at::log(a); });
+}
+
+at::Tensor torchvulkan::sqrt_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::SQRT, [](const at::Tensor& a) { return at::sqrt(a); });
+}
+
+at::Tensor torchvulkan::neg_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::NEG, [](const at::Tensor& a) { return at::neg(a); });
+}
+
+at::Tensor torchvulkan::reciprocal_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::RECIPROCAL, [](const at::Tensor& a) { return at::reciprocal(a); });
 }

@@ -253,9 +253,11 @@ at::Tensor torchvulkan::multiply_scalar_vulkan(const at::Tensor& self, const at:
 at::Tensor torchvulkan::divide_vulkan(const at::Tensor& self, const at::Tensor& other) {
     at::Tensor self_vulkan = self;
     at::Tensor other_vulkan = other;
-    
-    if (at::isIntegralType(self.scalar_type(), /* includeBool = */ true)) self_vulkan = self.to(c10::kFloat);
-    if (at::isIntegralType(other.scalar_type(), /* includeBool = */ true)) other_vulkan = other.to(c10::kFloat);
+
+    if (!self.is_floating_point() && !other.is_floating_point()) {
+        self_vulkan = self.to(c10::kFloat);
+        other_vulkan = other.to(c10::kFloat);
+    }
 
     return binary_op_vulkan(self_vulkan, other_vulkan, (int)1, BinaryOp::DIV, [](const at::Tensor& a, const at::Tensor& b) { return at::div(a, b); });
 }
@@ -292,8 +294,69 @@ at::Tensor torchvulkan::atan2_vulkan(const at::Tensor& self, const at::Tensor& o
     at::Tensor self_vulkan = self;
     at::Tensor other_vulkan = other;
 
-    if (at::isIntegralType(self.scalar_type(), /* includeBool = */ true)) self_vulkan = self.to(c10::kFloat);
-    if (at::isIntegralType(other.scalar_type(), /* includeBool = */ true)) other_vulkan = other.to(c10::kFloat);
+    if (!self.is_floating_point() && !other.is_floating_point()) {
+        self_vulkan = self.to(c10::kFloat);
+        other_vulkan = other.to(c10::kFloat);
+    }
 
     return binary_op_vulkan(self_vulkan, other_vulkan, (int)1, BinaryOp::ATAN2, [](const at::Tensor& a, const at::Tensor& b) { return at::atan2(a, b); });
+}
+
+at::Tensor torchvulkan::threshold_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& threshold) {
+    return binary_op_vulkan(grad_output, self, threshold, BinaryOp::THRESHOLD_BACKWARD, [threshold](const at::Tensor& a, const at::Tensor& b) { return at::threshold_backward(a, b, threshold); });
+}
+
+at::Tensor& torchvulkan::add_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    return self.copy_(add_vulkan(self, other, alpha));
+}
+
+at::Tensor& torchvulkan::add_scalar_vulkan_(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+    return self.copy_(add_scalar_vulkan(self, other, alpha));
+}
+
+at::Tensor& torchvulkan::subtract_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    return self.copy_(subtract_vulkan(self, other, alpha));
+}
+
+at::Tensor& torchvulkan::subtract_scalar_vulkan_(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+    return self.copy_(subtract_scalar_vulkan(self, other, alpha));
+}
+
+at::Tensor& torchvulkan::multiply_vulkan_(at::Tensor& self, const at::Tensor& other) {
+    return self.copy_(multiply_vulkan(self, other));
+}
+
+at::Tensor& torchvulkan::multiply_scalar_vulkan_(at::Tensor& self, const at::Scalar& other) {
+    return self.copy_(multiply_scalar_vulkan(self, other));
+}
+
+at::Tensor& torchvulkan::divide_vulkan_(at::Tensor& self, const at::Tensor& other) {
+    return self.copy_(divide_vulkan(self, other));
+}
+
+at::Tensor& torchvulkan::divide_scalar_vulkan_(at::Tensor& self, const at::Scalar& other) {
+    return self.copy_(divide_scalar_vulkan(self, other));
+}
+
+at::Tensor& torchvulkan::addcmul_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+    at::Tensor product = multiply_vulkan(tensor1, tensor2);
+    return self.copy_(add_vulkan(self, product, value));
+}
+
+at::Tensor& torchvulkan::addcdiv_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
+    at::Tensor quotient = divide_vulkan(tensor1, tensor2);
+    return self.copy_(add_vulkan(self, quotient, value));
+}
+
+at::Tensor torchvulkan::lerp_scalar_vulkan(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+    at::Tensor diff = subtract_vulkan(end, self, (int)1);
+    return add_vulkan(self, diff, weight);
+}
+
+at::Tensor& torchvulkan::lerp_scalar_vulkan_(at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+    return self.copy_(lerp_scalar_vulkan(self, end, weight));
+}
+
+at::Tensor& torchvulkan::lerp_scalar_vulkan_out(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight, at::Tensor& out) {
+    return out.copy_(lerp_scalar_vulkan(self, end, weight));
 }

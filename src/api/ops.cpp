@@ -40,23 +40,36 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("fill_.Tensor", &fill_tensor_vulkan);
     m.impl("zero_", &zero_vulkan);
     m.impl("relu", &relu_vulkan);
+    m.impl("exp", &exp_vulkan);
+    m.impl("log", &log_vulkan);
+    m.impl("sqrt", &sqrt_vulkan);
+    m.impl("neg", &neg_vulkan);
+    m.impl("reciprocal", &reciprocal_vulkan);
 
     // binary - Add
     m.impl("add.Tensor", &add_vulkan);
     m.impl("add.Scalar", &add_scalar_vulkan);
+    m.impl("add_.Tensor", &add_vulkan_);
+    m.impl("add_.Scalar", &add_scalar_vulkan_);
 
     // binary - Subtract
     m.impl("sub.Tensor", &subtract_vulkan);
     m.impl("sub.Scalar", &subtract_scalar_vulkan);
+    m.impl("sub_.Tensor", &subtract_vulkan_);
+    m.impl("sub_.Scalar", &subtract_scalar_vulkan_);
     m.impl("rsub.Scalar", &rsub_scalar_vulkan);
 
     // binary - Multiply
     m.impl("mul.Tensor", &multiply_vulkan);
     m.impl("mul.Scalar", &multiply_scalar_vulkan);
+    m.impl("mul_.Tensor", &multiply_vulkan_);
+    m.impl("mul_.Scalar", &multiply_scalar_vulkan_);
 
     // binary - Divide
     m.impl("div.Tensor", &divide_vulkan);
     m.impl("div.Scalar", &divide_scalar_vulkan);
+    m.impl("div_.Tensor", &divide_vulkan_);
+    m.impl("div_.Scalar", &divide_scalar_vulkan_);
 
     // binary - Min/Max
     m.impl("maximum", &maximum_vulkan);
@@ -69,6 +82,16 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 
     // binary - Atan2
     m.impl("atan2", &atan2_vulkan);
+
+    // binary - fused
+    m.impl("addcmul_", &addcmul_vulkan_);
+    m.impl("addcdiv_", &addcdiv_vulkan_);
+    m.impl("lerp.Scalar", &lerp_scalar_vulkan);
+    m.impl("lerp_.Scalar", &lerp_scalar_vulkan_);
+    m.impl("lerp.Scalar_out", &lerp_scalar_vulkan_out);
+
+    // autograd support
+    m.impl("threshold_backward", &threshold_backward_vulkan);
 
     // matmul
     m.impl("mm", &mm_vulkan);

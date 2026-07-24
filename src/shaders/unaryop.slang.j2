@@ -26,6 +26,31 @@ struct ReluOp<T : IVulkanArithmetic> : IUnaryOp<T>
     static T eval(T a) { return T.ext_max(a, T.ext_zero()); }
 }
 
+struct ExpOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_exp(a); }
+}
+
+struct LogOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_log(a); }
+}
+
+struct SqrtOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sqrt(a); }
+}
+
+struct NegOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_neg(a); }
+}
+
+struct ReciprocalOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_reciprocal(a); }
+}
+
 void baseUnaryKernel<
     T,
     let VEC_SIZE : int,

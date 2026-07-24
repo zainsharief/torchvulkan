@@ -48,7 +48,8 @@ SHADERS = [
                     {"name" : '6', 'struct' : 'MinOp'},
                     {"name" : '7', 'struct' : 'PowOp'},
                     {"name" : '8', 'struct' : 'RPowOp'},
-                    {"name" : '9', 'struct' : 'Atan2Op'}
+                    {"name" : '9', 'struct' : 'Atan2Op'},
+                    {"name" : '10', 'struct' : 'ThresholdBackwardOp'}
                 ]}
     },
     {
@@ -60,7 +61,12 @@ SHADERS = [
         'name' : 'unaryop.slang.j2',
         'dtypes' : DTYPES,
         'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'ReluOp'}
+                    {"name" : '0', 'struct' : 'ReluOp'},
+                    {"name" : '1', 'struct' : 'ExpOp'},
+                    {"name" : '2', 'struct' : 'LogOp'},
+                    {"name" : '3', 'struct' : 'SqrtOp'},
+                    {"name" : '4', 'struct' : 'NegOp'},
+                    {"name" : '5', 'struct' : 'ReciprocalOp'}
                 ]}
     },
     {

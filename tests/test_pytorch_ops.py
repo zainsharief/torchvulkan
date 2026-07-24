@@ -102,6 +102,11 @@ class TestVulkanOps(TestCase):
                 self.assertEqual(actual, expected, atol=1e-1, rtol=3e-1)
                 continue
 
+            elif dtype == torch.bfloat16 and op.name in ("lerp",):
+                # computed as self + weight * (end - self) with an extra bf16 rounding step vs the reference
+                self.assertEqual(actual, expected, atol=3e-2, rtol=3e-2)
+                continue
+
             elif op.name in ("pow", "__rpow__", "square", "float_power", "atan2", "ldexp") or dtype in (torch.float16, torch.bfloat16):
                 self.assertEqual(actual, expected, atol=1e-2, rtol=1e-2)
                 continue
