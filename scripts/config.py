@@ -80,6 +80,19 @@ SHADERS = [
         'kwargs' : {}
     },
     {
+        'name' : 'reduce.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'SumReduceOp'},
+                    {"name" : '1', 'struct' : 'AmaxReduceOp'}
+                ]}
+    },
+    {
+        'name' : 'nllloss.slang.j2',
+        'dtypes' : FLOATS,
+        'kwargs' : {}
+    },
+    {
         'name' : 'matmul_simd.slang.j2',
         'dtypes' : DTYPES,
         'kwargs' : {}

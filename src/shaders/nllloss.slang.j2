@@ -1,0 +1,80 @@
+[[vk::constant_id(0)]] const uint MODE = 0;
+[[vk::constant_id(1)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    uint N;
+    uint C;
+    int ignore_index;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+interface INllLossMode
+{
+    static void apply(
+        uint tid,
+        StructuredBuffer<{{ d1 }}> tensor_in,
+        StructuredBuffer<int64_t> target,
+        RWStructuredBuffer<{{ d1 }}> tensor_out
+    );
+}
+
+struct ForwardGatherOp : INllLossMode
+{
+    static void apply(uint tid, StructuredBuffer<{{ d1 }}> tensor_in, StructuredBuffer<int64_t> target, RWStructuredBuffer<{{ d1 }}> tensor_out)
+    {
+        if (tid >= pcs.N) return;
+
+        int t = int(target[tid]);
+        if (t == pcs.ignore_index) { tensor_out[tid] = {{ d1 }}(0); return; }
+        tensor_out[tid] = -tensor_in[tid * pcs.C + uint(t)];
+    }
+}
+
+struct BackwardScatterOp : INllLossMode
+{
+    static void apply(uint tid, StructuredBuffer<{{ d1 }}> tensor_in, StructuredBuffer<int64_t> target, RWStructuredBuffer<{{ d1 }}> tensor_out)
+    {
+        if (tid >= pcs.N * pcs.C) return;
+
+        uint i = tid / pcs.C;
+        uint c = tid % pcs.C;
+        int t = int(target[i]);
+        tensor_out[tid] = (t != pcs.ignore_index && int(c) == t) ? -tensor_in[i] : {{ d1 }}(0);
+    }
+}
+
+struct WeightGatherOp : INllLossMode
+{
+    static void apply(uint tid, StructuredBuffer<{{ d1 }}> tensor_in, StructuredBuffer<int64_t> target, RWStructuredBuffer<{{ d1 }}> tensor_out)
+    {
+        if (tid >= pcs.N) return;
+
+        int t = int(target[tid]);
+        if (t == pcs.ignore_index) { tensor_out[tid] = {{ d1 }}(0); return; }
+        tensor_out[tid] = tensor_in[uint(t)];
+    }
+}
+
+void baseNllLossKernel<Mode : INllLossMode>(
+    uint3 gi: SV_DispatchThreadID,
+    StructuredBuffer<{{ d1 }}> tensor_in,
+    StructuredBuffer<int64_t> target,
+    RWStructuredBuffer<{{ d1 }}> tensor_out
+)
+{
+    Mode.apply(gi.x, tensor_in, target, tensor_out);
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
+[[vk::binding(1, 0)]] StructuredBuffer<int64_t> target;
+[[vk::binding(2, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) {
+    if (MODE == 0) baseNllLossKernel<ForwardGatherOp>(gi, tensor_in, target, tensor_out);
+    else if (MODE == 1) baseNllLossKernel<BackwardScatterOp>(gi, tensor_in, target, tensor_out);
+    else if (MODE == 2) baseNllLossKernel<WeightGatherOp>(gi, tensor_in, target, tensor_out);
+}

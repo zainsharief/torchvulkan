@@ -5,6 +5,9 @@
 #include "api/ops/unary.h"
 #include "api/ops/matmul.h"
 #include "api/ops/linalg.h"
+#include "api/ops/reduce.h"
+#include "api/ops/softmax.h"
+#include "api/ops/nllloss.h"
 
 using namespace torchvulkan;
 
@@ -92,6 +95,21 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 
     // autograd support
     m.impl("threshold_backward", &threshold_backward_vulkan);
+
+    // reductions
+    m.impl("sum.dim_IntList", &sum_dim_vulkan);
+    m.impl("sum", &sum_vulkan);
+    m.impl("amax", &amax_vulkan);
+    m.impl("mean.dim", &mean_dim_vulkan);
+    m.impl("mean", &mean_vulkan);
+
+    // softmax
+    m.impl("_log_softmax", &log_softmax_vulkan);
+    m.impl("_log_softmax_backward_data", &log_softmax_backward_vulkan);
+
+    // nll_loss
+    m.impl("nll_loss_forward", &nll_loss_forward_vulkan);
+    m.impl("nll_loss_backward", &nll_loss_backward_vulkan);
 
     // matmul
     m.impl("mm", &mm_vulkan);
