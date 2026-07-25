@@ -67,8 +67,8 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
 
     {% if 'float' in d1 %}
-    static {{ d1 }} ext_exp({{ d1 }} a) { return exp(a); }
-    static {{ d1 }} ext_log({{ d1 }} a) { return log(a); }
+    static {{ d1 }} ext_exp({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp(float(a))); return exp(a); }
+    static {{ d1 }} ext_log({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a))); return log(a); }
     static {{ d1 }} ext_sqrt({{ d1 }} a) { return sqrt(a); }
     static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(1.0) / a; }
     {% else %}
