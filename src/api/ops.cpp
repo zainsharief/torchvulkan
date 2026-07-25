@@ -4,7 +4,6 @@
 #include "api/ops/binary.h"
 #include "api/ops/unary.h"
 #include "api/ops/matmul.h"
-#include "api/ops/linalg.h"
 #include "api/ops/reduce.h"
 #include "api/ops/softmax.h"
 #include "api/ops/nllloss.h"
@@ -120,6 +119,4 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("matmul", &matmul_vulkan);
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);
-    m.impl("addr", &addr_vulkan);
-    m.impl("bilinear", &bilinear_vulkan);
 }
