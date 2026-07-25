@@ -11,7 +11,7 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
         .add_input(self)
         .build();
 
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return self;
     
     if (!is_dtype_supported(iter.dtype())) {
@@ -59,7 +59,6 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
     pcs.push(sizes)
         .push_array(strides_in)
         .push(numel)
-        .push((uint32_t)0) // padding
         .push_scalar(value, self.scalar_type());
 
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;

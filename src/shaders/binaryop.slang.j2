@@ -13,8 +13,7 @@ struct PushConstants
     uint4 strides_a;
     uint4 strides_b;
     uint4 strides_out;
-    uint numel;
-    uint pad;
+    uint64_t numel;
     {{ d1 }} alpha;
     {{ d1 }} scalar_value;
 };

@@ -40,7 +40,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
         .build();
 
     out = iter.output();
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return out;
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
@@ -93,11 +93,10 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push_array(strides_b)
        .push_array(strides_out)
        .push(numel)
-       .push((uint32_t)0) // pad to align to 8-bytes
        .push_scalar(alpha, promoted_type)
        .push_scalar((at::Scalar)0, promoted_type);
            
-    uint32_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
+    uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
 
     VulkanShader shader(shader_id, specialization, device);
@@ -143,7 +142,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
         .build();
 
     out = iter.output();
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return out;
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
@@ -194,11 +193,10 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push_array(strides_b)
        .push_array(strides_out)
        .push(numel)
-       .push((uint32_t)0) // pad to align to 8-bytes
        .push_scalar(alpha, promoted_type)
        .push_scalar(other, promoted_type);
 
-    uint32_t numel_vec = !contiguous ? numel : (numel + (vecSize-1)) / vecSize;
+    uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize-1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
     
     VulkanShader shader(shader_id, specialization, device);

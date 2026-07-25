@@ -396,7 +396,7 @@ void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& 
         .add_input(src)
         .build();
 
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return;
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {
@@ -455,7 +455,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         .add_input(src)
         .build();
 
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return;
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {

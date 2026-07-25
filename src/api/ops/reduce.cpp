@@ -25,7 +25,7 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
     out_sizes[dim] = 1;
 
     at::Tensor out = at::empty(out_sizes, self.options());
-    uint32_t numel_out = static_cast<uint32_t>(out.numel());
+    uint64_t numel_out = out.numel();
     if (numel_out == 0 || reduce_size == 0) return keepdim ? out : out.squeeze(dim);
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
