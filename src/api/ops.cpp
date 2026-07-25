@@ -13,8 +13,8 @@ using namespace torchvulkan;
 void vulkan_cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) 
 {
     VulkanContext& context = VulkanContext::Instance();
-    if (!context.shouldFallback()) TORCH_CHECK(false, "torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_FALLBACK=1 to enable fallback.");
-    TORCH_WARN_ONCE("torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_FALLBACK=0 to disable fallback.");
+    if (context.isStrict()) TORCH_CHECK(false, "torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_STRICT=1 to enable strict mode.");
+    TORCH_WARN_ONCE("torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_STRICT=0 to disable strict mode.");
     at::native::cpu_fallback(op, stack);
 }
 

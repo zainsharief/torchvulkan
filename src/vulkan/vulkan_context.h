@@ -21,7 +21,7 @@ public:
     static c10::DeviceIndex CurrentDevice() { return currentDeviceIndex; }
     static void SetCurrentDevice(c10::DeviceIndex deviceIndex) { currentDeviceIndex = deviceIndex; }
     uint32_t getDeviceCount() { return devices.size(); }
-    bool shouldFallback() { return shouldFallback_; }
+    bool isStrict() { return isStrict_; }
 
 private:
     VulkanContext();
@@ -36,7 +36,7 @@ private:
 
     void queryVulkanVersion();
     uint32_t apiVersion, major, minor, patch;
-    bool shouldFallback_ = true;
+    bool isStrict_ = true;
 
     // each device creates a new currentDeviceIndex 
     static thread_local c10::DeviceIndex currentDeviceIndex;
