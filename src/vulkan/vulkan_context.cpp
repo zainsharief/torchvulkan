@@ -90,6 +90,9 @@ void VulkanContext::initVulkan()
     }
 
     volkLoadInstance(instance);
+
+    const char* env = std::getenv("TORCHVULKAN_FALLBACK");
+    shouldFallback_ = env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
 void VulkanContext::createDeviceContexts()

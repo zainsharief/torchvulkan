@@ -11,13 +11,16 @@
 
 using namespace torchvulkan;
 
-void vulkan_cpu_fallback_warning(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
-    TORCH_CHECK(false, "torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name());
+void vulkan_cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) 
+{
+    VulkanContext& context = VulkanContext::Instance();
+    if (!context.shouldFallback()) TORCH_CHECK(false, "torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_FALLBACK=1 to enable fallback.");
+    TORCH_WARN_ONCE("torchvulkan [NOT IMPLEMENTED]: Silent fallback detected for operation: ", op.schema().operator_name(), ". Set TORCHVULKAN_FALLBACK=0 to disable fallback.");
     at::native::cpu_fallback(op, stack);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
-    m.fallback(torch::CppFunction::makeFromBoxedFunction<&vulkan_cpu_fallback_warning>());
+    m.fallback(torch::CppFunction::makeFromBoxedFunction<&vulkan_cpu_fallback>());
 }
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
