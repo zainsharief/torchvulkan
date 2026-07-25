@@ -24,7 +24,11 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {
-        TORCH_CHECK(false, "torchvulkan [WARNING]: Coalesced dimensions (", out_dims, ") exceed maximum supported (", MAX_DIMS, "). Falling back to CPU.");
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Coalesced dimensions (", out_dims, ") exceed maximum supported (", MAX_DIMS, "). Falling back to CPU.");
+        at::Tensor cpu_temp = self.to(at::kCPU);
+        cpu_temp.fill_(value);
+        self.copy_(cpu_temp);
+        return self;
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();

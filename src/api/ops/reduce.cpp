@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/WrapDimUtils.h>
+#include <limits>
 #include "api/ops/reduce.h"
 #include "api/ops/binary.h"
 
@@ -26,7 +27,11 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
 
     at::Tensor out = at::empty(out_sizes, self.options());
     uint64_t numel_out = out.numel();
-    if (numel_out == 0 || reduce_size == 0) return keepdim ? out : out.squeeze(dim);
+    if (numel_out == 0) return keepdim ? out : out.squeeze(dim);
+    if (reduce_size == 0) {
+        out.fill_(operation == ReduceOp::SUM ? 0.0 : -std::numeric_limits<double>::infinity());
+        return keepdim ? out : out.squeeze(dim);
+    }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(self.scalar_type(), 1);
@@ -77,6 +82,15 @@ at::Tensor torchvulkan::reduce_dims_vulkan(
 {
     if (!is_dtype_supported(self.scalar_type())) {
         TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
+        at::Tensor cpu_self = self.cpu();
+        at::Tensor cpu_result = operation == ReduceOp::SUM
+            ? at::sum(cpu_self, dims, keepdim)
+            : at::amax(cpu_self, dims.has_value() ? *dims : at::IntArrayRef{}, keepdim);
+        return cpu_result.to(self.device());
+    }
+
+    if (self.dim() > MAX_DIMS) {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Tensor rank (", self.dim(), ") exceed maximum supported (", MAX_DIMS, "). Falling back to CPU.");
         at::Tensor cpu_self = self.cpu();
         at::Tensor cpu_result = operation == ReduceOp::SUM
             ? at::sum(cpu_self, dims, keepdim)

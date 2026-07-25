@@ -100,6 +100,8 @@ at::Tensor torchvulkan::copy_vulkan(
     bool non_blocking) 
 {
     TORCH_CHECK(self.sizes() == dst.sizes(), "torchvulkan [ERROR]: Copy sizes mismatch");
+    TORCH_CHECK(!self.is_conj() && !self.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying from a conjugated or negated source is not yet supported.");
+    TORCH_CHECK(!dst.is_conj() && !dst.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying into a conjugated or negated destination is not yet supported.");
 
     at::Tensor src = self;
     c10::DeviceType src_type = src.device().type();
