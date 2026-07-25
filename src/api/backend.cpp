@@ -5,12 +5,20 @@
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "torchvulkan backend";
 
-    m.def("is_available", []() {
-        return VulkanContext::Instance().instance != nullptr;
+    m.def("is_available", []() -> bool {
+        try {
+            return VulkanContext::Instance().getDeviceCount() > 0;
+        } catch (...) {
+            return false;
+        }
     });
 
-    m.def("device_count", []() {
-        return VulkanContext::Instance().getDeviceCount();
+    m.def("device_count", []() -> int64_t {
+        try {
+            return static_cast<int64_t>(VulkanContext::Instance().getDeviceCount());
+        } catch (...) {
+            return 0;
+        }
     });
 
     m.def("synchronize", []() {
