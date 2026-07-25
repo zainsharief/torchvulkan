@@ -88,23 +88,31 @@ at::Tensor& torchvulkan::zero_vulkan(at::Tensor& self)
     return fill_scalar_vulkan(self, 0);
 }
 
-void torchvulkan::dispatch_unary_shader(
+at::Tensor torchvulkan::unary_op_vulkan(
     const at::Tensor& src,
-    const at::Tensor& dst,
-    UnaryOp operation)
+    UnaryOp operation,
+    const std::function<at::Tensor(const at::Tensor&)>& fallback)
 {
+    at::Tensor dst = at::empty_like(src);
+
+    if (!is_dtype_supported(src.scalar_type())) {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", src.scalar_type(), ". Falling back to CPU.");
+        return fallback(src.cpu()).to(src.device());
+    }
+
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(dst)
         .add_input(src)
         .build();
 
-    uint32_t numel = iter.numel();
-    if (numel == 0) return;
+    uint64_t numel = iter.numel();
+    if (numel == 0) return dst;
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {
-        TORCH_CHECK(false, "torchvulkan [WARNING]: Coalesced dimensions (", out_dims, ") exceed maximum supported (", MAX_DIMS, "). Falling back to CPU.");
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Coalesced dimensions (", out_dims, ") exceed maximum supported (", MAX_DIMS, "). Falling back to CPU.");
+        return fallback(src.cpu()).to(src.device());
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
@@ -146,7 +154,7 @@ void torchvulkan::dispatch_unary_shader(
         .push_array(strides_out)
         .push(numel);
 
-    uint32_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
+    uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
 
     VulkanShader shader(shader_id, specialization, device);
@@ -156,21 +164,8 @@ void torchvulkan::dispatch_unary_shader(
         {src, dst},
         groupX, 1, 1
     );
-}
 
-at::Tensor torchvulkan::unary_op_vulkan(
-    const at::Tensor& self,
-    UnaryOp operation,
-    const std::function<at::Tensor(const at::Tensor&)>& fallback)
-{
-    if (!is_dtype_supported(self.scalar_type())) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
-        return fallback(self.cpu()).to(self.device());
-    }
-
-    at::Tensor out = at::empty_like(self);
-    dispatch_unary_shader(self, out, operation);
-    return out;
+    return dst;
 }
 
 namespace {

@@ -19,20 +19,9 @@ enum class UnaryOp {
 
 namespace torchvulkan {
 
-at::Tensor& fill_scalar_vulkan(
-    at::Tensor& self,
-    const at::Scalar& value
-);
-
-at::Tensor& fill_tensor_vulkan(
-    at::Tensor& self,
-    const at::Tensor& value
-);
-
-at::Tensor& zero_vulkan(
-    at::Tensor& self
-);
-
+at::Tensor& fill_scalar_vulkan(at::Tensor& self, const at::Scalar& value);
+at::Tensor& fill_tensor_vulkan(at::Tensor& self, const at::Tensor& value);
+at::Tensor& zero_vulkan(at::Tensor& self);
 at::Tensor relu_vulkan(const at::Tensor& self);
 at::Tensor exp_vulkan(const at::Tensor& self);
 at::Tensor log_vulkan(const at::Tensor& self);
@@ -44,12 +33,6 @@ at::Tensor unary_op_vulkan(
     const at::Tensor& self,
     UnaryOp operation,
     const std::function<at::Tensor(const at::Tensor&)>& fallback
-);
-
-void dispatch_unary_shader(
-    const at::Tensor& src,
-    const at::Tensor& dst,
-    UnaryOp operation
 );
 
 } // namespace torchvulkan
