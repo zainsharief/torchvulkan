@@ -57,10 +57,22 @@ const at::Tensor& resize_vulkan(
     c10::optional<at::MemoryFormat> memory_format
 );
 
+at::Tensor reshape_alias_vulkan(
+    const at::Tensor& self, 
+    c10::SymIntArrayRef sizes, 
+    c10::SymIntArrayRef strides
+); 
+
 at::Tensor view_vulkan(
     const at::Tensor& self,
     c10::SymIntArrayRef size
 );
+
+at::Tensor t_vulkan(const at::Tensor& self);
+at::Tensor transpose_int_vulkan(const at::Tensor& self, int64_t dim0, int64_t dim1);
+at::Tensor permute_vulkan(const at::Tensor& self, c10::IntArrayRef dims);
+
+at::Scalar local_scalar_dense_vulkan(const at::Tensor& self);
 
 at::Tensor contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format);
 at::Tensor clone_vulkan(const at::Tensor& self, c10::optional<at::MemoryFormat> memory_format);

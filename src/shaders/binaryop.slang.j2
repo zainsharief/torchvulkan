@@ -13,8 +13,7 @@ struct PushConstants
     uint4 strides_a;
     uint4 strides_b;
     uint4 strides_out;
-    uint numel;
-    uint pad;
+    uint64_t numel;
     {{ d1 }} alpha;
     {{ d1 }} scalar_value;
 };
@@ -74,6 +73,11 @@ struct MaxOp<T : IVulkanArithmetic> : IBinaryOp<T>
 struct MinOp<T : IVulkanArithmetic> : IBinaryOp<T>
 {
     static T eval(T a, T b, T alpha) { return T.ext_min(a, b); }
+}
+
+struct ThresholdBackwardOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_threshold_backward(a, b, alpha); }
 }
 
 void baseBinaryKernel<

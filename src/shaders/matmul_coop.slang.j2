@@ -15,6 +15,9 @@
 [[vk::constant_id(12)]] const uint OUT_TRANSPOSED = 0;
 [[vk::constant_id(13)]] const uint BIAS_TRANSPOSED = 0;
 
+[[vk::constant_id(14)]] const uint M_ALIGNED = 0;
+[[vk::constant_id(15)]] const uint N_ALIGNED = 0;
+
 #define PAD 4
 
 struct TensorStrides {
@@ -95,86 +98,239 @@ void matmulKernel<
     GroupMemoryBarrierWithGroupSync();
 
     {% if os == 'darwin' %}
-    
-    for (uint k = 0; k < pcs.k_dim; k += BK)
+
+    uint a_rows[warp_frags_m];
+    [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
     {
-        bool is_tail = (k + BK) > pcs.k_dim;
+        a_rows[mi] = tile_m + warp_row_base + mi * block_size;
+        if (M_ALIGNED == 0) a_rows[mi] = min(a_rows[mi], pcs.m_dim - 1);
+    }
+    uint b_cols[warp_frags_n];
+    [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+    {
+        b_cols[nj] = tile_n + warp_col_base + nj * block_size;
+        if (N_ALIGNED == 0) b_cols[nj] = min(b_cols[nj], pcs.n_dim - 1);
+    }
 
-        if (is_tail)
+    uint k_main_end = (pcs.k_dim / BK) * BK;
+    uint k = 0;
+
+    for (; k + 8 * block_size_acc <= k_main_end; k += 8 * block_size_acc)
+    {
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA8[8][warp_frags_m];
+        [ForceUnroll] for (uint s = 0; s < 8; ++s)
         {
-            for (uint i = ti; i < (WARPS_M * warp_frags_m * block_size) * BK; i += total_threads)
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
             {
-                uint r = i / BK;
-                uint c = i % BK;
-                uint a_row = min(tile_m + r, pcs.m_dim - 1);
-                {{ d1 }} val = ({{ d1 }})0;
-                if ((k + c) < pcs.k_dim)
-                {
-                    uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (k + c) * pcs.strides_a.col;
-                    val = tensor_a[global_idx];
+                uint idx = batch_offset_a + a_rows[mi] * pcs.strides_a.row + (k + s * block_size_acc) * pcs.strides_a.col;
+                if (A_TRANSPOSED == 1) {
+                    matA8[s][mi] = matA8[s][mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, idx, pcs.strides_a.col);
+                } else {
+                    matA8[s][mi] = matA8[s][mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, idx, pcs.strides_a.row);
                 }
-                smemTailA[r * BK + c] = val;
             }
-
-            for (uint i = ti; i < BK * (WARPS_N * warp_frags_n * block_size); i += total_threads)
-            {
-                uint r = i / (WARPS_N * warp_frags_n * block_size);
-                uint c = i % (WARPS_N * warp_frags_n * block_size);
-                uint b_col = min(tile_n + c, pcs.n_dim - 1);
-                {{ d1 }} val = ({{ d1 }})0;
-                if ((k + r) < pcs.k_dim)
-                {
-                    uint global_idx = batch_offset_b + (k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
-                    val = tensor_b[global_idx];
-                }
-                smemTailB[r * (WARPS_N * warp_frags_n * block_size) + c] = val;
-            }
-
-            GroupMemoryBarrierWithGroupSync();
         }
+
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB8[8][warp_frags_n];
+        [ForceUnroll] for (uint s = 0; s < 8; ++s)
+        {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                uint idx = batch_offset_b + (k + s * block_size_acc) * pcs.strides_b.row + b_cols[nj] * pcs.strides_b.col;
+                if (B_TRANSPOSED == 1) {
+                    matB8[s][nj] = matB8[s][nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, idx, pcs.strides_b.col);
+                } else {
+                    matB8[s][nj] = matB8[s][nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, idx, pcs.strides_b.row);
+                }
+            }
+        }
+
+        [ForceUnroll] for (uint s = 0; s < 8; ++s)
+        {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+            {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+                {
+                    uint flat_idx = mi * warp_frags_n + nj;
+                    acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA8[s][mi], matB8[s][nj], acc[flat_idx]);
+                }
+            }
+        }
+    }
+
+    for (; k + 4 * block_size_acc <= k_main_end; k += 4 * block_size_acc)
+    {
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA4[4][warp_frags_m];
+        [ForceUnroll] for (uint s = 0; s < 4; ++s)
+        {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+            {
+                uint idx = batch_offset_a + a_rows[mi] * pcs.strides_a.row + (k + s * block_size_acc) * pcs.strides_a.col;
+                if (A_TRANSPOSED == 1) {
+                    matA4[s][mi] = matA4[s][mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, idx, pcs.strides_a.col);
+                } else {
+                    matA4[s][mi] = matA4[s][mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, idx, pcs.strides_a.row);
+                }
+            }
+        }
+
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB4[4][warp_frags_n];
+        [ForceUnroll] for (uint s = 0; s < 4; ++s)
+        {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                uint idx = batch_offset_b + (k + s * block_size_acc) * pcs.strides_b.row + b_cols[nj] * pcs.strides_b.col;
+                if (B_TRANSPOSED == 1) {
+                    matB4[s][nj] = matB4[s][nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, idx, pcs.strides_b.col);
+                } else {
+                    matB4[s][nj] = matB4[s][nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, idx, pcs.strides_b.row);
+                }
+            }
+        }
+
+        [ForceUnroll] for (uint s = 0; s < 4; ++s)
+        {
+            [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+            {
+                [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+                {
+                    uint flat_idx = mi * warp_frags_n + nj;
+                    acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA4[s][mi], matB4[s][nj], acc[flat_idx]);
+                }
+            }
+        }
+    }
+
+    for (; k + 2 * block_size_acc <= k_main_end; k += 2 * block_size_acc)
+    {
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA0[warp_frags_m];
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA1[warp_frags_m];
+        [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+        {
+            uint idx0 = batch_offset_a + a_rows[mi] * pcs.strides_a.row + k * pcs.strides_a.col;
+            uint idx1 = batch_offset_a + a_rows[mi] * pcs.strides_a.row + (k + block_size_acc) * pcs.strides_a.col;
+            if (A_TRANSPOSED == 1) {
+                matA0[mi] = matA0[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, idx0, pcs.strides_a.col);
+                matA1[mi] = matA1[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, idx1, pcs.strides_a.col);
+            } else {
+                matA0[mi] = matA0[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, idx0, pcs.strides_a.row);
+                matA1[mi] = matA1[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, idx1, pcs.strides_a.row);
+            }
+        }
+
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB0[warp_frags_n];
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB1[warp_frags_n];
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+        {
+            uint idx0 = batch_offset_b + k * pcs.strides_b.row + b_cols[nj] * pcs.strides_b.col;
+            uint idx1 = batch_offset_b + (k + block_size_acc) * pcs.strides_b.row + b_cols[nj] * pcs.strides_b.col;
+            if (B_TRANSPOSED == 1) {
+                matB0[nj] = matB0[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, idx0, pcs.strides_b.col);
+                matB1[nj] = matB1[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, idx1, pcs.strides_b.col);
+            } else {
+                matB0[nj] = matB0[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, idx0, pcs.strides_b.row);
+                matB1[nj] = matB1[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, idx1, pcs.strides_b.row);
+            }
+        }
+
+        [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+        {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                uint flat_idx = mi * warp_frags_n + nj;
+                acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA0[mi], matB0[nj], acc[flat_idx]);
+            }
+        }
+        [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+        {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                uint flat_idx = mi * warp_frags_n + nj;
+                acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA1[mi], matB1[nj], acc[flat_idx]);
+            }
+        }
+    }
+
+    for (; k + block_size_acc <= k_main_end; k += block_size_acc)
+    {
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
+        [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+        {
+            uint global_idx = batch_offset_a + a_rows[mi] * pcs.strides_a.row + k * pcs.strides_a.col;
+            if (A_TRANSPOSED == 1) {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, global_idx, pcs.strides_a.col);
+            } else {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, global_idx, pcs.strides_a.row);
+            }
+        }
+
+        linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
+        [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+        {
+            uint global_idx = batch_offset_b + k * pcs.strides_b.row + b_cols[nj] * pcs.strides_b.col;
+            if (B_TRANSPOSED == 1) {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, global_idx, pcs.strides_b.col);
+            } else {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, global_idx, pcs.strides_b.row);
+            }
+        }
+
+        [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
+        {
+            [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
+            {
+                uint flat_idx = mi * warp_frags_n + nj;
+                acc[flat_idx] = linalg::coopMatMulAdd<{{ d1 }}, false>(matA[mi], matB[nj], acc[flat_idx]);
+            }
+        }
+    }
+
+    if (k < pcs.k_dim)
+    {
+        for (uint i = ti; i < (WARPS_M * warp_frags_m * block_size) * BK; i += total_threads)
+        {
+            uint r = i / BK;
+            uint c = i % BK;
+            uint a_row = min(tile_m + r, pcs.m_dim - 1);
+            {{ d1 }} val = ({{ d1 }})0;
+            if ((k + c) < pcs.k_dim)
+            {
+                uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (k + c) * pcs.strides_a.col;
+                val = tensor_a[global_idx];
+            }
+            smemTailA[r * BK + c] = val;
+        }
+
+        for (uint i = ti; i < BK * (WARPS_N * warp_frags_n * block_size); i += total_threads)
+        {
+            uint r = i / (WARPS_N * warp_frags_n * block_size);
+            uint c = i % (WARPS_N * warp_frags_n * block_size);
+            uint b_col = min(tile_n + c, pcs.n_dim - 1);
+            {{ d1 }} val = ({{ d1 }})0;
+            if ((k + r) < pcs.k_dim)
+            {
+                uint global_idx = batch_offset_b + (k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
+                val = tensor_b[global_idx];
+            }
+            smemTailB[r * (WARPS_N * warp_frags_n * block_size) + c] = val;
+        }
+
+        GroupMemoryBarrierWithGroupSync();
 
         for (uint step = 0; step < BK; step += block_size_acc)
         {
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size, block_size_acc, linalg::CoopMatMatrixUse.MatrixA> matA[warp_frags_m];
             [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)
             {
-                if (is_tail)
-                {
-                    uint off = (warp_row_base + mi * block_size) * BK + step;
-                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailA, off, BK);
-                }
-                else
-                {
-                    uint row = min(tile_m + warp_row_base + mi * block_size, pcs.m_dim - 1);
-                    uint col = k + step;
-                    uint global_idx = batch_offset_a + row * pcs.strides_a.row + col * pcs.strides_a.col;
-                    if (A_TRANSPOSED == 1) {
-                        matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_a, global_idx, pcs.strides_a.col);
-                    } else {
-                        matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, global_idx, pcs.strides_a.row);
-                    }
-                }
+                uint off = (warp_row_base + mi * block_size) * BK + step;
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailA, off, BK);
             }
 
             linalg::CoopMat<{{ d1 }}, MemoryScope.Subgroup, block_size_acc, block_size, linalg::CoopMatMatrixUse.MatrixB> matB[warp_frags_n];
             [ForceUnroll] for (uint nj = 0; nj < warp_frags_n; ++nj)
             {
-                if (is_tail)
-                {
-                    uint off = step * (WARPS_N * warp_frags_n * block_size) + (warp_col_base + nj * block_size);
-                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailB, off, (WARPS_N * warp_frags_n * block_size));
-                }
-                else
-                {
-                    uint row = k + step;
-                    uint col = min(tile_n + warp_col_base + nj * block_size, pcs.n_dim - 1);
-                    uint global_idx = batch_offset_b + row * pcs.strides_b.row + col * pcs.strides_b.col;
-                    if (B_TRANSPOSED == 1) {
-                        matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(tensor_b, global_idx, pcs.strides_b.col);
-                    } else {
-                        matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_b, global_idx, pcs.strides_b.row);
-                    }
-                }
+                uint off = step * (WARPS_N * warp_frags_n * block_size) + (warp_col_base + nj * block_size);
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(smemTailB, off, (WARPS_N * warp_frags_n * block_size));
             }
 
             [ForceUnroll] for (uint mi = 0; mi < warp_frags_m; ++mi)

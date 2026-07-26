@@ -46,6 +46,7 @@ void VulkanAllocator::copy_host_to_device(void* dest, uint64_t dest_offset, cons
     copyRegion.srcOffset = 0;
     copyRegion.size = count;
 
+    device->pending_bytes += 2 * count; // staging + destination
     VkCommandBuffer cmd = device->getCommandBuffer();
     device->device_table.vkCmdCopyBuffer(cmd, stagingBuffer->buffer(), dstBuffer->buffer(), 1, &copyRegion);
 
@@ -124,6 +125,7 @@ void VulkanAllocator::copy_device_to_device(void* dest, uint64_t dest_offset, co
     copyRegion.srcOffset = src_offset;
     copyRegion.size = count;
 
+    device->pending_bytes += 2 * count; // source + destination
     VkCommandBuffer cmd = device->getCommandBuffer();
     device->device_table.vkCmdCopyBuffer(cmd, srcBuffer->buffer(), dstBuffer->buffer(), 1, &copyRegion);
 

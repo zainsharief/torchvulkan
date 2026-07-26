@@ -12,30 +12,38 @@
 #define MAX_DIMS 4
 #define MAX_VEC_SIZE 4
 #define MAX_WORKGROUP_BYTES 1024
+#define MAX_SPEC_CONSTANTS 32
+#define MAX_SPEC_DATA_BYTES 256
 
 class SpecializationBuilder {
 public:
     // pushes any value and automatically tracks its size and byte offset
     template <typename T>
     SpecializationBuilder& push(const T& value) {
-        offsets_array.push_back(data_buffer.size());
-        sizes_array.push_back(sizeof(T));
+        TORCH_CHECK(numConstants_ < MAX_SPEC_CONSTANTS, "torchvulkan [ERROR]: Too many specialization constants!");
+        TORCH_CHECK(data_size_ + sizeof(T) <= MAX_SPEC_DATA_BYTES, "torchvulkan [ERROR]: Specialization constant data exceeded buffer!");
 
-        const uint8_t* ptr = reinterpret_cast<const uint8_t*>(&value);
-        data_buffer.insert(data_buffer.end(), ptr, ptr + sizeof(T));
-        
+        offsets_array[numConstants_] = data_size_;
+        sizes_array[numConstants_] = sizeof(T);
+        numConstants_++;
+
+        std::memcpy(data_buffer.data() + data_size_, &value, sizeof(T));
+        data_size_ += sizeof(T);
+
         return *this;
     }
 
     const void* data() const { return data_buffer.data(); }
     const size_t* offsets() const { return offsets_array.data(); }
     const size_t* sizes() const { return sizes_array.data(); }
-    uint32_t numConstants() const { return static_cast<uint32_t>(sizes_array.size()); }
-    
+    uint32_t numConstants() const { return numConstants_; }
+
 private:
-    std::vector<uint8_t> data_buffer;
-    std::vector<size_t> offsets_array;
-    std::vector<size_t> sizes_array;
+    std::array<uint8_t, MAX_SPEC_DATA_BYTES> data_buffer{};
+    std::array<size_t, MAX_SPEC_CONSTANTS> offsets_array{};
+    std::array<size_t, MAX_SPEC_CONSTANTS> sizes_array{};
+    uint32_t numConstants_ = 0;
+    size_t data_size_ = 0;
 };
 
 class PushConstantBuilder {

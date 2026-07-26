@@ -48,13 +48,26 @@ SHADERS = [
                     {"name" : '6', 'struct' : 'MinOp'},
                     {"name" : '7', 'struct' : 'PowOp'},
                     {"name" : '8', 'struct' : 'RPowOp'},
-                    {"name" : '9', 'struct' : 'Atan2Op'}
+                    {"name" : '9', 'struct' : 'Atan2Op'},
+                    {"name" : '10', 'struct' : 'ThresholdBackwardOp'}
                 ]}
     },
     {
         'name' : 'copy.slang.j2',
         'dtypes' : BYTES,
         'kwargs' : {}
+    },
+    {
+        'name' : 'unaryop.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'ReluOp'},
+                    {"name" : '1', 'struct' : 'ExpOp'},
+                    {"name" : '2', 'struct' : 'LogOp'},
+                    {"name" : '3', 'struct' : 'SqrtOp'},
+                    {"name" : '4', 'struct' : 'NegOp'},
+                    {"name" : '5', 'struct' : 'ReciprocalOp'}
+                ]}
     },
     {
         'name' : 'cast.slang.j2',
@@ -64,6 +77,19 @@ SHADERS = [
     {
         'name' : 'fill.slang.j2',
         'dtypes' : DTYPES,
+        'kwargs' : {}
+    },
+    {
+        'name' : 'reduce.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'SumReduceOp'},
+                    {"name" : '1', 'struct' : 'AmaxReduceOp'}
+                ]}
+    },
+    {
+        'name' : 'nllloss.slang.j2',
+        'dtypes' : FLOATS,
         'kwargs' : {}
     },
     {

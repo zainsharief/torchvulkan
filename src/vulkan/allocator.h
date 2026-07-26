@@ -86,6 +86,16 @@ public:
      */
     void copy_device_to_device(void* dest, uint64_t dest_offset, const void* src, uint64_t src_offset, std::size_t count) const;
 
+    /**
+     * @brief Drains the pending-deletion queue of staging buffers (from
+     * copy_host_to_device calls) back into the reusable pool.
+     * * @warning The caller MUST have already flushed the device (a full submit +
+     * wait) before calling this - staging buffers are queued here as soon as their
+     * copy command is recorded, not once it has actually executed, so reclaiming
+     * them without a preceding flush() can race a still-in-flight GPU read.
+     */
+    void clearResources() const;
+
 private:
     mutable std::vector<VulkanBuffer*> deleteQueue;
     mutable std::mutex mutex_; // thread safety
@@ -98,7 +108,6 @@ private:
 
     VulkanBuffer* out_of_memory_buffer(size_t size, MemoryUsage usage) const;
     void sync_memory_budget(size_t size) const;
-    void clearResources() const;
 };
 
 extern VulkanAllocator globalVulkanAllocator;

@@ -4,6 +4,14 @@ interface IVulkanArithmetic
     static This ext_atan2(This a, This b);
     static This ext_max(This a, This b);
     static This ext_min(This a, This b);
+    static This ext_zero();
+    static This ext_exp(This a);
+    static This ext_log(This a);
+    static This ext_sqrt(This a);
+    static This ext_neg(This a);
+    static This ext_reciprocal(This a);
+    static This ext_threshold_backward(This grad, This self, This threshold);
+    static This ext_add(This a, This b);
 }
 
 extension {{ d1 }} : IVulkanArithmetic 
@@ -54,8 +62,24 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return {{ d1 }}(0); } 
     {% endif %}
 
-    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { return max(a, b); } 
-    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { return min(a, b); } 
+    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return max(a, b); }
+    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return min(a, b); }
+    static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
+
+    {% if 'float' in d1 %}
+    static {{ d1 }} ext_exp({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp(float(a))); return exp(a); }
+    static {{ d1 }} ext_log({{ d1 }} a) { if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); /* -inf */ if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a))); return log(a); }
+    static {{ d1 }} ext_sqrt({{ d1 }} a) { return sqrt(a); }
+    static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(1.0) / a; }
+    {% else %}
+    static {{ d1 }} ext_exp({{ d1 }} a) { return {{ d1 }}(0); }
+    static {{ d1 }} ext_log({{ d1 }} a) { return {{ d1 }}(0); }
+    static {{ d1 }} ext_sqrt({{ d1 }} a) { return {{ d1 }}(0); }
+    static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(0); }
+    {% endif %}
+    static {{ d1 }} ext_neg({{ d1 }} a) { return -a; }
+    static {{ d1 }} ext_threshold_backward({{ d1 }} grad, {{ d1 }} self, {{ d1 }} threshold) { return (self > threshold) ? grad : {{ d1 }}(0); }
+    static {{ d1 }} ext_add({{ d1 }} a, {{ d1 }} b) { return a + b; }
 }
 
 extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
@@ -88,6 +112,54 @@ extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
     {
         vector<T, N> res;
         [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
+        return res;
+    }
+    static vector<T, N> ext_zero()
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_zero();
+        return res;
+    }
+    static vector<T, N> ext_exp(vector<T, N> a)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_exp(a[i]);
+        return res;
+    }
+    static vector<T, N> ext_log(vector<T, N> a)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_log(a[i]);
+        return res;
+    }
+    static vector<T, N> ext_sqrt(vector<T, N> a)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_sqrt(a[i]);
+        return res;
+    }
+    static vector<T, N> ext_neg(vector<T, N> a)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_neg(a[i]);
+        return res;
+    }
+    static vector<T, N> ext_reciprocal(vector<T, N> a)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_reciprocal(a[i]);
+        return res;
+    }
+    static vector<T, N> ext_threshold_backward(vector<T, N> grad, vector<T, N> self, vector<T, N> threshold)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_threshold_backward(grad[i], self[i], threshold[i]);
+        return res;
+    }
+    static vector<T, N> ext_add(vector<T, N> a, vector<T, N> b)
+    {
+        vector<T, N> res;
+        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_add(a[i], b[i]);
         return res;
     }
 }

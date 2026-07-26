@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/InferSize.h>
+#include <ATen/WrapDimUtils.h>
 #include "api/ops/factory.h"
 
 at::Tensor torchvulkan::empty_memory_format_vulkan(
@@ -98,9 +99,11 @@ at::Tensor torchvulkan::copy_vulkan(
     const at::Tensor& dst, 
     bool non_blocking) 
 {
-    TORCH_CHECK(self.sizes() == dst.sizes(), "torchvulkan [ERROR]: Copy sizes mismatch");
+    if (dst.numel() == 0) return dst;
+    TORCH_CHECK(!self.is_conj() && !self.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying from a conjugated or negated source is not yet supported.");
+    TORCH_CHECK(!dst.is_conj() && !dst.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying into a conjugated or negated destination is not yet supported.");
 
-    at::Tensor src = self;
+    at::Tensor src = (self.sizes() == dst.sizes()) ? self : self.expand(dst.sizes());
     c10::DeviceType src_type = src.device().type();
     c10::DeviceType dst_type = dst.device().type();
 
@@ -110,8 +113,8 @@ at::Tensor torchvulkan::copy_vulkan(
 
     if (src_type == at::DeviceType::CPU && dst_type == c10::DeviceType::PrivateUse1) 
     {
-        if (self.scalar_type() != dst.scalar_type()) src = self.to(dst.scalar_type());
-        
+        if (src.scalar_type() != dst.scalar_type()) src = src.to(dst.scalar_type());
+
         void* dest_ptr = (void*)dst.storage().data_ptr().get_context();
         uint64_t dest_offset = dst.storage_offset() * dst.itemsize();
         
@@ -130,7 +133,7 @@ at::Tensor torchvulkan::copy_vulkan(
     }
     else if (src_type == c10::DeviceType::PrivateUse1 && dst_type == at::DeviceType::CPU) 
     {
-        if (self.scalar_type() != dst.scalar_type()) 
+        if (src.scalar_type() != dst.scalar_type()) 
         {
             if (!is_dtype_supported(src.scalar_type()) || !is_dtype_supported(dst.scalar_type())) { 
                 TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
@@ -159,7 +162,7 @@ at::Tensor torchvulkan::copy_vulkan(
     } 
     else if (src_type == c10::DeviceType::PrivateUse1 && dst_type == c10::DeviceType::PrivateUse1 && src.device().index() == dst.device().index()) 
     {        
-        if (self.scalar_type() != dst.scalar_type()) 
+        if (src.scalar_type() != dst.scalar_type()) 
         {
             if (!is_dtype_supported(src.scalar_type()) || !is_dtype_supported(dst.scalar_type())) { 
                 TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
@@ -282,6 +285,64 @@ const at::Tensor& torchvulkan::resize_vulkan(
     return self;
 }
 
+at::Tensor torchvulkan::reshape_alias_vulkan(
+    const at::Tensor& self, 
+    c10::SymIntArrayRef sizes, 
+    c10::SymIntArrayRef strides) 
+{
+    auto result = at::detail::make_tensor<c10::TensorImpl>(
+        c10::TensorImpl::VIEW,
+        c10::Storage(self.storage()),
+        self.key_set(),
+        self.dtype()
+    );
+    
+    auto* result_impl = result.unsafeGetTensorImpl();
+    result_impl->set_storage_offset(self.storage_offset());
+    result_impl->set_sizes_and_strides(sizes, strides);
+    
+    return result;
+}
+
+at::Tensor torchvulkan::t_vulkan(const at::Tensor& self)
+{
+    TORCH_CHECK(self.dim() <= 2, "torchvulkan [ERROR]: t() expects a tensor with <= 2 dimensions.");
+    if (self.dim() < 2) return self.alias();
+    return transpose_int_vulkan(self, 0, 1);
+}
+
+at::Tensor torchvulkan::transpose_int_vulkan(const at::Tensor& self, int64_t dim0, int64_t dim1)
+{
+    int64_t ndim = self.dim();
+    dim0 = c10::maybe_wrap_dim(dim0, ndim);
+    dim1 = c10::maybe_wrap_dim(dim1, ndim);
+
+    if (dim0 == dim1) return self.alias();
+
+    std::vector<int64_t> sizes(self.sizes().begin(), self.sizes().end());
+    std::vector<int64_t> strides(self.strides().begin(), self.strides().end());
+    std::swap(sizes[dim0], sizes[dim1]);
+    std::swap(strides[dim0], strides[dim1]);
+
+    return self.as_strided(sizes, strides, self.storage_offset());
+}
+
+at::Tensor torchvulkan::permute_vulkan(const at::Tensor& self, c10::IntArrayRef dims)
+{
+    int64_t ndim = self.dim();
+    TORCH_CHECK((int64_t)dims.size() == ndim, "torchvulkan [ERROR]: permute dims size does not match tensor dimensions.");
+
+    std::vector<int64_t> sizes(ndim);
+    std::vector<int64_t> strides(ndim);
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t d = c10::maybe_wrap_dim(dims[i], ndim);
+        sizes[i] = self.size(d);
+        strides[i] = self.stride(d);
+    }
+
+    return self.as_strided(sizes, strides, self.storage_offset());
+}
+
 at::Tensor torchvulkan::view_vulkan(
     const at::Tensor& self,
     c10::SymIntArrayRef size)
@@ -305,7 +366,12 @@ at::Tensor torchvulkan::view_vulkan(
     return result;
 }
 
-at::Tensor torchvulkan::contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format) 
+at::Scalar torchvulkan::local_scalar_dense_vulkan(const at::Tensor& self)
+{
+    return self.cpu().item();
+}
+
+at::Tensor torchvulkan::contiguous_vulkan(const at::Tensor& self, at::MemoryFormat memory_format)
 {
     if (self.is_contiguous(memory_format)) return self;
     at::Tensor result = at::empty_like(self, self.options().memory_format(memory_format));
@@ -332,7 +398,7 @@ void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& 
         .add_input(src)
         .build();
 
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return;
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {
@@ -391,7 +457,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         .add_input(src)
         .build();
 
-    uint32_t numel = iter.numel();
+    uint64_t numel = iter.numel();
     if (numel == 0) return;
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (out_dims > MAX_DIMS) {

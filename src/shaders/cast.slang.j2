@@ -9,7 +9,7 @@ struct PushConstants
     IntDivider sizes;
     uint4 strides_in;
     uint4 strides_out;
-    uint numel;    
+    uint64_t numel;    
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
