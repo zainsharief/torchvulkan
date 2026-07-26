@@ -5,6 +5,9 @@ try:
 except ImportError as e:
     raise ImportError("PyTorch is required to use torchvulkan. Please install PyTorch and try again.") from e
 
+if torch.__version__ < "2.10.0":
+    raise RuntimeError(f"torchvulkan [ERROR]: torchvulkan requires PyTorch 2.10.0 or higher, but found {torch.__version__}.")
+
 try:
     from ._version import __version__
 except ImportError:
