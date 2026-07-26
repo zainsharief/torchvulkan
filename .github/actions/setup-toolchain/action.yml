@@ -33,6 +33,7 @@ runs:
         curl -L -o slang.zip "https://github.com/shader-slang/slang/releases/download/v${{ inputs.slang-version }}/slang-${{ inputs.slang-version }}-${SLANG_ARCH}.zip"
         unzip slang.zip -d "$RUNNER_TEMP/slang"
         echo "$RUNNER_TEMP/slang/bin" >> "$GITHUB_PATH"
+        echo "SLANG_DIR=$RUNNER_TEMP/slang/bin" >> "$GITHUB_ENV"
 
     - name: Install Slang (Windows)
       if: runner.os == 'Windows'
@@ -42,6 +43,7 @@ runs:
         Invoke-WebRequest -Uri "https://github.com/shader-slang/slang/releases/download/v${{ inputs.slang-version }}/$zip" -OutFile $zip
         Expand-Archive -Path $zip -DestinationPath C:\slang
         "C:\slang\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        "SLANG_DIR=C:\slang\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
     - name: Install Vulkan (Linux)
       if: runner.os == 'Linux'

@@ -23,7 +23,7 @@ foreach(SLANG_FILE ${GENERATED_SLANG_FILES})
 
     add_custom_command(
         OUTPUT ${SPV_OUT}
-        COMMAND slangc ${SLANG_FILE} -target spirv -capability SPV_KHR_cooperative_matrix -fvk-use-entrypoint-name -I ${CMAKE_SOURCE_DIR}/src/shaders -g0 -Wno-39001 -o ${SPV_OUT}
+        COMMAND ${SLANGC_EXE} ${SLANG_FILE} -target spirv -capability SPV_KHR_cooperative_matrix -fvk-use-entrypoint-name -I ${CMAKE_SOURCE_DIR}/src/shaders -g0 -Wno-39001 -o ${SPV_OUT}
         DEPENDS ${SLANG_FILE} ${BASE_SLANG_FILES}
         COMMENT "Compiling generated shader: ${SLANG_NAME}.slang"
     )
