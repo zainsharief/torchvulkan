@@ -4,8 +4,18 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "torchvulkan"
+description = "Cross-Platform Vulkan Backend for PyTorch"
+readme = "README.md"
 dynamic = ["version"]
-dependencies = ["torch==2.13.0"]
+dependencies = ["torch>=2.10.0"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Zain Sharief"}]
+
+[project.urls]
+Homepage = "https://github.com/zainsharief/torchvulkan"
+Repository = "https://github.com/zainsharief/torchvulkan"
+Issues = "https://github.com/zainsharief/torchvulkan/issues"
 
 [tool.scikit-build]
 editable.mode = "redirect"
@@ -26,7 +36,7 @@ test = ["pytest", "tox"]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
 skip = "*-musllinux_* *_i686 *-win32"
 test-command = 'python -c "import torchvulkan; print(torchvulkan.__version__)"'
-test-requires = "torch==2.13.0"
+test-requires = "torch>=2.10.0"
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_34"
