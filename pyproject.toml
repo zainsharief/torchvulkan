@@ -1,5 +1,5 @@
 [build-system]
-requires = ["torch", "scikit-build-core", "setuptools_scm"]
+requires = ["torch", "scikit-build-core", "setuptools_scm", "ninja"]
 build-backend = "scikit_build_core.build"
 
 [project]
