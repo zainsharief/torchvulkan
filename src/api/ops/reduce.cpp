@@ -105,6 +105,8 @@ at::Tensor torchvulkan::reduce_dims_vulkan(
         for (int64_t d = 0; d < self.dim(); d++) dim_list.push_back(d);
     }
 
+    if (dim_list.empty()) return self.clone();
+
     // reduce highest dims first so earlier indices stay valid when keepdim=false
     std::sort(dim_list.begin(), dim_list.end(), std::greater<int64_t>());
 

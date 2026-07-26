@@ -62,13 +62,13 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return {{ d1 }}(0); } 
     {% endif %}
 
-    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { return max(a, b); }
-    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { return min(a, b); }
+    static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return max(a, b); }
+    static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return min(a, b); }
     static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
 
     {% if 'float' in d1 %}
     static {{ d1 }} ext_exp({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp(float(a))); return exp(a); }
-    static {{ d1 }} ext_log({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a))); return log(a); }
+    static {{ d1 }} ext_log({{ d1 }} a) { if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); /* -inf */ if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a))); return log(a); }
     static {{ d1 }} ext_sqrt({{ d1 }} a) { return sqrt(a); }
     static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(1.0) / a; }
     {% else %}

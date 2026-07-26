@@ -117,8 +117,18 @@ class TestVulkanOps(TestCase):
                 "lerp", "addcmul", "addcdiv", "addr",
                 "native_layer_norm", "native_group_norm",
                 "nn.functional.group_norm", "nn.functional.bilinear",
+                "nn.functional.poisson_nll_loss",
             ):
-                self.assertEqual(actual, expected, atol=1e-1, rtol=5e-2)
+                self.assertEqual(actual, expected, atol=1e-1, rtol=5e-2, exact_dtype=False)
+                continue
+
+            # loss/normalisation reductions accumulate in a different order and use float32
+            # intermediates on the GPU even for float64 inputs
+            elif dtype == torch.float64 and op.name in (
+                "nn.functional.cross_entropy", "nn.functional.linear_cross_entropy",
+                "nn.functional.local_response_norm", "nn.functional.poisson_nll_loss",
+            ):
+                self.assertEqual(actual, expected, atol=1e-3, rtol=5e-3)
                 continue
 
             # exp/log are evaluated in float32 on the GPU even for float64 inputs

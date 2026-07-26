@@ -93,17 +93,25 @@ at::Tensor torchvulkan::unary_op_vulkan(
     UnaryOp operation,
     const std::function<at::Tensor(const at::Tensor&)>& fallback)
 {
-    at::Tensor dst = at::empty_like(src);
-
     if (!is_dtype_supported(src.scalar_type())) {
         TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", src.scalar_type(), ". Falling back to CPU.");
         return fallback(src.cpu()).to(src.device());
     }
 
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+
+    uint32_t alignment = device->properties.limits.minStorageBufferOffsetAlignment;
+    at::Tensor src_in = src;
+    if ((src_in.storage_offset() * src_in.element_size()) % alignment != 0) {
+        src_in = src_in.clone();
+    }
+
+    at::Tensor dst = at::empty_like(src_in);
+
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(dst)
-        .add_input(src)
+        .add_input(src_in)
         .build();
 
     uint64_t numel = iter.numel();
@@ -115,7 +123,6 @@ at::Tensor torchvulkan::unary_op_vulkan(
         return fallback(src.cpu()).to(src.device());
     }
 
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t vecSize = get_dtype_vec_size(dst.scalar_type());
     uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), vecSize);
 
@@ -161,7 +168,7 @@ at::Tensor torchvulkan::unary_op_vulkan(
     shader.dispatch(
         &pcs,
         pcs.size(),
-        {src, dst},
+        {src_in, dst},
         groupX, 1, 1
     );
 

@@ -99,11 +99,11 @@ at::Tensor torchvulkan::copy_vulkan(
     const at::Tensor& dst, 
     bool non_blocking) 
 {
-    TORCH_CHECK(self.sizes() == dst.sizes(), "torchvulkan [ERROR]: Copy sizes mismatch");
+    if (dst.numel() == 0) return dst;
     TORCH_CHECK(!self.is_conj() && !self.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying from a conjugated or negated source is not yet supported.");
     TORCH_CHECK(!dst.is_conj() && !dst.is_neg(), "torchvulkan [NOT IMPLEMENTED]: Copying into a conjugated or negated destination is not yet supported.");
 
-    at::Tensor src = self;
+    at::Tensor src = (self.sizes() == dst.sizes()) ? self : self.expand(dst.sizes());
     c10::DeviceType src_type = src.device().type();
     c10::DeviceType dst_type = dst.device().type();
 
@@ -113,8 +113,8 @@ at::Tensor torchvulkan::copy_vulkan(
 
     if (src_type == at::DeviceType::CPU && dst_type == c10::DeviceType::PrivateUse1) 
     {
-        if (self.scalar_type() != dst.scalar_type()) src = self.to(dst.scalar_type());
-        
+        if (src.scalar_type() != dst.scalar_type()) src = src.to(dst.scalar_type());
+
         void* dest_ptr = (void*)dst.storage().data_ptr().get_context();
         uint64_t dest_offset = dst.storage_offset() * dst.itemsize();
         
@@ -133,7 +133,7 @@ at::Tensor torchvulkan::copy_vulkan(
     }
     else if (src_type == c10::DeviceType::PrivateUse1 && dst_type == at::DeviceType::CPU) 
     {
-        if (self.scalar_type() != dst.scalar_type()) 
+        if (src.scalar_type() != dst.scalar_type()) 
         {
             if (!is_dtype_supported(src.scalar_type()) || !is_dtype_supported(dst.scalar_type())) { 
                 TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
@@ -162,7 +162,7 @@ at::Tensor torchvulkan::copy_vulkan(
     } 
     else if (src_type == c10::DeviceType::PrivateUse1 && dst_type == c10::DeviceType::PrivateUse1 && src.device().index() == dst.device().index()) 
     {        
-        if (self.scalar_type() != dst.scalar_type()) 
+        if (src.scalar_type() != dst.scalar_type()) 
         {
             if (!is_dtype_supported(src.scalar_type()) || !is_dtype_supported(dst.scalar_type())) { 
                 TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
