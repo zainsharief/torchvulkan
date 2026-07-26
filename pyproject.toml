@@ -18,3 +18,6 @@ sdist.include = ["torchvulkan/_version.py"]
 
 [tool.setuptools_scm]
 write_to = "torchvulkan/_version.py"
+
+[project.optional-dependencies]
+test = ["pytest", "tox"]

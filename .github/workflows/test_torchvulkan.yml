@@ -8,21 +8,14 @@ on:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.os }} / Py${{ matrix.python-version }} / ${{ matrix.torch-factor }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            slang_arch: linux-x86_64
-          - name: macOS Apple Silicon
-            os: macos-15
-            slang_arch: macos-aarch64
-          - name: Windows x86_64
-            os: windows-latest
-            slang_arch: windows-x86_64
+        os: [ubuntu-latest, macos-15, windows-latest]
+        python-version: ["3.10", "3.12", "3.14"]
+        torch-factor: ["torch20", "torch26", "torch213"]
 
     steps:
       - name: Checkout Code
@@ -30,87 +23,24 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up Python 3.10
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install Slang (macOS & Linux)
-        if: runner.os == 'macOS' || runner.os == 'Linux'
-        shell: bash
-        run: |
-          SLANG_VERSION="2026.8.1" 
-          curl -L -o slang.zip "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-${{ matrix.slang_arch }}.zip"
-          unzip slang.zip -d slang
-          echo "$PWD/slang/bin" >> $GITHUB_PATH
+      - name: Install toolchain (Slang, Vulkan, spirv-cross)
+        uses: ./.github/actions/setup-toolchain
 
-      - name: Install Slang (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          $SLANG_VERSION = "2026.8.1" 
-          $SLANG_ZIP = "slang-${SLANG_VERSION}-${{ matrix.slang_arch }}.zip"       
-          Invoke-WebRequest -Uri "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${SLANG_ZIP}" -OutFile $SLANG_ZIP          
-          Expand-Archive -Path $SLANG_ZIP -DestinationPath C:\slang          
-          echo "C:\slang\bin" >> $env:GITHUB_PATH
-
-      - name: Install Vulkan (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
-          sudo apt-get update
-          sudo apt-get install -y vulkan-sdk mesa-vulkan-drivers
-          vulkaninfo --summary
-
-      - name: Install Vulkan (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install molten-vk vulkan-tools ninja libxshmfence spirv-cross
-          MVK_ICD=$(find $(brew --prefix)/share $(brew --prefix)/etc $(brew --prefix molten-vk) -name "MoltenVK_icd.json" 2>/dev/null | head -n 1)          
-          echo "VK_ICD_FILENAMES=$MVK_ICD" >> $GITHUB_ENV
-          echo "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0" >> $GITHUB_ENV
-          echo "DYLD_LIBRARY_PATH=$(brew --prefix)/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV          
-          export VK_ICD_FILENAMES="$MVK_ICD"
-          export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
-          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:$DYLD_LIBRARY_PATH"          
-          vulkaninfo --summary
-
-      - name: Install Vulkan (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/pal1000/mesa-dist-win/releases/download/23.3.2/mesa3d-23.3.2-release-msvc.7z" -OutFile "mesa.7z"
-          7z x mesa.7z -omesa -y | Out-Null
-          
-          $lvpJson = (Resolve-Path "mesa\x64\lvp_icd.x86_64.json").Path
-          $driverKey = "HKLM:\SOFTWARE\Khronos\Vulkan\Drivers"
-          if (!(Test-Path $driverKey)) { New-Item -Path $driverKey -Force | Out-Null }
-          New-ItemProperty -Path $driverKey -Name $lvpJson -PropertyType DWord -Value 0 -Force | Out-Null
-
-          $sdkVersion = "1.3.296.0"
-          $installer = "VulkanSDK-$sdkVersion-Installer.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$sdkVersion/windows/$installer" -OutFile $installer
-          Start-Process -FilePath ".\$installer" -ArgumentList "--accept-licenses --default-answer --confirm-command install" -Wait -NoNewWindow
-          
-          echo "VULKAN_SDK=C:\VulkanSDK\$sdkVersion" >> $env:GITHUB_ENV
-          echo "C:\VulkanSDK\$sdkVersion\Bin" >> $env:GITHUB_PATH
-          echo "C:\slang\bin" >> $env:GITHUB_PATH
-
-      - name: Install PyTorch and Build Dependencies
+      - name: Install Tox
         run: |
           python -m pip install --upgrade pip
-          pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
-          pip install pytest pytest-instafail setuptools wheel ninja expecttest numpy
+          pip install tox
 
-      - name: Build TorchVulkan
+      - name: Run Tests via Tox
         env:
-            SKBUILD_CMAKE_GENERATOR: Ninja
-        run: |
-          pip install --no-cache-dir -e .
-
-      - name: Run Pytest
-        env:
+          PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+          SKBUILD_CMAKE_GENERATOR: Ninja
           MVK_CONFIG_LOG_LEVEL: 3
           VK_LOADER_DEBUG: all
         run: |
-          pytest --instafail tests/ -v
+          tox -e py-${{ matrix.torch-factor }}
