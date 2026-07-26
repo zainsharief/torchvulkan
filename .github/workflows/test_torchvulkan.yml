@@ -10,6 +10,8 @@ jobs:
   build-and-test:
     name: ${{ matrix.os }} / Py${{ matrix.python-version }} / ${{ matrix.torch-factor }}
     runs-on: ${{ matrix.os }}
+    env:
+      SKBUILD_CMAKE_GENERATOR: Ninja
     strategy:
       fail-fast: false
       matrix:
