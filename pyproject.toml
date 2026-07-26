@@ -24,13 +24,14 @@ test = ["pytest", "tox"]
 
 [tool.cibuildwheel]
 build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
-skip = "*-musllinux_* *_i686 *-win32 pp*"
+skip = "*-musllinux_* *_i686 *-win32"
 test-command = 'python -c "import torchvulkan; print(torchvulkan.__version__)"'
 test-requires = "torch==2.13.0"
 
 [tool.cibuildwheel.linux]
 manylinux-x86_64-image = "manylinux_2_28"
 before-all = "bash .github/scripts/install-toolchain-linux.sh"
+environment-pass = ["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TORCHVULKAN"]
 environment = { PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu", VULKAN_SDK = "/opt/vulkan/x86_64", SLANG_DIR = "/opt/slang/bin", PATH = "/opt/vulkan/x86_64/bin:/opt/slang/bin:$PATH" }
 repair-wheel-command = "auditwheel repair --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so --exclude libtorch_global_deps.so --exclude libc10.so -w {dest_dir} {wheel}"
 

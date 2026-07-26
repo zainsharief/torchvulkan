@@ -52,6 +52,16 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compute version for setuptools_scm
+        shell: bash
+        run: |
+          python -m pip install --upgrade setuptools_scm
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TORCHVULKAN=$(python -m setuptools_scm)" >> "$GITHUB_ENV"
+
       - name: Install toolchain (Slang, Vulkan, spirv-cross)
         if: runner.os != 'Linux'
         uses: ./.github/actions/setup-toolchain
