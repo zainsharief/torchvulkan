@@ -66,7 +66,7 @@ void baseUnaryKernel<
 
     vector<T, VEC_SIZE> res = Op.eval(tensor_in[idx]);
 
-    uint remainder = pcs.numel - (idx * VEC_SIZE);
+    uint64_t remainder = pcs.numel - (idx * VEC_SIZE);
     if (remainder >= VEC_SIZE) { tensor_out[idx] = res; }
     else {
         vector<T, VEC_SIZE> temp = tensor_out[idx];
