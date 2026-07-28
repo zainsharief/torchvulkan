@@ -79,7 +79,7 @@ void matmulKernel<
 
     uint warp_id  = ti / SUBGROUP_SIZE;
     uint warp_row = warp_id / WARPS_N;
-    uint warp_col = warp_id % WARPS_M;
+    uint warp_col = warp_id % WARPS_N;
     uint warp_row_base = warp_row * warp_frags_m * block_size;
     uint warp_col_base = warp_col * warp_frags_n * block_size;
     uint total_threads = WARPS_M * WARPS_N * SUBGROUP_SIZE;
@@ -387,10 +387,14 @@ void matmulKernel<
 
     {% else %}
 
-    uint smem_a_size = (WARPS_M * warp_frags_m * block_size) * (BK + PAD);
-    uint smem_b_size = BK * ((WARPS_N * warp_frags_n * block_size) + PAD);
-    uint total_vec_threads_a = smem_a_size / {{ v1 }};
-    uint total_vec_threads_b = smem_b_size / {{ v1 }};
+    uint smem_a_rows = WARPS_M * warp_frags_m * block_size;
+    uint smem_b_cols = WARPS_N * warp_frags_n * block_size;
+
+    uint smem_a_size = smem_a_rows * (BK + PAD);
+    uint smem_b_size = BK * (smem_b_cols + PAD);
+    
+    uint total_vec_threads_a = (smem_a_rows * BK) / {{ v1 }};
+    uint total_vec_threads_b = (BK * smem_b_cols) / {{ v1 }};
     
     uint stage = 0;
 
