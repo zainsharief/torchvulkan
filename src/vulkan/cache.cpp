@@ -371,36 +371,37 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
         }
     }
 
-    coopmat_params.warp_frags_m = coopmat_params.block_size / coopmat_params.warps_m;
-    coopmat_params.warp_frags_n = coopmat_params.block_size_acc / coopmat_params.warps_n;
+    if (coopmat_params.block_size == 0) return &coopmat_params;
 
-    #if __APPLE__
-    coopmat_params.bk = 16; // fixed for now, might need to change later
-    uint32_t darwin_shared_memory_use = coopmat_params.bk *
-        ((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) +
-         (coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size)) * element_size;
-
-    while (darwin_shared_memory_use > max_shared_memory)
+    auto shared_bytes = [&](uint32_t frags, uint32_t bk) -> uint64_t
     {
-        if (coopmat_params.bk == 1) return &coopmat_params; // should never reach here
-        coopmat_params.bk /= 2;
-        darwin_shared_memory_use = coopmat_params.bk *
-            ((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) +
-             (coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size)) * element_size;
-    }
-    #else
-    coopmat_params.bk = 64;
-    uint32_t shared_memory_use = (((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) * (coopmat_params.bk + pad)) + 
-                                 (coopmat_params.bk * ((coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size) + pad))) * element_size * 0.5;
+        const uint64_t rows_a = (uint64_t)coopmat_params.warps_m * frags * coopmat_params.block_size;
+        const uint64_t cols_b = (uint64_t)coopmat_params.warps_n * frags * coopmat_params.block_size;
+        #if __APPLE__
+        return (rows_a * bk + (uint64_t)bk * cols_b) * element_size;
+        #else
+        return 2 * (rows_a * (bk + pad) + (uint64_t)bk * (cols_b + pad)) * element_size;
+        #endif
+    };
 
-    while (shared_memory_use > max_shared_memory) 
+    static constexpr std::array<uint32_t, 2> frag_preferences = {4, 2};
+    bool tiling_fits = false;
+
+    for (uint32_t frags : frag_preferences)
     {
-        if (coopmat_params.bk == 1) return &coopmat_params;
-        coopmat_params.bk /= 2;
-        shared_memory_use = (((coopmat_params.warps_m * coopmat_params.warp_frags_m * coopmat_params.block_size) * (coopmat_params.bk + pad)) + 
-                            (coopmat_params.bk * ((coopmat_params.warps_n * coopmat_params.warp_frags_n * coopmat_params.block_size) + pad))) * element_size * 0.5;
+        for (uint32_t bk = 64; bk >= coopmat_params.block_size_acc; bk /= 2)
+        {
+            if (shared_bytes(frags, bk) > max_shared_memory) continue;
+            coopmat_params.warp_frags_m = frags;
+            coopmat_params.warp_frags_n = frags;
+            coopmat_params.bk = bk;
+            tiling_fits = true;
+            break;
+        }
+        if (tiling_fits) break;
     }
-    #endif
+
+    if (!tiling_fits) return &coopmat_params;
 
     coopmat_params.is_valid = true;
     return &coopmat_params;
