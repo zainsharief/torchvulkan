@@ -370,7 +370,9 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     uint32_t workgroupSizeX = 16; 
     uint32_t workgroupSizeY = 16; 
     uint32_t isBiasAligned = has_bias ? bias_b.is_contiguous() : 1;
-    uint32_t isAligned = (K % TILE_K == 0) && self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
+    // vector loads/stores need whole vecSize rows, so K (A) and N (B/out) must both divide
+    uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
+                         self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
 
     SpecializationBuilder spd{};
     spd.push(workgroupSizeX)
