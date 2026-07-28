@@ -18,7 +18,7 @@ extension {{ d1 }} : IVulkanArithmetic
 { 
     {% if 'float' in d1 %}
     static {{ d1 }} _safe_pow({{ d1 }} base, {{ d1 }} exp) { 
-        if (sizeof({{ d1 }}) == 8) return {{ d1 }}(pow(float(base), float(exp))); 
+        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(pow(float(base), float(exp))); 
         return pow(base, exp); 
     } 
     
@@ -40,7 +40,12 @@ extension {{ d1 }} : IVulkanArithmetic
         if (fmod(abs(b), {{ d1 }}(2.0)) == {{ d1 }}(1.0)) { return -res; } 
         return res; 
     } 
-    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return (a == 0 && b == 0) ? 0 : atan2(a, b); } 
+    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b)
+    {
+        if (a == {{ d1 }}(0) && b == {{ d1 }}(0)) return {{ d1 }}(0);
+        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(atan2(float(a), float(b)));
+        return atan2(a, b);
+    }
     {% else %}
     static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b) 
     { 
