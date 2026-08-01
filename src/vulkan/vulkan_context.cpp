@@ -6,8 +6,8 @@ thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
 
 VulkanContext& VulkanContext::Instance() 
 {
-    static VulkanContext vulkanContextInstance;
-    return vulkanContextInstance;
+    static VulkanContext* vulkanContextInstance = new VulkanContext();
+    return *vulkanContextInstance;
 }
 
 VulkanContext::VulkanContext()
