@@ -247,6 +247,15 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
        .push_scalar(alpha, promoted_type)
        .push_scalar(beta, promoted_type);
 
+    const uint32_t vecSize = get_dtype_vec_size(promoted_type);
+    uint32_t a_vec_aligned = (!self_transposed &&
+                        strides_a[1] % vecSize == 0 &&
+                        strides_a[0] % vecSize == 0 &&
+                        params->bk % vecSize == 0) ? 1 : 0;
+    uint32_t b_vec_aligned = (!other_transposed &&
+                        strides_b[1] % vecSize == 0 &&
+                        strides_b[0] % vecSize == 0) ? 1 : 0;
+
     SpecializationBuilder spd{};
     spd.push(params->workgroup_size)
        .push(params->subgroup_size)
@@ -263,8 +272,11 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
        .push(out_transposed)
        .push(bias_transposed)
        .push(m_aligned)
-       .push(n_aligned);
-    uint64_t key = ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
+       .push(n_aligned)
+       .push(a_vec_aligned)
+       .push(b_vec_aligned);
+    uint64_t key = ((uint64_t)a_vec_aligned << 53) | ((uint64_t)b_vec_aligned << 52) |
+                   ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
                    ((uint64_t)self_transposed << 49) | ((uint64_t)other_transposed << 48) |
                    ((uint64_t)out_transposed << 47) | ((uint64_t)bias_transposed << 46) |
                    ((uint64_t)has_bias << 45) | ((uint64_t)has_beta << 44) |
@@ -379,7 +391,6 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     uint32_t workgroupSizeX = 16; 
     uint32_t workgroupSizeY = 16; 
     uint32_t isBiasAligned = has_bias ? bias_b.is_contiguous() : 1;
-    // vector loads/stores need whole vecSize rows, so K (A) and N (B/out) must both divide
     uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
                          self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
 

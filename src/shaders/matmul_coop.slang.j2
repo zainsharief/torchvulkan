@@ -18,6 +18,9 @@
 [[vk::constant_id(14)]] const uint M_ALIGNED = 0;
 [[vk::constant_id(15)]] const uint N_ALIGNED = 0;
 
+[[vk::constant_id(16)]] const uint A_VEC_ALIGNED = 0;
+[[vk::constant_id(17)]] const uint B_VEC_ALIGNED = 0;
+
 #define PAD 4
 
 struct TensorStrides {
@@ -291,7 +294,7 @@ void matmulKernel<
         {
             uint r = i / BK;
             uint c = i % BK;
-            uint a_row = min(tile_m + r, pcs.m_dim - 1);
+            uint a_row = (M_ALIGNED == 1 ? (tile_m + r) : min(tile_m + r, pcs.m_dim - 1));
             {{ d1 }} val = ({{ d1 }})0;
             if ((k + c) < pcs.k_dim)
             {
@@ -305,7 +308,7 @@ void matmulKernel<
         {
             uint r = i / (WARPS_N * warp_frags_n * block_size);
             uint c = i % (WARPS_N * warp_frags_n * block_size);
-            uint b_col = min(tile_n + c, pcs.n_dim - 1);
+            uint b_col = (N_ALIGNED == 1 ? (tile_n + c) : min(tile_n + c, pcs.n_dim - 1));
             {{ d1 }} val = ({{ d1 }})0;
             if ((k + r) < pcs.k_dim)
             {
@@ -410,9 +413,9 @@ void matmulKernel<
                 [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                 {
                     uint flat_smem_idx = i * {{ v1 }} + v;
-                    uint r = flat_smem_idx / BK;
-                    uint c = flat_smem_idx % BK;
-                    uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                    uint r = flat_smem_idx % smem_a_rows;
+                    uint c = flat_smem_idx / smem_a_rows;
+                    uint a_row = (M_ALIGNED == 1 ? (tile_m + r) : min(tile_m + r, pcs.m_dim - 1));
                     {{ d1 }} val = ({{ d1 }})0;
                     if ((0 + c) < pcs.k_dim)
                     {
@@ -430,10 +433,10 @@ void matmulKernel<
                 uint flat_smem_idx = i * {{ v1 }};
                 uint r = flat_smem_idx / BK;
                 uint c = flat_smem_idx % BK;
-                uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                uint a_row = (M_ALIGNED == 1 ? (tile_m + r) : min(tile_m + r, pcs.m_dim - 1));
                 uint padded_smem_idx = r * (BK + PAD) + c;
 
-                if ((0 + c + {{ v1 }}) <= pcs.k_dim)
+                if (A_VEC_ALIGNED == 1 && (0 + c + {{ v1 }}) <= pcs.k_dim)
                 {
                     uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (0 + c); // K = 0
                     vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
@@ -465,9 +468,9 @@ void matmulKernel<
                 [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                 {
                     uint flat_smem_idx = i * {{ v1 }} + v;
-                    uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
-                    uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
-                    uint b_col = min(tile_n + c, pcs.n_dim - 1);
+                    uint r = flat_smem_idx % BK;
+                    uint c = flat_smem_idx / BK;
+                    uint b_col = (N_ALIGNED == 1 ? (tile_n + c) : min(tile_n + c, pcs.n_dim - 1));
                     {{ d1 }} val = ({{ d1 }})0;
                     if ((0 + r) < pcs.k_dim)
                     {
@@ -493,7 +496,7 @@ void matmulKernel<
                         smemB[smem_b_offset + padded_smem_idx + v] = ({{ d1 }})0;
                     }
                 }
-                else if ((tile_n + c + {{ v1 }}) <= pcs.n_dim)
+                else if (B_VEC_ALIGNED == 1 && (tile_n + c + {{ v1 }}) <= pcs.n_dim)
                 {
                     uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col; // K = 0
                     vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
@@ -505,7 +508,7 @@ void matmulKernel<
                 {
                     [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                     {
-                        uint b_col = min(tile_n + c + v, pcs.n_dim - 1);
+                        uint b_col = (N_ALIGNED == 1 ? (tile_n + c + v) : min(tile_n + c + v, pcs.n_dim - 1));
                         uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + b_col * pcs.strides_b.col; // K = 0
                         smemB[smem_b_offset + padded_smem_idx + v] = tensor_b[global_idx];
                     }
@@ -532,9 +535,9 @@ void matmulKernel<
                     [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                     {
                         uint flat_smem_idx = i * {{ v1 }} + v;
-                        uint r = flat_smem_idx / BK;
-                        uint c = flat_smem_idx % BK;
-                        uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                        uint r = flat_smem_idx % smem_a_rows;
+                        uint c = flat_smem_idx / smem_a_rows;
+                        uint a_row = (M_ALIGNED == 1 ? (tile_m + r) : min(tile_m + r, pcs.m_dim - 1));
                         {{ d1 }} val = ({{ d1 }})0;
                         if ((next_k + c) < pcs.k_dim)
                         {
@@ -552,10 +555,10 @@ void matmulKernel<
                     uint flat_smem_idx = i * {{ v1 }};
                     uint r = flat_smem_idx / BK;
                     uint c = flat_smem_idx % BK;
-                    uint a_row = min(tile_m + r, pcs.m_dim - 1);
+                    uint a_row = (M_ALIGNED == 1 ? (tile_m + r) : min(tile_m + r, pcs.m_dim - 1));
                     uint padded_smem_idx = r * (BK + PAD) + c;
 
-                    if ((next_k + c + {{ v1 }}) <= pcs.k_dim)
+                    if (A_VEC_ALIGNED == 1 && (next_k + c + {{ v1 }}) <= pcs.k_dim)
                     {
                         uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (next_k + c);
                         vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
@@ -588,9 +591,9 @@ void matmulKernel<
                     [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                     {
                         uint flat_smem_idx = i * {{ v1 }} + v;
-                        uint r = flat_smem_idx / (WARPS_N * warp_frags_n * block_size);
-                        uint c = flat_smem_idx % (WARPS_N * warp_frags_n * block_size);
-                        uint b_col = min(tile_n + c, pcs.n_dim - 1);
+                        uint r = flat_smem_idx % BK;
+                        uint c = flat_smem_idx / BK;
+                        uint b_col = (N_ALIGNED == 1 ? (tile_n + c) : min(tile_n + c, pcs.n_dim - 1));
                         {{ d1 }} val = ({{ d1 }})0;
                         if ((next_k + r) < pcs.k_dim)
                         {
@@ -617,7 +620,7 @@ void matmulKernel<
                             smemB[smem_b_offset + padded_smem_idx + v] = ({{ d1 }})0;
                         }
                     }
-                    else if ((tile_n + c + {{ v1 }}) <= pcs.n_dim)
+                    else if (B_VEC_ALIGNED == 1 && (tile_n + c + {{ v1 }}) <= pcs.n_dim)
                     {
                         uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col;
                         vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
@@ -630,7 +633,7 @@ void matmulKernel<
                     {
                         [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                         {
-                            uint b_col = min(tile_n + c + v, pcs.n_dim - 1);
+                            uint b_col = (N_ALIGNED == 1 ? (tile_n + c + v) : min(tile_n + c + v, pcs.n_dim - 1));
                             uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
                             smemB[smem_b_offset + padded_smem_idx + v] = tensor_b[global_idx];
                         }
@@ -722,6 +725,11 @@ void matmulKernel<
         {
             uint row = tile_m + warp_row_base + mi * block_size;
             uint col = tile_n + warp_col_base + nj * block_size;
+
+            // no need to write out-of-bounds values
+            if (M_ALIGNED == 0 && row >= pcs.m_dim) continue;
+            if (N_ALIGNED == 0 && col >= pcs.n_dim) continue;
+
             uint out_idx = batch_offset_out + row * pcs.strides_out.row + col * pcs.strides_out.col;
             uint flat_idx = mi * warp_frags_n + nj;
             if (OUT_TRANSPOSED == 1) {
