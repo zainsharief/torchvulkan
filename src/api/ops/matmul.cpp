@@ -169,12 +169,21 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
     const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
 
-    const uint32_t target_grid = 32;
+    // might be better ways than to just hardcode this
+    const uint32_t target_grid = 512;
     uint32_t grid = ((M + tile_m - 1) / tile_m) * ((N + tile_n - 1) / tile_n) * (uint32_t)B;
     uint32_t split = 1;
-    if (B == 1 && grid < target_grid && K >= 4096 && self.storage_offset() == 0 && other.storage_offset() == 0) {
-        while (split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
-               ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512) {
+    if (
+        B == 1 && 
+        grid < target_grid && 
+        K >= 4096 && 
+        self.storage_offset() == 0 && 
+        other.storage_offset() == 0
+    ) {
+        while (
+            split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
+            ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512
+        ) {
             split *= 2;
         }
     }
