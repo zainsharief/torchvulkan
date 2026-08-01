@@ -33,6 +33,7 @@ print(z.sum().item())   # move a scalar back to the CPU
 - [Installation](#installation)
 - [Quickstart](#quickstart)
 - [Example: training MNIST](#example-training-mnist)
+- [Benchmarks](#benchmarks)
 - [Python API](#python-api)
 - [CPU fallback](#cpu-fallback)
 - [Limitations](#limitations)
@@ -118,6 +119,26 @@ for data, targets in train_loader:
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
+```
+
+## Benchmarks
+
+[`benchmark/mnist_benchmark.py`](benchmark/mnist_benchmark.py) times a combined forward + backward pass of the MNIST network (in `float16`), sweeping the hidden width so the parameter count grows from ~50K up to ~312M.
+
+Compared against the platform-native GPU backend, the `vulkan` device tracks closely and stays orders of magnitude ahead of the CPU as the model grows:
+
+<p align="center">
+  <img alt="Forward + backward pass time vs. model size on an NVIDIA GPU: vulkan tracks CUDA and beats CPU" src="media/benchmark-cuda.png" width="49%">
+  <img alt="Forward + backward pass time vs. model size on Apple Silicon: vulkan tracks MPS and beats CPU" src="media/benchmark-mps.png" width="49%">
+</p>
+
+<p align="center">
+  <i>Left: NVIDIA GPU (vulkan vs. CUDA). Right: Apple Silicon (vulkan vs. MPS).</i>
+</p>
+
+```bash
+pip install matplotlib
+python benchmark/mnist_benchmark.py
 ```
 
 ## Python API
