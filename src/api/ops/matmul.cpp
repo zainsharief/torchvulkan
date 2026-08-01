@@ -109,21 +109,6 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
         available_block_sizes.push_back(c.m);
     }
 
-    CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes);
-    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
-
-    if (bias_.defined()) {
-        at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
-        if (beta.toDouble() == 0.0) return out;
-        return add_vulkan(out, bias_.to(out.scalar_type()), beta);
-    }
-
-    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
-    uint32_t has_bias = (bias_.defined()) ? 1 : 0;
-    uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
-    
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
-
     bool self_unsqueezed = false;
     bool other_unsqueezed = false;
 
@@ -141,6 +126,21 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     uint32_t M = self.size(-2);
     uint32_t K = self.size(-1);
     uint32_t N = other.size(-1);
+
+    CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes, M, N);
+    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+
+    if (bias_.defined()) {
+        at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
+        if (beta.toDouble() == 0.0) return out;
+        return add_vulkan(out, bias_.to(out.scalar_type()), beta);
+    }
+
+    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
+    uint32_t has_bias = (bias_.defined()) ? 1 : 0;
+    uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
+    
+    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
 
     at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
     at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);

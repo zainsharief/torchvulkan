@@ -48,8 +48,7 @@ public:
 
     void addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR bType, VkComponentTypeKHR cType, VkComponentTypeKHR resultType, CoopMatConfig config);
     std::vector<CoopMatConfig> getCoopMatConfig(c10::ScalarType aType, c10::ScalarType bType, c10::ScalarType cType, c10::ScalarType resultType) const;
-
-    CoopMatParams* getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes);
+    CoopMatParams* getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes, uint32_t M, uint32_t N);
 
     void setDevice(VkDevice device) { device_ = device; }
     void setDeviceTable(VolkDeviceTable& table) { device_table = table; }

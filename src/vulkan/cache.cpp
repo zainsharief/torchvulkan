@@ -315,12 +315,23 @@ std::vector<CoopMatConfig> VulkanCache::getCoopMatConfig(c10::ScalarType aType, 
     else return {};
 }
 
-CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes)
+CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes, uint32_t M, uint32_t N)
 {
-    auto it = coopMatParamCache.find((uint32_t)dtype);
+    auto bucket = [](uint32_t x) -> uint64_t {
+        uint64_t b = 1;
+        while (b < x && b < 256) b <<= 1;
+        return b;
+    };
+
+    if (M == 0) M = 1;
+    if (N == 0) N = 1;
+
+    const uint64_t key = (uint64_t)(uint32_t)dtype | (bucket(M) << 16) | (bucket(N) << 32);
+
+    auto it = coopMatParamCache.find(key);
     if (it != coopMatParamCache.end()) return &it->second;
 
-    CoopMatParams& coopmat_params = coopMatParamCache[(uint32_t)dtype];
+    CoopMatParams& coopmat_params = coopMatParamCache[key];
     coopmat_params.is_valid = false;
 
     uint32_t element_size = c10::elementSize(dtype);
@@ -331,20 +342,13 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
     uint32_t max_workgroup_size = device->properties.limits.maxComputeWorkGroupInvocations;
     coopmat_params.subgroup_size = device->subgroup_size;
 
-    coopmat_params.workgroup_size = 128 > max_workgroup_size ? max_workgroup_size : 128;
-    coopmat_params.workgroup_size = (coopmat_params.workgroup_size / coopmat_params.subgroup_size) * coopmat_params.subgroup_size;
-    if (coopmat_params.workgroup_size == 0) return &coopmat_params;
-
-    uint32_t total_warps = coopmat_params.workgroup_size / coopmat_params.subgroup_size;
-    coopmat_params.warps_m = 1;
-    coopmat_params.warps_n = total_warps;
-    for (uint32_t i = static_cast<uint32_t>(std::sqrt(total_warps)); i > 0; --i) 
-    {
-        if (total_warps % i != 0) continue;
-        coopmat_params.warps_m = i;
-        coopmat_params.warps_n = total_warps / i;
-        break;
+    const uint32_t target_subgroups = 8;
+    uint32_t max_subgroups = target_subgroups;
+    if (max_subgroups * coopmat_params.subgroup_size > max_workgroup_size) {
+        max_subgroups = max_workgroup_size / coopmat_params.subgroup_size;
     }
+    if (max_subgroups == 0) return &coopmat_params;
+    coopmat_params.workgroup_size = max_subgroups * coopmat_params.subgroup_size;
 
     static constexpr std::array<uint32_t, 4> pref_1_byte = {64, 32, 16, 8};
     static constexpr std::array<uint32_t, 4> pref_2_byte = {32, 64, 16, 8};
@@ -373,10 +377,8 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
 
     if (coopmat_params.block_size == 0) return &coopmat_params;
 
-    auto shared_bytes = [&](uint32_t frags, uint32_t bk) -> uint64_t
+    auto shared_bytes = [&](uint64_t rows_a, uint64_t cols_b, uint32_t bk) -> uint64_t
     {
-        const uint64_t rows_a = (uint64_t)coopmat_params.warps_m * frags * coopmat_params.block_size;
-        const uint64_t cols_b = (uint64_t)coopmat_params.warps_n * frags * coopmat_params.block_size;
         #if __APPLE__
         return (rows_a * bk + (uint64_t)bk * cols_b) * element_size;
         #else
@@ -384,21 +386,51 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
         #endif
     };
 
-    static constexpr std::array<uint32_t, 2> frag_preferences = {4, 2};
+    static constexpr uint32_t frag_preferences[4][2] = {{4, 2}, {2, 4}, {4, 4}, {2, 2}};
+    const uint64_t overshoot_limit = 2;
     bool tiling_fits = false;
 
-    for (uint32_t frags : frag_preferences)
+    // this is a bit tragic but it works
+    for (int pass = 0; pass < 2 && !tiling_fits; ++pass)
     {
-        for (uint32_t bk = 64; bk >= coopmat_params.block_size_acc; bk /= 2)
+        uint64_t best_waste = UINT64_MAX;
+        for (uint32_t bk = coopmat_params.block_size_acc; bk <= 64; bk *= 2)
         {
-            if (shared_bytes(frags, bk) > max_shared_memory) continue;
-            coopmat_params.warp_frags_m = frags;
-            coopmat_params.warp_frags_n = frags;
-            coopmat_params.bk = bk;
-            tiling_fits = true;
-            break;
+            for (uint32_t subgroups = max_subgroups; subgroups >= 1; subgroups /= 2)
+            {
+                for (uint32_t wm = (uint32_t)std::sqrt((double)subgroups); wm >= 1; --wm)
+                {
+                    if (subgroups % wm) continue;
+                    for (uint32_t warps_m : {wm, subgroups / wm})
+                    {
+                        const uint32_t warps_n = subgroups / warps_m;
+                        for (const auto& frags : frag_preferences)
+                        {
+                            const uint64_t rows_a = (uint64_t)warps_m * frags[0] * coopmat_params.block_size;
+                            const uint64_t cols_b = (uint64_t)warps_n * frags[1] * coopmat_params.block_size;
+
+                            if (shared_bytes(rows_a, cols_b, bk) > max_shared_memory) continue;
+                            if (pass == 0 && (rows_a > overshoot_limit * M || cols_b > overshoot_limit * N)) continue;
+
+                            const uint64_t pm = ((M + rows_a - 1) / rows_a) * rows_a;
+                            const uint64_t pn = ((N + cols_b - 1) / cols_b) * cols_b;
+                            const uint64_t waste = (pass == 0) ? 0 : (pm * pn * 1024) / ((uint64_t)M * N);
+
+                            if (waste >= best_waste) continue;
+                            best_waste = waste;
+                            coopmat_params.workgroup_size = subgroups * coopmat_params.subgroup_size;
+                            coopmat_params.warps_m = warps_m;
+                            coopmat_params.warps_n = warps_n;
+                            coopmat_params.warp_frags_m = frags[0];
+                            coopmat_params.warp_frags_n = frags[1];
+                            coopmat_params.bk = bk;
+                            tiling_fits = true;
+                        }
+                    }
+                }
+            }
+            if (tiling_fits) break;  // smallest workable BK wins
         }
-        if (tiling_fits) break;
     }
 
     if (!tiling_fits) return &coopmat_params;
