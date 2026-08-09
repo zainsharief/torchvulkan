@@ -26,17 +26,17 @@ struct ReluOp<T : IVulkanArithmetic> : IUnaryOp<T>
     static T eval(T a) { return T.ext_max(a, T.ext_zero()); }
 }
 
-struct ExpOp<T : IVulkanArithmetic> : IUnaryOp<T>
+struct ExpOp<T : IVulkanFloat> : IUnaryOp<T>
 {
     static T eval(T a) { return T.ext_exp(a); }
 }
 
-struct LogOp<T : IVulkanArithmetic> : IUnaryOp<T>
+struct LogOp<T : IVulkanFloat> : IUnaryOp<T>
 {
     static T eval(T a) { return T.ext_log(a); }
 }
 
-struct SqrtOp<T : IVulkanArithmetic> : IUnaryOp<T>
+struct SqrtOp<T : IVulkanFloat> : IUnaryOp<T>
 {
     static T eval(T a) { return T.ext_sqrt(a); }
 }
@@ -46,15 +46,195 @@ struct NegOp<T : IVulkanArithmetic> : IUnaryOp<T>
     static T eval(T a) { return T.ext_neg(a); }
 }
 
-struct ReciprocalOp<T : IVulkanArithmetic> : IUnaryOp<T>
+struct ReciprocalOp<T : IVulkanFloat> : IUnaryOp<T>
 {
     static T eval(T a) { return T.ext_reciprocal(a); }
+}
+
+struct SinOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sin(a); }
+}
+
+struct CosOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_cos(a); }
+}
+
+struct TanOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_tan(a); }
+}
+
+struct AsinOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_asin(a); }
+}
+
+struct AcosOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_acos(a); }
+}
+
+struct AtanOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_atan(a); }
+}
+
+struct SinhOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sinh(a); }
+}
+
+struct CoshOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_cosh(a); }
+}
+
+struct TanhOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_tanh(a); }
+}
+
+struct Exp2Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_exp2(a); }
+}
+
+struct Log2Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_log2(a); }
+}
+
+struct Log10Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_log10(a); }
+}
+
+struct Expm1Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_expm1(a); }
+}
+
+struct Log1pOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_log1p(a); }
+}
+
+struct RsqrtOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_rsqrt(a); }
+}
+
+struct SigmoidOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sigmoid(a); }
+}
+
+struct AsinhOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_asinh(a); }
+}
+
+struct AcoshOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_acosh(a); }
+}
+
+struct AtanhOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_atanh(a); }
+}
+
+struct Deg2radOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_deg2rad(a); }
+}
+
+struct Rad2degOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_rad2deg(a); }
+}
+
+struct FloorOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_floor(a); }
+}
+
+struct CeilOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_ceil(a); }
+}
+
+struct TruncOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_trunc(a); }
+}
+
+struct RoundOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_round(a); }
+}
+
+struct FracOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_frac(a); }
+}
+
+struct AbsOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_abs(a); }
+}
+
+struct SignOp<T : IVulkanArithmetic> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sign(a); }
+}
+
+struct ErfOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_erf(a); }
+}
+
+struct ErfinvOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_erfinv(a); }
+}
+
+struct SincOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_sinc(a); }
+}
+
+struct EntrOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_entr(a); }
+}
+
+struct LgammaOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_lgamma(a); }
+}
+
+struct DigammaOp<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_digamma(a); }
+}
+
+struct I0Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_i0(a); }
+}
+
+struct I1Op<T : IVulkanFloat> : IUnaryOp<T>
+{
+    static T eval(T a) { return T.ext_i1(a); }
 }
 
 void baseUnaryKernel<
     T,
     let VEC_SIZE : int,
-    Op : IUnaryOp<vector<T, VEC_SIZE>>
+    Op : IUnaryOp<T>
 >(
     uint3 gi: SV_DispatchThreadID,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_in,
@@ -64,7 +244,9 @@ void baseUnaryKernel<
     uint idx = gi.x;
     if (idx * VEC_SIZE >= pcs.numel) return;
 
-    vector<T, VEC_SIZE> res = Op.eval(tensor_in[idx]);
+    vector<T, VEC_SIZE> v = tensor_in[idx];
+    vector<T, VEC_SIZE> res;
+    [unroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = Op.eval(v[k]);
 
     uint64_t remainder = pcs.numel - (idx * VEC_SIZE);
     if (remainder >= VEC_SIZE) { tensor_out[idx] = res; }
@@ -116,10 +298,11 @@ void main(uint3 gi: SV_DispatchThreadID) {
 
     {% for is_contig in [true, false] %}
     {% for op in OPERATIONS %}
+    {% if 'float' in d1 or not op.get('float_only') %}
 
     {% if is_contig %}
 
-    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseUnaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(
+    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseUnaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<{{ d1 }}>>(
         gi, tensor_in_contig, tensor_out_contig
     );
 
@@ -133,6 +316,7 @@ void main(uint3 gi: SV_DispatchThreadID) {
 
     {% endif %}
 
+    {% endif %}
     {% endfor %}
     {% endfor %}
 }

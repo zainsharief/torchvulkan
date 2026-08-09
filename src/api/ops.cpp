@@ -53,6 +53,52 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("neg", &neg_vulkan);
     m.impl("reciprocal", &reciprocal_vulkan);
 
+    // unary 
+    m.impl("sin", &sin_vulkan);
+    m.impl("cos", &cos_vulkan);
+    m.impl("tan", &tan_vulkan);
+    m.impl("asin", &asin_vulkan);
+    m.impl("acos", &acos_vulkan);
+    m.impl("atan", &atan_vulkan);
+    m.impl("sinh", &sinh_vulkan);
+    m.impl("cosh", &cosh_vulkan);
+    m.impl("tanh", &tanh_vulkan);
+    m.impl("asinh", &asinh_vulkan);
+    m.impl("acosh", &acosh_vulkan);
+    m.impl("atanh", &atanh_vulkan);
+    m.impl("exp2", &exp2_vulkan);
+    m.impl("log2", &log2_vulkan);
+    m.impl("log10", &log10_vulkan);
+    m.impl("expm1", &expm1_vulkan);
+    m.impl("log1p", &log1p_vulkan);
+    m.impl("rsqrt", &rsqrt_vulkan);
+    m.impl("sigmoid", &sigmoid_vulkan);
+    m.impl("deg2rad", &deg2rad_vulkan);
+    m.impl("rad2deg", &rad2deg_vulkan);
+
+    m.impl("floor", &floor_vulkan);
+    m.impl("ceil", &ceil_vulkan);
+    m.impl("trunc", &trunc_vulkan);
+    m.impl("round", &round_vulkan);
+    m.impl("frac", &frac_vulkan);
+    m.impl("abs", &abs_vulkan);
+    m.impl("sign", &sign_vulkan);
+    m.impl("sgn", &sign_vulkan);
+    m.impl("logit", &logit_vulkan);
+
+    m.impl("erf", &erf_vulkan);
+    m.impl("erfinv", &erfinv_vulkan);
+    m.impl("sinc", &sinc_vulkan);
+    m.impl("special_entr", &entr_vulkan);
+    m.impl("lgamma", &lgamma_vulkan);
+    m.impl("digamma", &digamma_vulkan);
+    m.impl("i0", &i0_vulkan);
+    m.impl("special_i1", &i1_vulkan);
+    m.impl("lgamma.out", &lgamma_out_vulkan);
+    m.impl("gelu.out", &gelu_out_vulkan);
+    m.impl("erfc.out", &erfc_out_vulkan);
+    m.impl("special_i0e.out", &i0e_out_vulkan);
+    m.impl("special_i1e.out", &i1e_out_vulkan);
     // binary - Add
     m.impl("add.Tensor", &add_vulkan);
     m.impl("add.Scalar", &add_scalar_vulkan);
@@ -90,6 +136,37 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // binary - Atan2
     m.impl("atan2", &atan2_vulkan);
 
+    // binary - elementwise math
+    m.impl("fmax", &fmax_vulkan);
+    m.impl("fmin", &fmin_vulkan);
+    m.impl("fmod.Tensor", &fmod_vulkan);
+    m.impl("fmod.Scalar", &fmod_scalar_vulkan);
+    m.impl("remainder.Tensor", &remainder_vulkan);
+    m.impl("remainder.Scalar", &remainder_scalar_vulkan);
+    m.impl("hypot", &hypot_vulkan);
+    m.impl("xlogy.Tensor", &xlogy_vulkan);
+    m.impl("logaddexp", &logaddexp_vulkan);
+    m.impl("logaddexp2", &logaddexp2_vulkan);
+
+    // binary - clamp (composed from MAX/MIN)
+    m.impl("clamp", &clamp_scalar_vulkan);
+    m.impl("clamp.Tensor", &clamp_tensor_vulkan);
+    m.impl("clamp_min", &clamp_min_scalar_vulkan);
+    m.impl("clamp_min.Tensor", &clamp_min_tensor_vulkan);
+    m.impl("clamp_max", &clamp_max_scalar_vulkan);
+    m.impl("clamp_max.Tensor", &clamp_max_tensor_vulkan);
+
+    // composite activations (no dedicated shader)
+    m.impl("silu", &silu_vulkan);
+    m.impl("hardtanh", &hardtanh_vulkan);
+    m.impl("hardsigmoid", &hardsigmoid_vulkan);
+    m.impl("hardswish", &hardswish_vulkan);
+    m.impl("leaky_relu", &leaky_relu_vulkan);
+    m.impl("elu", &elu_vulkan);
+    m.impl("softplus", &softplus_vulkan);
+    m.impl("mish", &mish_vulkan);
+    m.impl("tanhshrink", &tanhshrink_vulkan);
+    m.impl("square", &square_vulkan);
     // binary - fused
     m.impl("addcmul_", &addcmul_vulkan_);
     m.impl("addcdiv_", &addcdiv_vulkan_);

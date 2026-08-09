@@ -135,7 +135,7 @@ at::Tensor torchvulkan::unary_op_vulkan(
         .push(contiguous)
         .push(out_dims)
         .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 9) | (out_dims << 5) | (contiguous << 4) | op;
+    uint32_t key = (workgroupSizeX << 11) | (out_dims << 7) | (contiguous << 6) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     IntDivider sizes;
@@ -213,4 +213,253 @@ at::Tensor torchvulkan::neg_vulkan(const at::Tensor& self)
 at::Tensor torchvulkan::reciprocal_vulkan(const at::Tensor& self)
 {
     return unary_op_vulkan(promote_to_float(self), UnaryOp::RECIPROCAL, [](const at::Tensor& a) { return at::reciprocal(a); });
+}
+
+at::Tensor torchvulkan::sin_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::SIN, [](const at::Tensor& a) { return at::sin(a); });
+}
+
+at::Tensor torchvulkan::cos_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::COS, [](const at::Tensor& a) { return at::cos(a); });
+}
+
+at::Tensor torchvulkan::tan_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::TAN, [](const at::Tensor& a) { return at::tan(a); });
+}
+
+at::Tensor torchvulkan::asin_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ASIN, [](const at::Tensor& a) { return at::asin(a); });
+}
+
+at::Tensor torchvulkan::acos_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ACOS, [](const at::Tensor& a) { return at::acos(a); });
+}
+
+at::Tensor torchvulkan::atan_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ATAN, [](const at::Tensor& a) { return at::atan(a); });
+}
+
+at::Tensor torchvulkan::sinh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::SINH, [](const at::Tensor& a) { return at::sinh(a); });
+}
+
+at::Tensor torchvulkan::cosh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::COSH, [](const at::Tensor& a) { return at::cosh(a); });
+}
+
+at::Tensor torchvulkan::tanh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::TANH, [](const at::Tensor& a) { return at::tanh(a); });
+}
+
+at::Tensor torchvulkan::exp2_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::EXP2, [](const at::Tensor& a) { return at::exp2(a); });
+}
+
+at::Tensor torchvulkan::log2_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::LOG2, [](const at::Tensor& a) { return at::log2(a); });
+}
+
+at::Tensor torchvulkan::log10_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::LOG10, [](const at::Tensor& a) { return at::log10(a); });
+}
+
+at::Tensor torchvulkan::expm1_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::EXPM1, [](const at::Tensor& a) { return at::expm1(a); });
+}
+
+at::Tensor torchvulkan::log1p_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::LOG1P, [](const at::Tensor& a) { return at::log1p(a); });
+}
+
+at::Tensor torchvulkan::rsqrt_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::RSQRT, [](const at::Tensor& a) { return at::rsqrt(a); });
+}
+
+at::Tensor torchvulkan::sigmoid_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::SIGMOID, [](const at::Tensor& a) { return at::sigmoid(a); });
+}
+
+at::Tensor torchvulkan::asinh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ASINH, [](const at::Tensor& a) { return at::asinh(a); });
+}
+
+at::Tensor torchvulkan::acosh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ACOSH, [](const at::Tensor& a) { return at::acosh(a); });
+}
+
+at::Tensor torchvulkan::atanh_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ATANH, [](const at::Tensor& a) { return at::atanh(a); });
+}
+
+at::Tensor torchvulkan::deg2rad_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::DEG2RAD, [](const at::Tensor& a) { return at::deg2rad(a); });
+}
+
+at::Tensor torchvulkan::rad2deg_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::RAD2DEG, [](const at::Tensor& a) { return at::rad2deg(a); });
+}
+
+at::Tensor torchvulkan::floor_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::FLOOR, [](const at::Tensor& a) { return at::floor(a); });
+}
+
+at::Tensor torchvulkan::ceil_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::CEIL, [](const at::Tensor& a) { return at::ceil(a); });
+}
+
+at::Tensor torchvulkan::trunc_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::TRUNC, [](const at::Tensor& a) { return at::trunc(a); });
+}
+
+at::Tensor torchvulkan::round_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::ROUND, [](const at::Tensor& a) { return at::round(a); });
+}
+
+at::Tensor torchvulkan::frac_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::FRAC, [](const at::Tensor& a) { return at::frac(a); });
+}
+
+at::Tensor torchvulkan::abs_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::ABS, [](const at::Tensor& a) { return at::abs(a); });
+}
+
+at::Tensor torchvulkan::sign_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(self, UnaryOp::SIGN, [](const at::Tensor& a) { return at::sign(a); });
+}
+
+at::Tensor torchvulkan::erf_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ERF, [](const at::Tensor& a) { return at::erf(a); });
+}
+
+at::Tensor torchvulkan::erfinv_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ERFINV, [](const at::Tensor& a) { return at::erfinv(a); });
+}
+
+at::Tensor torchvulkan::sinc_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::SINC, [](const at::Tensor& a) { return at::sinc(a); });
+}
+
+at::Tensor torchvulkan::entr_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::ENTR, [](const at::Tensor& a) { return at::special_entr(a); });
+}
+
+at::Tensor torchvulkan::lgamma_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::LGAMMA, [](const at::Tensor& a) { return at::lgamma(a); });
+}
+
+at::Tensor torchvulkan::digamma_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::DIGAMMA, [](const at::Tensor& a) { return at::digamma(a); });
+}
+
+at::Tensor torchvulkan::i0_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::I0, [](const at::Tensor& a) { return at::i0(a); });
+}
+
+at::Tensor torchvulkan::i1_vulkan(const at::Tensor& self)
+{
+    return unary_op_vulkan(promote_to_float(self), UnaryOp::I1, [](const at::Tensor& a) { return at::special_i1(a); });
+}
+
+at::Tensor torchvulkan::silu_vulkan(const at::Tensor& self)
+{
+    return at::mul(self, at::sigmoid(self));
+}
+
+at::Tensor torchvulkan::hardtanh_vulkan(const at::Tensor& self, const at::Scalar& min_val, const at::Scalar& max_val)
+{
+    return at::clamp(self, min_val, max_val);
+}
+
+at::Tensor torchvulkan::hardsigmoid_vulkan(const at::Tensor& self)
+{
+    return at::div(at::clamp(at::add(self, 3), 0, 6), 6);
+}
+
+at::Tensor torchvulkan::hardswish_vulkan(const at::Tensor& self)
+{
+    return at::mul(self, at::div(at::clamp(at::add(self, 3), 0, 6), 6));
+}
+
+at::Tensor torchvulkan::leaky_relu_vulkan(const at::Tensor& self, const at::Scalar& negative_slope)
+{
+    at::Tensor pos = at::clamp_min(self, 0);
+    at::Tensor neg = at::clamp_max(self, 0);
+    return at::add(pos, at::mul(neg, negative_slope));
+}
+
+at::Tensor torchvulkan::elu_vulkan(const at::Tensor& self, const at::Scalar& alpha, const at::Scalar& scale, const at::Scalar& input_scale)
+{
+    at::Tensor pos = at::clamp_min(self, 0);
+    at::Tensor inner = at::mul(at::expm1(at::mul(self, input_scale)), alpha);
+    at::Tensor neg = at::clamp_max(inner, 0);
+    return at::mul(at::add(pos, neg), scale);
+}
+
+at::Tensor torchvulkan::softplus_vulkan(const at::Tensor& self, const at::Scalar& beta, const at::Scalar& threshold)
+{
+    at::Tensor bx = at::mul(self, beta);
+    at::Tensor sp = at::div(at::add(at::clamp_min(bx, 0), at::log1p(at::exp(at::neg(at::abs(bx))))), beta);
+    at::Tensor mask = at::clamp(at::sign(at::sub(bx, threshold)), 0, 1);
+    return at::add(at::mul(mask, self), at::mul(at::rsub(mask, 1), sp));
+}
+
+at::Tensor torchvulkan::mish_vulkan(const at::Tensor& self)
+{
+    return at::mul(self, at::tanh(softplus_vulkan(self, 1, 20)));
+}
+
+at::Tensor torchvulkan::tanhshrink_vulkan(const at::Tensor& self)
+{
+    return at::sub(self, at::tanh(self));
+}
+
+at::Tensor torchvulkan::square_vulkan(const at::Tensor& self)
+{
+    if (self.scalar_type() == at::kBool) {
+        at::Tensor t = self.to(at::kLong);
+        return at::mul(t, t);
+    }
+    return at::mul(self, self);
+}
+
+at::Tensor torchvulkan::logit_vulkan(const at::Tensor& self, c10::optional<double> eps)
+{
+    at::Tensor x = promote_to_float(self);
+    if (eps.has_value()) x = at::clamp(x, *eps, 1.0 - *eps);
+    return at::log(at::div(x, at::rsub(x, 1)));
 }

@@ -64,7 +64,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push(use_scalar)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 10) | (out_dims << 6) | (use_scalar << 5) | (contiguous << 4) | op;
+    uint32_t key = (workgroupSizeX << 12) | (out_dims << 8) | (use_scalar << 7) | (contiguous << 6) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     IntDivider sizes; 
@@ -166,7 +166,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
        .push(use_scalar)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 10) | (out_dims << 6) | (use_scalar << 5) | (contiguous << 4) | op;
+    uint32_t key = (workgroupSizeX << 12) | (out_dims << 8) | (use_scalar << 7) | (contiguous << 6) | op;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     IntDivider sizes; 
@@ -302,6 +302,88 @@ at::Tensor torchvulkan::atan2_vulkan(const at::Tensor& self, const at::Tensor& o
 
 at::Tensor torchvulkan::threshold_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& threshold) {
     return binary_op_vulkan(grad_output, self, threshold, BinaryOp::THRESHOLD_BACKWARD, [threshold](const at::Tensor& a, const at::Tensor& b) { return at::threshold_backward(a, b, threshold); });
+}
+
+at::Tensor torchvulkan::fmax_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::FMAX, [](const at::Tensor& a, const at::Tensor& b) { return at::fmax(a, b); });
+}
+
+at::Tensor torchvulkan::fmin_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::FMIN, [](const at::Tensor& a, const at::Tensor& b) { return at::fmin(a, b); });
+}
+
+at::Tensor torchvulkan::fmod_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::FMOD, [](const at::Tensor& a, const at::Tensor& b) { return at::fmod(a, b); });
+}
+
+at::Tensor torchvulkan::fmod_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::FMOD, [](const at::Tensor& a, const at::Scalar& b) { return at::fmod(a, b); });
+}
+
+at::Tensor torchvulkan::remainder_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::REMAINDER, [](const at::Tensor& a, const at::Tensor& b) { return at::remainder(a, b); });
+}
+
+at::Tensor torchvulkan::remainder_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::REMAINDER, [](const at::Tensor& a, const at::Scalar& b) { return at::remainder(a, b); });
+}
+
+at::Tensor torchvulkan::hypot_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    at::Tensor a = self, b = other;
+    if (!self.is_floating_point() && !other.is_floating_point()) {
+        a = self.to(c10::kFloat);
+        b = other.to(c10::kFloat);
+    }
+    return binary_op_vulkan(a, b, (int)1, BinaryOp::HYPOT, [](const at::Tensor& x, const at::Tensor& y) { return at::hypot(x, y); });
+}
+
+at::Tensor torchvulkan::xlogy_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    at::Tensor a = self, b = other;
+    if (!self.is_floating_point() && !other.is_floating_point()) {
+        a = self.to(c10::kFloat);
+        b = other.to(c10::kFloat);
+    }
+    return binary_op_vulkan(a, b, (int)1, BinaryOp::XLOGY, [](const at::Tensor& x, const at::Tensor& y) { return at::xlogy(x, y); });
+}
+
+at::Tensor torchvulkan::logaddexp_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::LOGADDEXP, [](const at::Tensor& a, const at::Tensor& b) { return at::logaddexp(a, b); });
+}
+
+at::Tensor torchvulkan::logaddexp2_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    return binary_op_vulkan(self, other, (int)1, BinaryOp::LOGADDEXP2, [](const at::Tensor& a, const at::Tensor& b) { return at::logaddexp2(a, b); });
+}
+
+at::Tensor torchvulkan::clamp_min_scalar_vulkan(const at::Tensor& self, const at::Scalar& min) {
+    at::Tensor r = binary_op_vulkan(self, min, (int)1, BinaryOp::MAX, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_min(a, b); });
+    return r.scalar_type() == self.scalar_type() ? r : r.to(self.scalar_type());
+}
+
+at::Tensor torchvulkan::clamp_max_scalar_vulkan(const at::Tensor& self, const at::Scalar& max) {
+    at::Tensor r = binary_op_vulkan(self, max, (int)1, BinaryOp::MIN, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_max(a, b); });
+    return r.scalar_type() == self.scalar_type() ? r : r.to(self.scalar_type());
+}
+
+at::Tensor torchvulkan::clamp_min_tensor_vulkan(const at::Tensor& self, const at::Tensor& min) {
+    return maximum_vulkan(self, min);
+}
+
+at::Tensor torchvulkan::clamp_max_tensor_vulkan(const at::Tensor& self, const at::Tensor& max) {
+    return minimum_vulkan(self, max);
+}
+
+at::Tensor torchvulkan::clamp_scalar_vulkan(const at::Tensor& self, const c10::optional<at::Scalar>& min, const c10::optional<at::Scalar>& max) {
+    at::Tensor result = self;
+    if (min.has_value()) result = clamp_min_scalar_vulkan(result, *min);
+    if (max.has_value()) result = clamp_max_scalar_vulkan(result, *max);
+    return result;
+}
+
+at::Tensor torchvulkan::clamp_tensor_vulkan(const at::Tensor& self, const c10::optional<at::Tensor>& min, const c10::optional<at::Tensor>& max) {
+    at::Tensor result = self;
+    if (min.has_value()) result = maximum_vulkan(result, *min);
+    if (max.has_value()) result = minimum_vulkan(result, *max);
+    return result;
 }
 
 at::Tensor& torchvulkan::add_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {

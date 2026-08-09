@@ -60,7 +60,7 @@ struct RPowOp<T : IVulkanArithmetic> : IBinaryOp<T>
     static T eval(T a, T b, T alpha) { return T.ext_pow(b, a); }
 }
 
-struct Atan2Op<T : IVulkanArithmetic> : IBinaryOp<T>
+struct Atan2Op<T : IVulkanFloat> : IBinaryOp<T>
 {
     static T eval(T a, T b, T alpha) { return T.ext_atan2(a, b); }
 }
@@ -80,26 +80,70 @@ struct ThresholdBackwardOp<T : IVulkanArithmetic> : IBinaryOp<T>
     static T eval(T a, T b, T alpha) { return T.ext_threshold_backward(a, b, alpha); }
 }
 
+struct FmaxOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_fmax(a, b); }
+}
+
+struct FminOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_fmin(a, b); }
+}
+
+struct FmodOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_fmod(a, b); }
+}
+
+struct RemainderOp<T : IVulkanArithmetic> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_remainder(a, b); }
+}
+
+struct HypotOp<T : IVulkanFloat> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_hypot(a, b); }
+}
+
+struct XlogyOp<T : IVulkanFloat> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_xlogy(a, b); }
+}
+
+struct LogaddexpOp<T : IVulkanFloat> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_logaddexp(a, b); }
+}
+
+struct Logaddexp2Op<T : IVulkanFloat> : IBinaryOp<T>
+{
+    static T eval(T a, T b, T alpha) { return T.ext_logaddexp2(a, b); }
+}
+
 void baseBinaryKernel<
     T,
     let VEC_SIZE : int,
-    Op : IBinaryOp<vector<T, VEC_SIZE>>
+    Op : IBinaryOp<T>
 >(
     uint3 gi: SV_DispatchThreadID,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_a,
     StructuredBuffer<vector<T, VEC_SIZE>> tensor_b,
     RWStructuredBuffer<vector<T, VEC_SIZE>> tensor_out,
-    vector<T, VEC_SIZE> alpha, vector<T, VEC_SIZE> scalar_value
-) 
+    T alpha, T scalar_value
+)
 {
     uint idx = gi.x;
     if (idx * VEC_SIZE >= pcs.numel) return;
 
-    vector<T, VEC_SIZE> v1, v2, res;
-    v1 = tensor_a[idx];
-    v2 = USE_SCALAR != 0 ? scalar_value : tensor_b[idx];
+    vector<T, VEC_SIZE> va = tensor_a[idx];
+    vector<T, VEC_SIZE> vb = tensor_b[idx];
+    vector<T, VEC_SIZE> res;
 
-    res = Op.eval(v1, v2, alpha);
+    [unroll] for (int k = 0; k < VEC_SIZE; k++) 
+    {
+        T b = (USE_SCALAR != 0) ? scalar_value : vb[k];
+        res[k] = Op.eval(va[k], b, alpha);
+    }
 
     uint64_t remainder = pcs.numel - (idx * VEC_SIZE);
     if (remainder >= VEC_SIZE) { tensor_out[idx] = res; }
@@ -161,10 +205,11 @@ void main(uint3 gi: SV_DispatchThreadID) {
 
     {% for is_contig in [true, false] %}
     {% for op in OPERATIONS %}
+    {% if 'float' in d1 or not op.get('float_only') %}
 
     {% if is_contig %}
 
-    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<vector<{{ d1 }}, {{ v1 }}>>>(
+    if (IS_CONTIG != 0 && OP_TYPE == {{ op['name'] }}) baseBinaryKernel<{{ d1 }}, {{ v1 }}, {{ op['struct'] }}<{{ d1 }}>>(
         gi, tensor_a_contig, tensor_b_contig, tensor_out_contig, pcs.alpha, pcs.scalar_value
     );
 
@@ -177,7 +222,8 @@ void main(uint3 gi: SV_DispatchThreadID) {
     {% endfor %}
 
     {% endif %}
-    
+
+    {% endif %}
     {% endfor %}
     {% endfor %}
 }
