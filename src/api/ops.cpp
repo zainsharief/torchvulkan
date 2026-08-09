@@ -28,6 +28,14 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // factory
     m.impl("empty.memory_format", &empty_memory_format_vulkan);
     m.impl("empty_strided", &empty_strided_vulkan);
+
+    m.impl("arange.start_out", &arange_start_out_vulkan);
+    m.impl("linspace.out", &linspace_out_vulkan);
+    m.impl("logspace.out", &logspace_out_vulkan);
+    m.impl("eye.m_out", &eye_m_out_vulkan);
+    m.impl("tril_indices", &tril_indices_vulkan);
+    m.impl("triu_indices", &triu_indices_vulkan);
+
     m.impl("as_strided", &as_strided_vulkan);
     m.impl("resize_", &resize_vulkan);
     m.impl("_reshape_alias", &reshape_alias_vulkan);
@@ -99,6 +107,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("erfc.out", &erfc_out_vulkan);
     m.impl("special_i0e.out", &i0e_out_vulkan);
     m.impl("special_i1e.out", &i1e_out_vulkan);
+
     // binary - Add
     m.impl("add.Tensor", &add_vulkan);
     m.impl("add.Scalar", &add_scalar_vulkan);
@@ -167,6 +176,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mish", &mish_vulkan);
     m.impl("tanhshrink", &tanhshrink_vulkan);
     m.impl("square", &square_vulkan);
+
     // binary - fused
     m.impl("addcmul_", &addcmul_vulkan_);
     m.impl("addcdiv_", &addcdiv_vulkan_);
@@ -249,6 +259,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("clamp_max.Tensor_out", &clamp_max_tensor_out_vulkan);
     m.impl("clamp.out", &clamp_out_vulkan);
     m.impl("clamp.Tensor_out", &clamp_tensor_out_vulkan);
+
     // comparison / logical
     m.impl("eq.Tensor_out", &eq_tensor_out_vulkan);
     m.impl("eq.Scalar_out", &eq_scalar_out_vulkan);
