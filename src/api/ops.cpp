@@ -102,8 +102,22 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("sum.dim_IntList", &sum_dim_vulkan);
     m.impl("sum", &sum_vulkan);
     m.impl("amax", &amax_vulkan);
+    m.impl("amin", &amin_vulkan);
+    m.impl("prod", &prod_vulkan);
+    m.impl("prod.dim_int", &prod_dim_vulkan);
     m.impl("mean.dim", &mean_dim_vulkan);
     m.impl("mean", &mean_vulkan);
+    m.impl("logsumexp", &logsumexp_vulkan);
+    m.impl("cumsum.out", &cumsum_out_vulkan);
+    m.impl("cumprod.out", &cumprod_out_vulkan);
+    m.impl("argmax.out", &argmax_out_vulkan);
+    m.impl("argmin.out", &argmin_out_vulkan);
+    m.impl("_cummax_helper", &cummax_helper_vulkan);
+    m.impl("_cummin_helper", &cummin_helper_vulkan);
+    m.impl("var.correction", &var_correction_vulkan);
+    m.impl("std.correction", &std_correction_vulkan);
+    m.impl("var_mean.correction", &var_mean_correction_vulkan);
+    m.impl("std_mean.correction", &std_mean_correction_vulkan);
 
     // softmax
     m.impl("_log_softmax", &log_softmax_vulkan);

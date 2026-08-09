@@ -1,0 +1,46 @@
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    uint64_t num_lines;
+    uint reduce_size;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
+[[vk::binding(1, 0)]] RWStructuredBuffer<int64_t> tensor_out;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) 
+{
+    uint line = gi.x;
+    if (line >= pcs.num_lines || pcs.reduce_size == 0) return;
+
+    uint base = line * pcs.reduce_size;
+    {{ d1 }} best = tensor_in[base];
+    uint best_idx = 0;
+
+    for (uint j = 1; j < pcs.reduce_size; j++) 
+    {
+        {% if 'float' in d1 %}
+        if (isnan(best)) break;
+        {% endif %}
+
+        {{ d1 }} v = tensor_in[base + j];
+        bool take;
+
+        {% if 'float' in d1 %}
+        if (isnan(v)) take = true;
+        else take = (OP_TYPE == 0) ? (v > best) : (v < best);
+        {% else %}
+        take = (OP_TYPE == 0) ? (v > best) : (v < best);
+        {% endif %}
+
+        if (take) { best = v; best_idx = j; }
+    }
+
+    tensor_out[line] = int64_t(best_idx);
+}

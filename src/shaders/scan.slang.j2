@@ -1,0 +1,60 @@
+{% include "helpers/vulkan_arithmetic.slang.j2" %}
+
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    uint64_t num_lines;
+    uint scan_size;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+interface ICumScanOp<T>
+{
+    static T combine(T a, T b);
+}
+
+struct SumScanOp<T : IVulkanArithmetic> : ICumScanOp<T>
+{
+    static T combine(T a, T b) { return T.ext_add(a, b); }
+}
+
+struct ProdScanOp<T : IVulkanArithmetic> : ICumScanOp<T>
+{
+    static T combine(T a, T b) { return T.ext_mul(a, b); }
+}
+
+void scanKernel<
+    T,
+    Op : ICumScanOp<T>
+>(
+    uint3 gi: SV_DispatchThreadID,
+    StructuredBuffer<T> tensor_in,
+    RWStructuredBuffer<T> tensor_out
+)
+{
+    uint line = gi.x;
+    if (line >= pcs.num_lines || pcs.scan_size == 0) return;
+
+    uint base = line * pcs.scan_size;
+    T acc = tensor_in[base];
+    tensor_out[base] = acc;
+    for (uint j = 1; j < pcs.scan_size; j++) 
+    {
+        acc = Op.combine(acc, tensor_in[base + j]);
+        tensor_out[base + j] = acc;
+    }
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
+[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) {
+    {% for op in OPERATIONS %}
+    if (OP_TYPE == {{ op['name'] }}) scanKernel<{{ d1 }}, {{ op['struct'] }}<{{ d1 }}>>(gi, tensor_in, tensor_out);
+    {% endfor %}
+}

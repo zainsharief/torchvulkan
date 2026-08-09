@@ -1,0 +1,45 @@
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    uint64_t num_lines;
+    uint scan_size;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
+[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_val;
+[[vk::binding(2, 0)]] RWStructuredBuffer<int64_t> tensor_idx;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) 
+{
+    uint line = gi.x;
+    if (line >= pcs.num_lines || pcs.scan_size == 0) return;
+
+    uint base = line * pcs.scan_size;
+    {{ d1 }} best = tensor_in[base];
+    uint best_idx = 0;
+    tensor_val[base] = best;
+    tensor_idx[base] = 0;
+
+    for (uint j = 1; j < pcs.scan_size; j++) 
+    {
+        {{ d1 }} v = tensor_in[base + j];
+
+        {% if 'float' in d1 %}
+        if (!isnan(best)) {
+            if (isnan(v)) { best = v; best_idx = j; }
+            else if (OP_TYPE == 0 ? (v >= best) : (v <= best)) { best = v; best_idx = j; }
+        }
+        {% else %}
+        if (OP_TYPE == 0 ? (v >= best) : (v <= best)) { best = v; best_idx = j; }
+        {% endif %}
+
+        tensor_val[base + j] = best;
+        tensor_idx[base + j] = int64_t(best_idx);
+    }
+}

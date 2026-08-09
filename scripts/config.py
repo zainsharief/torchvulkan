@@ -84,12 +84,41 @@ SHADERS = [
         'dtypes' : DTYPES,
         'kwargs' : {'OPERATIONS' : [
                     {"name" : '0', 'struct' : 'SumReduceOp'},
-                    {"name" : '1', 'struct' : 'AmaxReduceOp'}
+                    {"name" : '1', 'struct' : 'AmaxReduceOp'},
+                    {"name" : '2', 'struct' : 'AminReduceOp'},
+                    {"name" : '3', 'struct' : 'ProdReduceOp'}
+                ]}
+    },
+    {
+        'name' : 'reduce_subgroup.slang.j2',
+        'dtypes' : [f for f in FLOATS if f[0]['bytes'] <= 4],
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'SumReduceOp'},
+                    {"name" : '1', 'struct' : 'AmaxReduceOp'},
+                    {"name" : '2', 'struct' : 'AminReduceOp'}
                 ]}
     },
     {
         'name' : 'nllloss.slang.j2',
         'dtypes' : FLOATS,
+        'kwargs' : {}
+    },
+    {
+        'name' : 'scan.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'SumScanOp'},
+                    {"name" : '1', 'struct' : 'ProdScanOp'}
+                ]}
+    },
+    {
+        'name' : 'arg_reduce.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {}
+    },
+    {
+        'name' : 'scan_arg.slang.j2',
+        'dtypes' : DTYPES,
         'kwargs' : {}
     },
     {
