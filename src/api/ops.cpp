@@ -201,6 +201,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     // softmax
     m.impl("_log_softmax", &log_softmax_vulkan);
     m.impl("_log_softmax_backward_data", &log_softmax_backward_vulkan);
+    m.impl("_softmax", &softmax_vulkan);
+    m.impl("_softmax_backward_data", &softmax_backward_vulkan);
 
     // nll_loss
     m.impl("nll_loss_forward", &nll_loss_forward_vulkan);
