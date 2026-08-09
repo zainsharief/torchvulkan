@@ -1,0 +1,119 @@
+{% include "helpers/int_divider.slang.j2" %}
+
+[[vk::constant_id(0)]] const uint OP_TYPE = 0;
+[[vk::constant_id(1)]] const uint IS_CONTIG = 0;
+[[vk::constant_id(2)]] const uint USE_SCALAR = 0;
+[[vk::constant_id(3)]] const uint NDIM = 0;
+[[vk::constant_id(4)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    IntDivider sizes;
+    uint4 strides_a;
+    uint4 strides_b;
+    uint4 strides_out;
+    uint64_t numel;
+    {{ d1 }} scalar_value;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+interface ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b);
+}
+
+struct EqOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a == b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct NeOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a != b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct LtOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a < b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct LeOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a <= b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct GtOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a > b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct GeOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a >= b) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct LogicalAndOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a != {{ d1 }}(0) && b != {{ d1 }}(0)) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct LogicalOrOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return (a != {{ d1 }}(0) || b != {{ d1 }}(0)) ? uint8_t(1) : uint8_t(0); }
+}
+
+struct LogicalXorOp : ICompareOp
+{
+    static uint8_t eval({{ d1 }} a, {{ d1 }} b) { return ((a != {{ d1 }}(0)) != (b != {{ d1 }}(0))) ? uint8_t(1) : uint8_t(0); }
+}
+
+void baseCompareKernel<
+    let ndim : int,
+    Op : ICompareOp
+>(
+    uint3 gi: SV_DispatchThreadID,
+    StructuredBuffer<{{ d1 }}> tensor_a,
+    StructuredBuffer<{{ d1 }}> tensor_b,
+    RWStructuredBuffer<uint8_t> tensor_out
+)
+{
+    uint idx = gi.x;
+    if (idx >= pcs.numel) return;
+
+    uint idx_a = idx, idx_b = idx, idx_out = idx;
+    if (IS_CONTIG == 0) 
+    {
+        idx_a = 0; idx_b = 0; idx_out = 0;
+        uint linear_idx = idx;
+        [unroll]
+        for (int i = 0; i < ndim; i++) {
+            uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
+            uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
+            linear_idx = next_linear_idx;
+            idx_a += coord * pcs.strides_a[i];
+            idx_b += coord * pcs.strides_b[i];
+            idx_out += coord * pcs.strides_out[i];
+        }
+    }
+
+    {{ d1 }} va = tensor_a[idx_a];
+    {{ d1 }} vb = (USE_SCALAR != 0) ? pcs.scalar_value : tensor_b[idx_b];
+    tensor_out[idx_out] = Op.eval(va, vb);
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
+[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
+[[vk::binding(2, 0)]] RWStructuredBuffer<uint8_t> tensor_out;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) {
+    {% for op in OPERATIONS %}
+    {% for dim in range(MAX_DIMS+1) %}
+    if (OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseCompareKernel<{{ dim }}, {{ op['struct'] }}>(
+        gi, tensor_a, tensor_b, tensor_out
+    );
+    {% endfor %}
+    {% endfor %}
+}

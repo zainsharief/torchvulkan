@@ -31,6 +31,16 @@ struct AmaxReduceOp<T : IVulkanArithmetic> : IReduceOp<T>
     static T combine(T a, T b) { return T.ext_max(a, b); }
 }
 
+struct AminReduceOp<T : IVulkanArithmetic> : IReduceOp<T>
+{
+    static T combine(T a, T b) { return T.ext_min(a, b); }
+}
+
+struct ProdReduceOp<T : IVulkanArithmetic> : IReduceOp<T>
+{
+    static T combine(T a, T b) { return T.ext_mul(a, b); }
+}
+
 void baseReduceKernel<
     T,
     let ndim : int,

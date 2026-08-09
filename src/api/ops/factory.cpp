@@ -390,6 +390,82 @@ at::Tensor torchvulkan::clone_vulkan(const at::Tensor& self, c10::optional<at::M
     return torchvulkan::copy_vulkan(self, result, false);
 }
 
+at::Tensor& torchvulkan::arange_start_out_vulkan(
+    const at::Scalar& start, 
+    const at::Scalar& end, 
+    const at::Scalar& step, 
+    at::Tensor& out
+) {
+    at::Tensor cpu = at::arange(start, end, step, out.options().device(at::kCPU));
+    out.resize_(cpu.sizes());
+    out.copy_(cpu);
+    return out;
+}
+
+at::Tensor& torchvulkan::linspace_out_vulkan(
+    const at::Scalar& start,
+    const at::Scalar& end, 
+    int64_t steps, 
+    at::Tensor& out
+) {
+    at::Tensor cpu = at::linspace(start, end, steps, out.options().device(at::kCPU));
+    out.resize_(cpu.sizes());
+    out.copy_(cpu);
+    return out;
+}
+
+at::Tensor& torchvulkan::logspace_out_vulkan(
+    const at::Scalar& start, 
+    const at::Scalar& end, 
+    int64_t steps, 
+    double base, 
+    at::Tensor& out
+) {
+    at::Tensor cpu = at::logspace(start, end, steps, base, out.options().device(at::kCPU));
+    out.resize_(cpu.sizes());
+    out.copy_(cpu);
+    return out;
+}
+
+at::Tensor& torchvulkan::eye_m_out_vulkan(
+    c10::SymInt n, 
+    c10::SymInt m, 
+    at::Tensor& out
+) {
+    at::Tensor cpu = at::eye(n.expect_int(), m.expect_int(), out.options().device(at::kCPU));
+    out.resize_(cpu.sizes());
+    out.copy_(cpu);
+    return out;
+}
+
+at::Tensor torchvulkan::tril_indices_vulkan(
+    int64_t row, 
+    int64_t col, 
+    int64_t offset, 
+    c10::optional<at::ScalarType> dtype, 
+    c10::optional<at::Layout> layout, 
+    c10::optional<at::Device> device, 
+    c10::optional<bool> /* pin_memory */
+) {
+    at::TensorOptions cpu_opts = at::TensorOptions().dtype(dtype.value_or(at::kLong)).layout(layout.value_or(at::kStrided)).device(at::kCPU);
+    at::Tensor cpu = at::tril_indices(row, col, offset, cpu_opts);
+    return cpu.to(device.value_or(at::Device(at::DeviceType::PrivateUse1, 0)));
+}
+
+at::Tensor torchvulkan::triu_indices_vulkan(
+    int64_t row, 
+    int64_t col, 
+    int64_t offset, 
+    c10::optional<at::ScalarType> dtype, 
+    c10::optional<at::Layout> layout, 
+    c10::optional<at::Device> device, 
+    c10::optional<bool> /* pin_memory */
+) {
+    at::TensorOptions cpu_opts = at::TensorOptions().dtype(dtype.value_or(at::kLong)).layout(layout.value_or(at::kStrided)).device(at::kCPU);
+    at::Tensor cpu = at::triu_indices(row, col, offset, cpu_opts);
+    return cpu.to(device.value_or(at::Device(at::DeviceType::PrivateUse1, 0)));
+}
+
 void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst) 
 {
     at::TensorIterator iter = at::TensorIteratorConfig()

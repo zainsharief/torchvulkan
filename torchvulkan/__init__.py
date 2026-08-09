@@ -21,6 +21,9 @@ def is_available() -> bool:
 def device_count() -> int:
     return _C.device_count()
 
+def current_device() -> int:
+    return _C.current_device()
+
 def synchronize() -> None:
     _C.synchronize()
 

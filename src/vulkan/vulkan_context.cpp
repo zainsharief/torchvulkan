@@ -147,8 +147,15 @@ void VulkanContext::createDeviceContexts()
 
         vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
 
-        context->properties = props2.properties;        
+        context->properties = props2.properties;
         context->subgroup_size = subgroupProps.subgroupSize;
+
+        // subgroup reductions need arithmetic + shuffle ops available in compute shaders
+        const VkSubgroupFeatureFlags requiredSubgroupOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
+        context->support_subgroup_arithmetic =
+            (subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+            (subgroupProps.supportedOperations & requiredSubgroupOps) == requiredSubgroupOps &&
+            subgroupProps.subgroupSize > 0;
 
         VkPhysicalDeviceMemoryProperties memProperties;
         vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
@@ -186,42 +193,27 @@ void VulkanContext::createDeviceWithExtensions()
         // chain of feature structs to query what the device supports
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT supportedSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR supportedCoopMat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
-        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT supportedAtomicFloat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
-        supportedAtomicFloat.pNext = &supportedCoopMat;
-        VkPhysicalDeviceShaderIntegerDotProductFeatures supportedDotProduct{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
-        supportedDotProduct.pNext = &supportedAtomicFloat;
+        supportedCoopMat.pNext = &supportedSubgroupControl;
         VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        supported12.pNext = &supportedDotProduct;
+        supported12.pNext = &supportedCoopMat;
         VkPhysicalDeviceVulkan11Features supported11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         supported11.pNext = &supported12;
         VkPhysicalDeviceFeatures2 supportedFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         supportedFeatures2.pNext = &supported11;
 
-        // query whch ones are supported
+        // query which ones are supported
         vkGetPhysicalDeviceFeatures2(device->physicalDevice, &supportedFeatures2);
-
-        if (!hasExt(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME) || !hasExt(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)) {
-            TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", device->properties.deviceName, "' does not support required features and will be skipped.");
-            device->valid = false;
-            continue;
-        }
 
         // chain of feature structs to enable the features we want (only the ones supported by the device)
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
-        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT enableAtomicFloat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
-        enableAtomicFloat.shaderBufferFloat32Atomics = supportedAtomicFloat.shaderBufferFloat32Atomics;
-        enableAtomicFloat.shaderBufferFloat32AtomicAdd = supportedAtomicFloat.shaderBufferFloat32AtomicAdd;
-        VkPhysicalDeviceShaderIntegerDotProductFeatures enableDotProduct{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES};
-        enableDotProduct.shaderIntegerDotProduct = supportedDotProduct.shaderIntegerDotProduct;
-        enableDotProduct.pNext = &enableAtomicFloat;
         VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        enable12.shaderFloat16 = supported12.shaderFloat16; 
+        enable12.shaderFloat16 = supported12.shaderFloat16;
         enable12.shaderInt8 = supported12.shaderInt8;
         enable12.storageBuffer8BitAccess = supported12.storageBuffer8BitAccess;
         enable12.scalarBlockLayout = supported12.scalarBlockLayout;
         enable12.bufferDeviceAddress = supported12.bufferDeviceAddress;
-        enable12.pNext = &enableDotProduct;
+        enable12.shaderSubgroupExtendedTypes = supported12.shaderSubgroupExtendedTypes; // subgroup ops on 8/16/64-bit types for reductions
         VkPhysicalDeviceVulkan11Features enable11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         enable11.storageBuffer16BitAccess = supported11.storageBuffer16BitAccess;
         enable11.pNext = &enable12;
@@ -238,12 +230,26 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_bfloat16 = false; // adding support when it comes out!
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
+        device->support_subgroup_extended_types = supported12.shaderSubgroupExtendedTypes;
+        device->support_buffer_device_address = supported12.bufferDeviceAddress;
 
-        if (hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix) 
+        // subgroup size control lets reduction kernels pin full, fixed-size subgroups
+        if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl)
+        {
+            device->support_subgroup_control = true;
+            enableSubgroupControl.subgroupSizeControl = VK_TRUE;
+            enableSubgroupControl.computeFullSubgroups = supportedSubgroupControl.computeFullSubgroups;
+            enableSubgroupControl.pNext = enable12.pNext;
+            enable12.pNext = &enableSubgroupControl;
+            deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+        }
+
+        if (hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix)
         {
             device->support_coopmat = true;
             enableCoopMatrices.cooperativeMatrix = VK_TRUE;
-            enableAtomicFloat.pNext = &enableCoopMatrices;
+            enableCoopMatrices.pNext = enable12.pNext;
+            enable12.pNext = &enableCoopMatrices;
             deviceExtensions.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 
             uint32_t propertyCount = 0;
@@ -257,15 +263,6 @@ void VulkanContext::createDeviceWithExtensions()
                 VkCooperativeMatrixPropertiesKHR property = coopMatProperties[i];
                 CoopMatConfig config{property.MSize, property.NSize, property.KSize};
                 device->cache.addCoopMatConfig(property.AType, property.BType, property.CType, property.ResultType, config);
-            }
-
-            if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl) 
-            {
-                device->support_subgroup_control = true;
-                enableSubgroupControl.subgroupSizeControl = VK_TRUE;
-                enableSubgroupControl.computeFullSubgroups = supportedSubgroupControl.computeFullSubgroups;
-                enableCoopMatrices.pNext = &enableSubgroupControl;
-                deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
             }
         }
 
@@ -283,8 +280,6 @@ void VulkanContext::createDeviceWithExtensions()
 
         deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
 
         #ifdef __APPLE__
         if (hasExt("VK_KHR_portability_subset")) {
@@ -334,6 +329,7 @@ void VulkanContext::createDeviceAllocator()
         allocatorInfo.instance = instance;
         allocatorInfo.vulkanApiVersion = apiVersion;
         allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+        if (device->support_buffer_device_address) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
         VmaVulkanFunctions vmaFunctions = {};
         vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

@@ -1,70 +1,120 @@
 interface IVulkanArithmetic
 {
     static This ext_pow(This a, This b);
-    static This ext_atan2(This a, This b);
     static This ext_max(This a, This b);
     static This ext_min(This a, This b);
     static This ext_zero();
+    static This ext_lowest();
+    static This ext_highest();
+    static This ext_neg(This a);
+    static This ext_threshold_backward(This grad, This self, This threshold);
+    static This ext_add(This a, This b);
+    static This ext_mul(This a, This b);
+    static This ext_floor(This a);
+    static This ext_ceil(This a);
+    static This ext_trunc(This a);
+    static This ext_round(This a);
+    static This ext_frac(This a);
+    static This ext_abs(This a);
+    static This ext_sign(This a);
+    static This ext_fmax(This a, This b);
+    static This ext_fmin(This a, This b);
+    static This ext_fmod(This a, This b);
+    static This ext_remainder(This a, This b);
+}
+
+interface IVulkanFloat
+{
+    static This ext_atan2(This a, This b);
     static This ext_exp(This a);
     static This ext_log(This a);
     static This ext_sqrt(This a);
-    static This ext_neg(This a);
     static This ext_reciprocal(This a);
-    static This ext_threshold_backward(This grad, This self, This threshold);
-    static This ext_add(This a, This b);
+    static This ext_sin(This a);
+    static This ext_cos(This a);
+    static This ext_tan(This a);
+    static This ext_asin(This a);
+    static This ext_acos(This a);
+    static This ext_atan(This a);
+    static This ext_sinh(This a);
+    static This ext_cosh(This a);
+    static This ext_tanh(This a);
+    static This ext_exp2(This a);
+    static This ext_log2(This a);
+    static This ext_log10(This a);
+    static This ext_expm1(This a);
+    static This ext_log1p(This a);
+    static This ext_rsqrt(This a);
+    static This ext_sigmoid(This a);
+    static This ext_asinh(This a);
+    static This ext_acosh(This a);
+    static This ext_atanh(This a);
+    static This ext_deg2rad(This a);
+    static This ext_rad2deg(This a);
+    static This ext_erf(This a);
+    static This ext_erfinv(This a);
+    static This ext_sinc(This a);
+    static This ext_entr(This a);
+    static This ext_lgamma(This a);
+    static This ext_digamma(This a);
+    static This ext_i0(This a);
+    static This ext_i1(This a);
+    static This ext_hypot(This a, This b);
+    static This ext_xlogy(This a, This b);
+    static This ext_logaddexp(This a, This b);
+    static This ext_logaddexp2(This a, This b);
 }
 
-extension {{ d1 }} : IVulkanArithmetic 
-{ 
+extension {{ d1 }} : IVulkanArithmetic
+{
     {% if 'float' in d1 %}
-    static {{ d1 }} _safe_pow({{ d1 }} base, {{ d1 }} exp) { 
-        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(pow(float(base), float(exp))); 
-        return pow(base, exp); 
-    } 
-    
-    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b) 
-    { 
-        if (b == {{ d1 }}(0.0)) return {{ d1 }}(1.0); 
-        else if (b == {{ d1 }}(1.0)) return a; 
-        else if (b == {{ d1 }}(2.0)) return a * a; 
-        else if (a == {{ d1 }}(1.0)) return {{ d1 }}(1.0); 
-        else if (isnan(a) || isnan(b)) return {{ d1 }}(0.0) / {{ d1 }}(0.0); 
-        else if (a == {{ d1 }}(0.0)) { 
-            if (b < {{ d1 }}(0.0)) return {{ d1 }}(1.0) / {{ d1 }}(0.0); 
-            return {{ d1 }}(0.0); 
-        } 
-        else if (a > {{ d1 }}(0.0)) { return _safe_pow(a, b); } 
-        else if (isinf(b)) { return _safe_pow(abs(a), b); } 
-        else if (frac(b) != {{ d1 }}(0.0)) { return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ } 
-        {{ d1 }} res = _safe_pow(abs(a), b); 
-        if (fmod(abs(b), {{ d1 }}(2.0)) == {{ d1 }}(1.0)) { return -res; } 
-        return res; 
-    } 
-    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b)
+    static {{ d1 }} _safe_pow({{ d1 }} base, {{ d1 }} exp)
     {
-        if (a == {{ d1 }}(0) && b == {{ d1 }}(0)) return {{ d1 }}(0);
-        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(atan2(float(a), float(b)));
-        return atan2(a, b);
+        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(pow(float(base), float(exp)));
+        return pow(base, exp);
+    }
+
+    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b)
+    {
+        if (b == {{ d1 }}(0.0)) return {{ d1 }}(1.0);
+        else if (b == {{ d1 }}(1.0)) return a;
+        else if (b == {{ d1 }}(2.0)) return a * a;
+        else if (a == {{ d1 }}(1.0)) return {{ d1 }}(1.0);
+        else if (isnan(a) || isnan(b)) return {{ d1 }}(0.0) / {{ d1 }}(0.0);
+        else if (a == {{ d1 }}(0.0))
+        {
+            if (b < {{ d1 }}(0.0)) return {{ d1 }}(1.0) / {{ d1 }}(0.0);
+            return {{ d1 }}(0.0);
+        }
+        else if (a > {{ d1 }}(0.0)) { return _safe_pow(a, b); }
+        else if (isinf(b)) { return _safe_pow(abs(a), b); }
+        else if (frac(b) != {{ d1 }}(0.0)) { return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ }
+
+        {{ d1 }} res = _safe_pow(abs(a), b);
+        if (fmod(abs(b), {{ d1 }}(2.0)) == {{ d1 }}(1.0)) { return -res; }
+        return res;
     }
     {% else %}
-    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b) 
-    { 
-        int32_t e = int32_t(b); 
-        if (e < 0) { 
-            if (a == {{ d1 }}(1)) return {{ d1 }}(1); 
-            if (int(a) == -1) return (e % 2 != 0) ? {{ d1 }}(-1) : {{ d1 }}(1); 
-            return {{ d1 }}(0); 
-        } 
-        {{ d1 }} res = {{ d1 }}(1); 
-        {{ d1 }} a_val = a; 
-        while (e > 0) { 
-            if ((e & 1) != 0) res *= a_val; 
-            a_val *= a_val; 
-            e >>= 1; 
-        } 
-        return res; 
-    } 
-    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b) { return {{ d1 }}(0); } 
+    static {{ d1 }} ext_pow({{ d1 }} a, {{ d1 }} b)
+    {
+        int32_t e = int32_t(b);
+        if (e < 0)
+        {
+            if (a == {{ d1 }}(1)) return {{ d1 }}(1);
+            if (int(a) == -1) return (e % 2 != 0) ? {{ d1 }}(-1) : {{ d1 }}(1);
+            return {{ d1 }}(0);
+        }
+
+        {{ d1 }} res = {{ d1 }}(1);
+        {{ d1 }} a_val = a;
+        while (e > 0)
+        {
+            if ((e & 1) != 0) res *= a_val;
+            a_val *= a_val;
+            e >>= 1;
+        }
+        return res;
+    }
     {% endif %}
 
     static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return max(a, b); }
@@ -72,99 +122,279 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
 
     {% if 'float' in d1 %}
-    static {{ d1 }} ext_exp({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp(float(a))); return exp(a); }
-    static {{ d1 }} ext_log({{ d1 }} a) { if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0); /* NaN */ if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); /* -inf */ if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a))); return log(a); }
-    static {{ d1 }} ext_sqrt({{ d1 }} a) { return sqrt(a); }
-    static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(1.0) / a; }
+    static {{ d1 }} ext_lowest() { {{ d1 }} zero = {{ d1 }}(0); return {{ d1 }}(-1.0) / zero; }
+    static {{ d1 }} ext_highest() { {{ d1 }} zero = {{ d1 }}(0); return {{ d1 }}(1.0) / zero; }
+    {% elif d1.startswith('u') %}
+    static {{ d1 }} ext_lowest() { return {{ d1 }}(0); }
+    static {{ d1 }} ext_highest() { return ~{{ d1 }}(0); }
     {% else %}
-    static {{ d1 }} ext_exp({{ d1 }} a) { return {{ d1 }}(0); }
-    static {{ d1 }} ext_log({{ d1 }} a) { return {{ d1 }}(0); }
-    static {{ d1 }} ext_sqrt({{ d1 }} a) { return {{ d1 }}(0); }
-    static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(0); }
+    static {{ d1 }} ext_lowest() { return {{ d1 }}({{ d1 }}(1) << ({{ b1 }} * 8 - 1)); }
+    static {{ d1 }} ext_highest() { return ~({{ d1 }}({{ d1 }}(1) << ({{ b1 }} * 8 - 1))); }
     {% endif %}
+
     static {{ d1 }} ext_neg({{ d1 }} a) { return -a; }
     static {{ d1 }} ext_threshold_backward({{ d1 }} grad, {{ d1 }} self, {{ d1 }} threshold) { return (self > threshold) ? grad : {{ d1 }}(0); }
     static {{ d1 }} ext_add({{ d1 }} a, {{ d1 }} b) { return a + b; }
+    static {{ d1 }} ext_mul({{ d1 }} a, {{ d1 }} b) { return a * b; }
+
+    {% if 'float' in d1 %}
+    static {{ d1 }} ext_floor({{ d1 }} a) { return floor(a); }
+    static {{ d1 }} ext_ceil({{ d1 }} a) { return ceil(a); }
+    static {{ d1 }} ext_trunc({{ d1 }} a) { return trunc(a); }
+
+    static {{ d1 }} ext_round({{ d1 }} a)
+    {
+        {{ d1 }} r = floor(a);
+        {{ d1 }} d = a - r;
+        if (d < {{ d1 }}(0.5)) return r;
+        if (d > {{ d1 }}(0.5)) return r + {{ d1 }}(1);
+        return (fmod(r, {{ d1 }}(2)) == {{ d1 }}(0)) ? r : r + {{ d1 }}(1);  // round half to even
+    }
+
+    static {{ d1 }} ext_frac({{ d1 }} a) { return a - trunc(a); }
+    static {{ d1 }} ext_abs({{ d1 }} a) { return abs(a); }
+    static {{ d1 }} ext_sign({{ d1 }} a) { if (isnan(a)) return a; return (a > {{ d1 }}(0)) ? {{ d1 }}(1) : ((a < {{ d1 }}(0)) ? {{ d1 }}(-1) : a); }
+    {% else %}
+    static {{ d1 }} ext_floor({{ d1 }} a) { return a; }
+    static {{ d1 }} ext_ceil({{ d1 }} a) { return a; }
+    static {{ d1 }} ext_trunc({{ d1 }} a) { return a; }
+    static {{ d1 }} ext_round({{ d1 }} a) { return a; }
+    static {{ d1 }} ext_frac({{ d1 }} a) { return {{ d1 }}(0); }
+    {% if d1.startswith('u') %}
+    static {{ d1 }} ext_abs({{ d1 }} a) { return a; }
+    static {{ d1 }} ext_sign({{ d1 }} a) { return (a > {{ d1 }}(0)) ? {{ d1 }}(1) : {{ d1 }}(0); }
+    {% else %}
+    static {{ d1 }} ext_abs({{ d1 }} a) { return abs(a); }
+    static {{ d1 }} ext_sign({{ d1 }} a) { return (a > {{ d1 }}(0)) ? {{ d1 }}(1) : ((a < {{ d1 }}(0)) ? {{ d1 }}(-1) : {{ d1 }}(0)); }
+    {% endif %}
+    {% endif %}
+
+    {% if 'float' in d1 %}
+    static {{ d1 }} ext_fmax({{ d1 }} a, {{ d1 }} b) { if (isnan(a)) return b; if (isnan(b)) return a; return max(a, b); }
+    static {{ d1 }} ext_fmin({{ d1 }} a, {{ d1 }} b) { if (isnan(a)) return b; if (isnan(b)) return a; return min(a, b); }
+    static {{ d1 }} ext_fmod({{ d1 }} a, {{ d1 }} b) { if (sizeof({{ d1 }}) < 4) { float x = float(a); float y = float(b); return {{ d1 }}(x - y * trunc(x / y)); } return a - b * trunc(a / b); }
+    static {{ d1 }} ext_remainder({{ d1 }} a, {{ d1 }} b) { if (sizeof({{ d1 }}) < 4) { float x = float(a); float y = float(b); return {{ d1 }}(x - y * floor(x / y)); } return a - b * floor(a / b); }
+    {% else %}
+    static {{ d1 }} ext_fmax({{ d1 }} a, {{ d1 }} b) { return max(a, b); }
+    static {{ d1 }} ext_fmin({{ d1 }} a, {{ d1 }} b) { return min(a, b); }
+    static {{ d1 }} ext_fmod({{ d1 }} a, {{ d1 }} b) { if (b == {{ d1 }}(0)) return {{ d1 }}(0); return a % b; }
+    {% if d1.startswith('u') %}
+    static {{ d1 }} ext_remainder({{ d1 }} a, {{ d1 }} b) { if (b == {{ d1 }}(0)) return {{ d1 }}(0); return a % b; }
+    {% else %}
+    static {{ d1 }} ext_remainder({{ d1 }} a, {{ d1 }} b) { if (b == {{ d1 }}(0)) return {{ d1 }}(0); {{ d1 }} r = a % b; if (r != {{ d1 }}(0) && ((r < {{ d1 }}(0)) != (b < {{ d1 }}(0)))) r += b; return r; }
+    {% endif %}
+    {% endif %}
 }
 
-extension<T : IVulkanArithmetic, let N : int> vector<T, N> : IVulkanArithmetic
+{% if 'float' in d1 %}
+extension {{ d1 }} : IVulkanFloat
 {
-    static vector<T, N> ext_pow(vector<T, N> a, vector<T, N> b)
+    static {{ d1 }} ext_atan2({{ d1 }} a, {{ d1 }} b)
     {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_pow(a[i], b[i]);
+        if (a == {{ d1 }}(0) && b == {{ d1 }}(0)) return {{ d1 }}(0);
+        if (sizeof({{ d1 }}) != 4) return {{ d1 }}(atan2(float(a), float(b)));
+        return atan2(a, b);
+    }
+
+    // f64 has no GPU transcendental intrinsics, so compute those in f32 and cast back.
+    static {{ d1 }} ext_exp({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp(float(a))); return exp(a); }
+
+    static {{ d1 }} ext_log({{ d1 }} a)
+    {
+        if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0);   // NaN
+        if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); // -inf
+        if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log(float(a)));
+        return log(a);
+    }
+
+    static {{ d1 }} ext_sqrt({{ d1 }} a) { return sqrt(a); }
+    static {{ d1 }} ext_reciprocal({{ d1 }} a) { return {{ d1 }}(1.0) / a; }
+    static {{ d1 }} ext_sin({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(sin(float(a))); return sin(a); }
+    static {{ d1 }} ext_cos({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(cos(float(a))); return cos(a); }
+    static {{ d1 }} ext_tan({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(tan(float(a))); return tan(a); }
+    static {{ d1 }} ext_asin({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(asin(float(a))); return asin(a); }
+    static {{ d1 }} ext_acos({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(acos(float(a))); return acos(a); }
+    static {{ d1 }} ext_atan({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(atan(float(a))); return atan(a); }
+    static {{ d1 }} ext_sinh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(sinh(float(a))); return sinh(a); }
+    static {{ d1 }} ext_cosh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(cosh(float(a))); return cosh(a); }
+    static {{ d1 }} ext_tanh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(tanh(float(a))); return tanh(a); }
+    static {{ d1 }} ext_exp2({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(exp2(float(a))); return exp2(a); }
+
+    static {{ d1 }} ext_log2({{ d1 }} a)
+    {
+        if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0);   // NaN
+        if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); // -inf
+        if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log2(float(a)));
+        return log2(a);
+    }
+
+    static {{ d1 }} ext_log10({{ d1 }} a)
+    {
+        if (a < {{ d1 }}(0.0)) return {{ d1 }}(0.0) / {{ d1 }}(0.0);   // NaN
+        if (a == {{ d1 }}(0.0)) return {{ d1 }}(-1.0) / {{ d1 }}(0.0); // -inf
+        if (sizeof({{ d1 }}) == 8) return {{ d1 }}(log10(float(a)));
+        return log10(a);
+    }
+
+    static {{ d1 }} ext_expm1({{ d1 }} a) { return ext_exp(a) - {{ d1 }}(1); }
+    static {{ d1 }} ext_log1p({{ d1 }} a) { return ext_log({{ d1 }}(1) + a); }
+    static {{ d1 }} ext_rsqrt({{ d1 }} a) { return {{ d1 }}(1) / ext_sqrt(a); }
+    static {{ d1 }} ext_sigmoid({{ d1 }} a) { return {{ d1 }}(1) / ({{ d1 }}(1) + ext_exp(-a)); }
+    static {{ d1 }} ext_asinh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(asinh(float(a))); return asinh(a); }
+    static {{ d1 }} ext_acosh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(acosh(float(a))); return acosh(a); }
+    static {{ d1 }} ext_atanh({{ d1 }} a) { if (sizeof({{ d1 }}) == 8) return {{ d1 }}(atanh(float(a))); return atanh(a); }
+    static {{ d1 }} ext_deg2rad({{ d1 }} a) { return radians(a); }
+    static {{ d1 }} ext_rad2deg({{ d1 }} a) { return degrees(a); }
+
+    // erf: Abramowitz & Stegun 7.1.26 rational-times-exp approximation (|err| < 1.5e-7)
+    static {{ d1 }} ext_erf({{ d1 }} a)
+    {
+        float x = float(a);
+        float ax = abs(x);
+        float t = 1.0f / (1.0f + 0.3275911f * ax);
+        float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * exp(-ax * ax);
+        return {{ d1 }}(x < 0.0f ? -y : y);
+    }
+
+    // erfinv: Giles (2010) two-branch polynomial approximation (branch split at w = 5)
+    static {{ d1 }} ext_erfinv({{ d1 }} a)
+    {
+        float x = float(a);
+        if (x >= 1.0f || x <= -1.0f)
+        {
+            float zero = 0.0f;
+            if (x == 1.0f) return {{ d1 }}(1.0f / zero);
+            if (x == -1.0f) return {{ d1 }}(-1.0f / zero);
+            return {{ d1 }}(0.0f / zero);
         }
-        return res;
-    }
-    static vector<T, N> ext_atan2(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll]
-        for (int i = 0; i < N; i++) {
-            res[i] = T.ext_atan2(a[i], b[i]);
+
+        float w = -log((1.0f - x) * (1.0f + x));
+        float p;
+        if (w < 5.0f)
+        {
+            w -= 2.5f;
+            p = 2.81022636e-08f;
+            p = 3.43273939e-07f + p * w;
+            p = -3.5233877e-06f + p * w;
+            p = -4.39150654e-06f + p * w;
+            p = 0.00021858087f + p * w;
+            p = -0.00125372503f + p * w;
+            p = -0.00417768164f + p * w;
+            p = 0.246640727f + p * w;
+            p = 1.50140941f + p * w;
         }
-        return res;
+        else
+        {
+            w = sqrt(w) - 3.0f;
+            p = -0.000200214257f;
+            p = 0.000100950558f + p * w;
+            p = 0.00134934322f + p * w;
+            p = -0.00367342844f + p * w;
+            p = 0.00573950773f + p * w;
+            p = -0.0076224613f + p * w;
+            p = 0.00943887047f + p * w;
+            p = 1.00167406f + p * w;
+            p = 2.83297682f + p * w;
+        }
+        return {{ d1 }}(p * x);
     }
-    static vector<T, N> ext_max(vector<T, N> a, vector<T, N> b)
+
+    static {{ d1 }} ext_sinc({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_max(a[i], b[i]);
-        return res;
+        float px = 3.14159265358979f * float(a);  // 3.14159265358979 = pi
+        return {{ d1 }}(px == 0.0f ? 1.0f : sin(px) / px);  // normalized sinc = sin(pi*x)/(pi*x)
     }
-    static vector<T, N> ext_min(vector<T, N> a, vector<T, N> b)
+
+    static {{ d1 }} ext_entr({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_min(a[i], b[i]);
-        return res;
+        float x = float(a);
+        if (x > 0.0f) return {{ d1 }}(-x * log(x));
+        if (x == 0.0f) return {{ d1 }}(0.0f);
+        float zero = 0.0f;
+        return {{ d1 }}(-1.0f / zero);
     }
-    static vector<T, N> ext_zero()
+
+    // log-gamma: Lanczos approximation (g = 7, 9-term series), reflection formula for z < 0.5
+    static float _lgamma_lanczos(float z0)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_zero();
-        return res;
+        const float PI = 3.14159265358979f;
+        bool reflect = z0 < 0.5f;
+        float z = (reflect ? (1.0f - z0) : z0) - 1.0f;
+        float t = z + 7.5f;
+        float a = 0.99999999999980993f
+            + 676.5203681218851f / (z + 1.0f) - 1259.1392167224028f / (z + 2.0f)
+            + 771.32342877765313f / (z + 3.0f) - 176.61502916214059f / (z + 4.0f)
+            + 12.507343278686905f / (z + 5.0f) - 0.13857109526572012f / (z + 6.0f)
+            + 9.9843695780195716e-6f / (z + 7.0f) + 1.5056327351493116e-7f / (z + 8.0f);
+        float lg = 0.5f * log(2.0f * PI) + (z + 0.5f) * log(t) - t + log(a);
+        if (reflect) return log(PI / abs(sin(PI * z0))) - lg;
+        return lg;
     }
-    static vector<T, N> ext_exp(vector<T, N> a)
+
+    static {{ d1 }} ext_lgamma({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_exp(a[i]);
-        return res;
+        float x = float(a);
+        if (x <= 0.0f && x == floor(x)) { float zero = 0.0f; return {{ d1 }}(1.0f / zero); }
+        return {{ d1 }}(_lgamma_lanczos(x));
     }
-    static vector<T, N> ext_log(vector<T, N> a)
+
+    // digamma: asymptotic (Stirling) series with Bernoulli terms 1/12, 1/120, 1/252, shifted to
+    // x >= 6 by the recurrence psi(x) = psi(x+1) - 1/x, plus reflection for x < 0.5
+    static {{ d1 }} ext_digamma({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_log(a[i]);
-        return res;
+        float x0 = float(a);
+        const float PI = 3.14159265358979f;
+        if (x0 <= 0.0f && x0 == floor(x0)) { float zero = 0.0f; return {{ d1 }}(x0 == 0.0f ? (-1.0f / zero) : (0.0f / zero)); }
+
+        bool reflect = x0 < 0.5f;
+        float x = reflect ? (1.0f - x0) : x0;
+        float result = 0.0f;
+        [loop] for (int i = 0; i < 8; i++) { if (x >= 6.0f) break; result -= 1.0f / x; x += 1.0f; }
+
+        float inv = 1.0f / x;
+        float inv2 = inv * inv;
+        result += log(x) - 0.5f * inv - inv2 * (1.0f / 12.0f - inv2 * (1.0f / 120.0f - inv2 / 252.0f));
+        if (reflect) result -= PI / tan(PI * x0);
+        return {{ d1 }}(result);
     }
-    static vector<T, N> ext_sqrt(vector<T, N> a)
+
+    // modified Bessel I0: Abramowitz & Stegun 9.8.1/9.8.2 polynomial approximation (split at |x| = 3.75)
+    static {{ d1 }} ext_i0({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_sqrt(a[i]);
-        return res;
+        float ax = abs(float(a));
+        if (ax < 3.75f)
+        {
+            float t = (ax / 3.75f);
+            t = t * t;
+            return {{ d1 }}(1.0f + t * (3.5156229f + t * (3.0899424f + t * (1.2067492f + t * (0.2659732f + t * (0.0360768f + t * 0.0045813f))))));
+        }
+        float t = 3.75f / ax;
+        return {{ d1 }}((exp(ax) / sqrt(ax)) * (0.39894228f + t * (0.01328592f + t * (0.00225319f + t * (-0.00157565f + t * (0.00916281f + t * (-0.02057706f + t * (0.02635537f + t * (-0.01647633f + t * 0.00392377f)))))))));
     }
-    static vector<T, N> ext_neg(vector<T, N> a)
+
+    // modified Bessel I1: Abramowitz & Stegun 9.8.3/9.8.4 polynomial approximation (split at |x| = 3.75)
+    static {{ d1 }} ext_i1({{ d1 }} a)
     {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_neg(a[i]);
-        return res;
+        float x = float(a);
+        float ax = abs(x);
+        float r;
+        if (ax < 3.75f)
+        {
+            float t = (ax / 3.75f);
+            t = t * t;
+            r = ax * (0.5f + t * (0.87890594f + t * (0.51498869f + t * (0.15084934f + t * (0.02658733f + t * (0.00301532f + t * 0.00032411f))))));
+        }
+        else
+        {
+            float t = 3.75f / ax;
+            r = (exp(ax) / sqrt(ax)) * (0.39894228f + t * (-0.03988024f + t * (-0.00362018f + t * (0.00163801f + t * (-0.01031555f + t * (0.02282967f + t * (-0.02895312f + t * (0.01787654f + t * (-0.00420059f)))))))));
+        }
+        return {{ d1 }}(x < 0.0f ? -r : r);
     }
-    static vector<T, N> ext_reciprocal(vector<T, N> a)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_reciprocal(a[i]);
-        return res;
-    }
-    static vector<T, N> ext_threshold_backward(vector<T, N> grad, vector<T, N> self, vector<T, N> threshold)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_threshold_backward(grad[i], self[i], threshold[i]);
-        return res;
-    }
-    static vector<T, N> ext_add(vector<T, N> a, vector<T, N> b)
-    {
-        vector<T, N> res;
-        [unroll] for (int i = 0; i < N; i++) res[i] = T.ext_add(a[i], b[i]);
-        return res;
-    }
+
+    static {{ d1 }} ext_hypot({{ d1 }} a, {{ d1 }} b) { float x = float(a); float y = float(b); return {{ d1 }}(sqrt(x * x + y * y)); }
+    static {{ d1 }} ext_xlogy({{ d1 }} a, {{ d1 }} b) { if (isnan(a)) return a; if (a == {{ d1 }}(0)) return {{ d1 }}(0); return a * ext_log(b); }
+    static {{ d1 }} ext_logaddexp({{ d1 }} a, {{ d1 }} b) { {{ d1 }} m = max(a, b); {{ d1 }} n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
+    static {{ d1 }} ext_logaddexp2({{ d1 }} a, {{ d1 }} b) { {{ d1 }} m = max(a, b); {{ d1 }} n = min(a, b); if (isinf(m)) return m; return m + ext_log2({{ d1 }}(1) + ext_exp2(n - m)); }
 }
+{% endif %}
