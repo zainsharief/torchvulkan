@@ -7,6 +7,7 @@
 #include "api/ops/reduce.h"
 #include "api/ops/softmax.h"
 #include "api/ops/nllloss.h"
+#include "api/ops/composite.h"
 #include "api/ops/compare.h"
 
 using namespace torchvulkan;
@@ -135,6 +136,40 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);
 
+    // composite ops
+    m.impl("dot", &dot_vulkan);
+    m.impl("vdot", &dot_vulkan);
+    m.impl("addmv.out", &addmv_out_vulkan);
+    m.impl("linalg_vector_norm.out", &linalg_vector_norm_out_vulkan);
+    m.impl("norm.out", &norm_scalaropt_dim_out_vulkan);
+    m.impl("renorm.out", &renorm_out_vulkan);
+    m.impl("softshrink.out", &softshrink_out_vulkan);
+    m.impl("hardshrink.out", &hardshrink_out_vulkan);
+    m.impl("threshold.out", &threshold_out_vulkan);
+    m.impl("glu.out", &glu_out_vulkan);
+    m.impl("_prelu_kernel", &prelu_vulkan);
+    m.impl("log_sigmoid_forward", &log_sigmoid_forward_vulkan);
+    m.impl("huber_loss", &huber_loss_vulkan);
+    m.impl("smooth_l1_loss.out", &smooth_l1_loss_out_vulkan);
+    m.impl("mse_loss.out", &mse_loss_out_vulkan);
+    m.impl("binary_cross_entropy", &binary_cross_entropy_vulkan);
+    m.impl("soft_margin_loss", &soft_margin_loss_vulkan);
+    m.impl("special_xlog1py.out", &special_xlog1py_out_vulkan);
+    m.impl("trace", &trace_vulkan);
+    m.impl("cat.out", &cat_out_vulkan);
+    m.impl("roll", &roll_vulkan);
+    m.impl("masked_fill_.Scalar", &masked_fill_scalar_vulkan_);
+    m.impl("masked_fill_.Tensor", &masked_fill_tensor_vulkan_);
+    m.impl("nan_to_num.out", &nan_to_num_out_vulkan);
+    m.impl("heaviside.out", &heaviside_out_vulkan);
+
+    // clamp .out variants 
+    m.impl("clamp_min.out", &clamp_min_out_vulkan);
+    m.impl("clamp_max.out", &clamp_max_out_vulkan);
+    m.impl("clamp_min.Tensor_out", &clamp_min_tensor_out_vulkan);
+    m.impl("clamp_max.Tensor_out", &clamp_max_tensor_out_vulkan);
+    m.impl("clamp.out", &clamp_out_vulkan);
+    m.impl("clamp.Tensor_out", &clamp_tensor_out_vulkan);
     // comparison / logical
     m.impl("eq.Tensor_out", &eq_tensor_out_vulkan);
     m.impl("eq.Scalar_out", &eq_scalar_out_vulkan);
