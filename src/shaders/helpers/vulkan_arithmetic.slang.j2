@@ -172,8 +172,8 @@ extension {{ d1 }} : IVulkanArithmetic
     {% if 'float' in d1 %}
     static {{ d1 }} ext_fmax({{ d1 }} a, {{ d1 }} b) { if (isnan(a)) return b; if (isnan(b)) return a; return max(a, b); }
     static {{ d1 }} ext_fmin({{ d1 }} a, {{ d1 }} b) { if (isnan(a)) return b; if (isnan(b)) return a; return min(a, b); }
-    static {{ d1 }} ext_fmod({{ d1 }} a, {{ d1 }} b) { return a - b * trunc(a / b); }
-    static {{ d1 }} ext_remainder({{ d1 }} a, {{ d1 }} b) { return a - b * floor(a / b); }
+    static {{ d1 }} ext_fmod({{ d1 }} a, {{ d1 }} b) { if (sizeof({{ d1 }}) < 4) { float x = float(a); float y = float(b); return {{ d1 }}(x - y * trunc(x / y)); } return a - b * trunc(a / b); }
+    static {{ d1 }} ext_remainder({{ d1 }} a, {{ d1 }} b) { if (sizeof({{ d1 }}) < 4) { float x = float(a); float y = float(b); return {{ d1 }}(x - y * floor(x / y)); } return a - b * floor(a / b); }
     {% else %}
     static {{ d1 }} ext_fmax({{ d1 }} a, {{ d1 }} b) { return max(a, b); }
     static {{ d1 }} ext_fmin({{ d1 }} a, {{ d1 }} b) { return min(a, b); }
