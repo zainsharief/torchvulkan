@@ -21,6 +21,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         }
     });
 
+    m.def("current_device", []() -> int64_t {
+        try {
+            return static_cast<int64_t>(VulkanContext::CurrentDevice());
+        } catch (...) {
+            return 0;
+        }
+    });
+
     m.def("synchronize", []() {
         VulkanContext::Instance().CurrentDeviceContext()->flush();
     });
