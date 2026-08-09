@@ -46,6 +46,7 @@ jobs:
           VK_LOADER_DEBUG: all
           MKL_ENABLE_INSTRUCTIONS: AVX2   # avoid AVX-512 GEMM path that faults on some GHA runner CPUs
           ATEN_CPU_CAPABILITY: avx2       # same clamp for PyTorch's own vectorized kernels
+          LP_NATIVE_VECTOR_WIDTH: "256"   # cap lavapipe's LLVM JIT to AVX2; AVX-512 codegen faults (0xc000001d) on GHA runners
         run: |
           tox -e py-${{ matrix.torch-factor }}
 
