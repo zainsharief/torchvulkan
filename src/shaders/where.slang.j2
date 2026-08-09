@@ -1,0 +1,64 @@
+{% include "helpers/int_divider.slang.j2" %}
+
+[[vk::constant_id(0)]] const uint IS_CONTIG = 0;
+[[vk::constant_id(1)]] const uint NDIM = 0;
+[[vk::constant_id(2)]] const uint WG_x = 0;
+
+struct PushConstants
+{
+    IntDivider sizes;
+    uint4 strides_cond;
+    uint4 strides_a;
+    uint4 strides_b;
+    uint64_t numel;
+};
+
+[[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
+
+void whereKernel<
+    let ndim : int
+>(
+    uint3 gi: SV_DispatchThreadID,
+    StructuredBuffer<uint8_t> tensor_cond,
+    StructuredBuffer<{{ d1 }}> tensor_a,
+    StructuredBuffer<{{ d1 }}> tensor_b,
+    RWStructuredBuffer<{{ d1 }}> tensor_out
+)
+{
+    uint idx = gi.x;
+    if (idx >= pcs.numel) return;
+
+    uint idx_c = idx, idx_a = idx, idx_b = idx;
+    
+    if (IS_CONTIG == 0) 
+    {
+        idx_c = 0; idx_a = 0; idx_b = 0;
+        uint linear_idx = idx;
+
+        [unroll]
+        for (int i = 0; i < ndim; i++) 
+        {
+            uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
+            uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
+            linear_idx = next_linear_idx;
+            idx_c += coord * pcs.strides_cond[i];
+            idx_a += coord * pcs.strides_a[i];
+            idx_b += coord * pcs.strides_b[i];
+        }
+    }
+
+    tensor_out[idx] = (tensor_cond[idx_c] != uint8_t(0)) ? tensor_a[idx_a] : tensor_b[idx_b];
+}
+
+[[vk::binding(0, 0)]] StructuredBuffer<uint8_t> tensor_cond;
+[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
+[[vk::binding(2, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
+[[vk::binding(3, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
+
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void main(uint3 gi: SV_DispatchThreadID) {
+    {% for dim in range(MAX_DIMS+1) %}
+    if (NDIM == {{ dim }}) whereKernel<{{ dim }}>(gi, tensor_cond, tensor_a, tensor_b, tensor_out);
+    {% endfor %}
+}

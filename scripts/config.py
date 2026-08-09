@@ -75,7 +75,27 @@ SHADERS = [
         'kwargs' : {}
     },
     {
+        'name' : 'compareop.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {'OPERATIONS' : [
+                    {"name" : '0', 'struct' : 'EqOp'},
+                    {"name" : '1', 'struct' : 'NeOp'},
+                    {"name" : '2', 'struct' : 'LtOp'},
+                    {"name" : '3', 'struct' : 'LeOp'},
+                    {"name" : '4', 'struct' : 'GtOp'},
+                    {"name" : '5', 'struct' : 'GeOp'},
+                    {"name" : '6', 'struct' : 'LogicalAndOp'},
+                    {"name" : '7', 'struct' : 'LogicalOrOp'},
+                    {"name" : '8', 'struct' : 'LogicalXorOp'}
+                ]}
+    },
+    {
         'name' : 'fill.slang.j2',
+        'dtypes' : DTYPES,
+        'kwargs' : {}
+    },
+    {
+        'name' : 'where.slang.j2',
         'dtypes' : DTYPES,
         'kwargs' : {}
     },

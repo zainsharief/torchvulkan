@@ -7,6 +7,7 @@
 #include "api/ops/reduce.h"
 #include "api/ops/softmax.h"
 #include "api/ops/nllloss.h"
+#include "api/ops/compare.h"
 
 using namespace torchvulkan;
 
@@ -133,4 +134,32 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("matmul", &matmul_vulkan);
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);
+
+    // comparison / logical
+    m.impl("eq.Tensor_out", &eq_tensor_out_vulkan);
+    m.impl("eq.Scalar_out", &eq_scalar_out_vulkan);
+    m.impl("ne.Tensor_out", &ne_tensor_out_vulkan);
+    m.impl("ne.Scalar_out", &ne_scalar_out_vulkan);
+    m.impl("lt.Tensor_out", &lt_tensor_out_vulkan);
+    m.impl("lt.Scalar_out", &lt_scalar_out_vulkan);
+    m.impl("le.Tensor_out", &le_tensor_out_vulkan);
+    m.impl("le.Scalar_out", &le_scalar_out_vulkan);
+    m.impl("gt.Tensor_out", &gt_tensor_out_vulkan);
+    m.impl("gt.Scalar_out", &gt_scalar_out_vulkan);
+    m.impl("ge.Tensor_out", &ge_tensor_out_vulkan);
+    m.impl("ge.Scalar_out", &ge_scalar_out_vulkan);
+    m.impl("logical_and.out", &logical_and_out_vulkan);
+    m.impl("logical_or.out", &logical_or_out_vulkan);
+    m.impl("logical_xor.out", &logical_xor_out_vulkan);
+    m.impl("logical_not.out", &logical_not_out_vulkan);
+    m.impl("isnan", &isnan_vulkan);
+    m.impl("isinf.out", &isinf_out_vulkan);
+    m.impl("isposinf.out", &isposinf_out_vulkan);
+    m.impl("isneginf.out", &isneginf_out_vulkan);
+
+    // where / select
+    m.impl("where.self", &where_vulkan);
+    m.impl("where.ScalarOther", &where_scalar_other_vulkan);
+    m.impl("where.ScalarSelf", &where_scalar_self_vulkan);
+    m.impl("where.Scalar", &where_scalar_vulkan);
 }
