@@ -160,7 +160,7 @@ VulkanBuffer* VulkanAllocator::out_of_memory_buffer(size_t size, MemoryUsage usa
 
     VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     if (allocated_bytes.load() < vram_limit.load()) {
-        buffer = new VulkanBuffer(device->allocator);
+        buffer = new VulkanBuffer(device->allocator, device->device);
         result = buffer->createBuffer(size, usage);
         if (result == VK_SUCCESS) return buffer;
         delete buffer;
@@ -169,11 +169,11 @@ VulkanBuffer* VulkanAllocator::out_of_memory_buffer(size_t size, MemoryUsage usa
 
     device->flush();
     clearResources();
-    device->cache.softClearCache();
+    device->cache.clearCache();
     sync_memory_budget(0);
     
     if (allocated_bytes.load() < vram_limit.load()) {
-        if (buffer == VK_NULL_HANDLE) buffer = new VulkanBuffer(device->allocator);
+        if (buffer == VK_NULL_HANDLE) buffer = new VulkanBuffer(device->allocator, device->device);
         result = buffer->createBuffer(size, usage);
         if (result == VK_SUCCESS) return buffer;
         delete buffer;

@@ -230,7 +230,6 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
         device->support_subgroup_extended_types = supported12.shaderSubgroupExtendedTypes;
-        device->support_buffer_device_address = supported12.bufferDeviceAddress;
 
         // subgroup size control lets reduction kernels pin full, fixed-size subgroups
         if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl)
@@ -328,7 +327,7 @@ void VulkanContext::createDeviceAllocator()
         allocatorInfo.instance = instance;
         allocatorInfo.vulkanApiVersion = apiVersion;
         allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
-        if (device->support_buffer_device_address) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
         VmaVulkanFunctions vmaFunctions = {};
         vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

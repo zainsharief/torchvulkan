@@ -10,7 +10,8 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     VkBufferCreateInfo bufferInfo = {};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = (size + 127) & ~127; // pad to 128 bytes for safety
-    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |   // allow copy from this buffer
+    bufferInfo.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |   // allow buffer device address support
+                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT |   // allow copy from this buffer
                        VK_BUFFER_USAGE_TRANSFER_DST_BIT;    // allow copy to this buffer
 
     if (usage == MemoryUsage::DEVICE_ONLY) {
@@ -39,7 +40,16 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     }
 
     VkResult result = vmaCreateBuffer(allocator_, &bufferInfo, &allocInfo, &buffer_, &allocation_, &allocInfo_);
-    if (result == VK_SUCCESS && usage != MemoryUsage::DEVICE_ONLY) mappedData_ = allocInfo_.pMappedData;
+    if (result != VK_SUCCESS) return result;
+
+    if (usage != MemoryUsage::DEVICE_ONLY) mappedData_ = allocInfo_.pMappedData;
+
+    // The device address is fixed for the buffer's lifetime, so query it once, here.
+    VkBufferDeviceAddressInfo bdaInfo{};
+    bdaInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    bdaInfo.buffer = buffer_;
+    bufferAddress_ = vkGetBufferDeviceAddress(device, &bdaInfo);
+
     return result;
 }
 

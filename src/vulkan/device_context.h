@@ -33,7 +33,6 @@ struct DeviceContext {
     bool support_subgroup_control = false;
     bool support_subgroup_extended_types = false;
     bool support_subgroup_arithmetic = false;
-    bool support_buffer_device_address = false;
     uint32_t subgroup_size = 0;
 
     static constexpr size_t PENDING_BYTES_FLUSH_THRESHOLD = 256ull << 20;
