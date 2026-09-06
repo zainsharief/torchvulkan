@@ -1,3 +1,4 @@
+#pragma once
 #include <torch/extension.h>
 #include <tuple>
 

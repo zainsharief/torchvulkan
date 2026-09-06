@@ -1,6 +1,5 @@
 #define VOLK_IMPLEMENTATION
 #include "vulkan_context.h"
-#include <iostream>
 
 thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
 

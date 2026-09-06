@@ -1,8 +1,6 @@
 #include "cache.h"
 #include "vulkan_context.h"
 
-#include <iostream>
-
 #ifdef _MSC_VER
 #include <intrin.h>
 static inline int __builtin_clzll(unsigned long long x) {

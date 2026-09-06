@@ -1,3 +1,4 @@
+#pragma once
 #include <torch/extension.h>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
