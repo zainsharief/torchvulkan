@@ -75,22 +75,30 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
         strides_in[i] = static_cast<uint32_t>(self_strides[actual_dim]);
     }
 
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, ndim32)
+                   .push_array(strides_in, ndim32);
+    Metadata metadata = metadataBuilder.build();
+
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-       .push_array(strides_in)
+    pcs.push(get_tensor_address(self))
+       .push(get_tensor_address(out))
+       .push(device->shader_manager->registerMetadata(metadata))
+       .push(numel_out)
        .push(static_cast<uint32_t>(self_strides[dim]))
-       .push(static_cast<uint32_t>(reduce_size))
-       .push(numel_out);
+       .push(static_cast<uint32_t>(reduce_size));
 
     uint32_t groupX = use_subgroup
         ? static_cast<uint32_t>(numel_out)
         : static_cast<uint32_t>((numel_out + (workgroupSizeX - 1)) / workgroupSizeX);
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {self, out},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {self},
+        /* write = */ {out},
         groupX, 1, 1
     );
 
@@ -385,16 +393,20 @@ at::Tensor cumscan(
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     PushConstantBuilder pcs{};
-    pcs.push(static_cast<uint64_t>(num_lines))
+    pcs.push(get_tensor_address(xt))
+       .push(get_tensor_address(out_t))
+       .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(scan_size));
 
     uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {xt, out_t},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {xt},
+        /* write = */ {out_t},
         groupX, 1, 1
     );
 
@@ -473,16 +485,20 @@ at::Tensor argreduce(
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     PushConstantBuilder pcs{};
-    pcs.push(static_cast<uint64_t>(num_lines))
+    pcs.push(get_tensor_address(xt))
+       .push(get_tensor_address(idx))
+       .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(reduce_size));
 
     uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {xt, idx},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {xt},
+        /* write = */ {idx},
         groupX, 1, 1
     );
 
@@ -557,16 +573,21 @@ void cumscanarg(
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     PushConstantBuilder pcs{};
-    pcs.push(static_cast<uint64_t>(num_lines))
+    pcs.push(get_tensor_address(xt))
+       .push(get_tensor_address(val_t))
+       .push(get_tensor_address(idx_t))
+       .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(scan_size));
 
     uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {xt, val_t, idx_t},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {xt},
+        /* write = */ {val_t, idx_t},
         groupX, 1, 1
     );
 

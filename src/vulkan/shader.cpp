@@ -1,16 +1,46 @@
 #include "shader.h"
 #include "cache.h"
+#include "allocator.h"
 #include "vulkan_context.h"
+#include <algorithm>
 #include <cstring>
 
 VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
     : device(device)
 {
     dispatcher = new DAGDispatcher(device);
+
+    metadata_buffer = new VulkanBuffer(device->allocator, device->device);
+    VkResult result = metadata_buffer->createBuffer(METADATA_BUFFER_SIZE, MemoryUsage::HOST_TO_DEVICE);
+    TORCH_CHECK(result == VK_SUCCESS, "torchvulkan [ERROR]: Failed to allocate metadata buffer.");
+    metadata_base_ptr = metadata_buffer->data();
+    metadata_offset = 0;
+}
+
+uint64_t VulkanShaderManager::registerMetadata(const Metadata& metadata)
+{
+    metadata_offset = (metadata_offset + 7) & ~uint64_t(7);
+    if (metadata_offset + metadata.size > METADATA_BUFFER_SIZE) flush();
+
+    uint64_t block_offset = metadata_offset;
+    uint8_t* block = static_cast<uint8_t*>(metadata_base_ptr) + block_offset;
+    memcpy(block, metadata.data, metadata.size);
+    metadata_offset += metadata.size;
+
+    size_t table_offset = metadata.size - metadata.count * sizeof(uint64_t);
+    const uint64_t* offsets = reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(metadata.data) + table_offset);
+
+    uint64_t addresses[MAX_METADATA_SECTIONS] = {0};
+    for (uint32_t i = 0; i < metadata.count; i++) addresses[i] = metadata_buffer->bufferAddress() + block_offset + offsets[i];
+    memcpy(block + table_offset, addresses, metadata.count * sizeof(uint64_t));
+
+    return metadata_buffer->bufferAddress() + block_offset + table_offset;
 }
 
 void VulkanShaderManager::flush()
 {
+    if (metadata_offset > 0) metadata_buffer->flush();
+    metadata_offset = 0;
     if (operations.empty()) return;
 
     dispatcher->dispatch(operations);

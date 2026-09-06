@@ -32,15 +32,22 @@ void dispatch_nllloss_shader(
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
     PushConstantBuilder pcs{};
-    pcs.push(N).push(C).push(ignore_index);
+    pcs.push(get_tensor_address(in))
+       .push(get_tensor_address(target))
+       .push(get_tensor_address(out))
+       .push(N)
+       .push(C)
+       .push(ignore_index);
 
     uint32_t groupX = (total_threads + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {in, target, out},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {in, target},
+        /* write = */ {out},
         groupX, 1, 1
     );
 }

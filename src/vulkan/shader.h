@@ -60,6 +60,10 @@ public:
         DeviceContext* device
     );
 
+    uint64_t registerMetadata(
+        const Metadata& metadata
+    );
+
     void dispatchShader(
         torchvulkan::ShaderID shaderid, 
         SpecializationArgs specConstants,
@@ -77,13 +81,18 @@ public:
 
     void flush();
 
-    ~VulkanShaderManager() { clearCache(); delete dispatcher; };
+    ~VulkanShaderManager() { clearCache(); delete metadata_buffer; delete dispatcher; };
 
 private:
     std::mutex mutex_;
     DeviceContext* device = nullptr;
     std::vector<OpInfo*> operations;
     DAGDispatcher* dispatcher;
+
+    static const uint64_t METADATA_BUFFER_SIZE = 1024 * 1024; // 1MB
+    VulkanBuffer* metadata_buffer;
+    void* metadata_base_ptr;
+    uint64_t metadata_offset;
 
     void clearCache();
     ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);

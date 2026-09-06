@@ -6,12 +6,20 @@
 [[vk::constant_id(3)]] const uint NDIM = 0;
 [[vk::constant_id(4)]] const uint WG_x = 0;
 
+struct Metadata
+{
+    uint64_t sizes;
+    uint64_t strides_a;
+    uint64_t strides_b;
+    uint64_t strides_out;
+};
+
 struct PushConstants
 {
-    IntDivider sizes;
-    uint4 strides_a;
-    uint4 strides_b;
-    uint4 strides_out;
+    uint64_t tensor_a;
+    uint64_t tensor_b;
+    uint64_t tensor_out;
+    uint64_t metadata;
     uint64_t numel;
     {{ d1 }} scalar_value;
 };
@@ -69,51 +77,64 @@ struct LogicalXorOp : ICompareOp
 }
 
 void baseCompareKernel<
-    let ndim : int,
     Op : ICompareOp
 >(
     uint3 gi: SV_DispatchThreadID,
-    StructuredBuffer<{{ d1 }}> tensor_a,
-    StructuredBuffer<{{ d1 }}> tensor_b,
-    RWStructuredBuffer<uint8_t> tensor_out
+    uint64_t address_a,
+    uint64_t address_b,
+    uint64_t address_out,
+    uint64_t address_metadata,
+    uint64_t numel
 )
 {
     uint idx = gi.x;
-    if (idx >= pcs.numel) return;
+    if (idx >= numel) return;
+
+    {{ d1 }}* tensor_a = ({{ d1 }}*)address_a;
+    uint8_t* tensor_out = (uint8_t*)address_out;
 
     uint idx_a = idx, idx_b = idx, idx_out = idx;
     if (IS_CONTIG == 0) 
     {
+        Metadata md = *(Metadata*)address_metadata;
+        uint* strides_a = (uint*)md.strides_a;
+        uint* strides_b = (uint*)md.strides_b;
+        uint* strides_out = (uint*)md.strides_out;
+
         idx_a = 0; idx_b = 0; idx_out = 0;
         uint linear_idx = idx;
-        [unroll]
-        for (int i = 0; i < ndim; i++) {
-            uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
-            uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
+
+        for (uint i = 0; i < NDIM; i++) 
+        {
+            uint next_linear_idx = fast_div(md.sizes, linear_idx, i, NDIM);
+            uint divisor = get_divisor(md.sizes, i);
+            uint coord = linear_idx - (next_linear_idx * divisor);
             linear_idx = next_linear_idx;
-            idx_a += coord * pcs.strides_a[i];
-            idx_b += coord * pcs.strides_b[i];
-            idx_out += coord * pcs.strides_out[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+            idx_out += coord * strides_out[i];
         }
     }
 
     {{ d1 }} va = tensor_a[idx_a];
-    {{ d1 }} vb = (USE_SCALAR != 0) ? pcs.scalar_value : tensor_b[idx_b];
+
+    // the second operand has no address when it is a scalar, so it is only read when it exists
+    {{ d1 }} vb = pcs.scalar_value;
+    if (USE_SCALAR == 0) 
+    {
+        {{ d1 }}* tensor_b = ({{ d1 }}*)address_b;
+        vb = tensor_b[idx_b];
+    }
+
     tensor_out[idx_out] = Op.eval(va, vb);
 }
-
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
-[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint8_t> tensor_out;
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 gi: SV_DispatchThreadID) {
     {% for op in OPERATIONS %}
-    {% for dim in range(MAX_DIMS+1) %}
-    if (OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseCompareKernel<{{ dim }}, {{ op['struct'] }}>(
-        gi, tensor_a, tensor_b, tensor_out
+    if (OP_TYPE == {{ op['name'] }}) baseCompareKernel<{{ op['struct'] }}>(
+        gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel
     );
-    {% endfor %}
     {% endfor %}
 }

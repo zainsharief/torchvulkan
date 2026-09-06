@@ -9,6 +9,7 @@
 #define MAX_SPEC_CONSTANTS 32
 #define MAX_SPEC_DATA_BYTES 256
 #define MAX_DIMS 64
+#define MAX_METADATA_SECTIONS 8
 
 class SpecializationBuilder {
 public:
@@ -131,4 +132,62 @@ struct IntDivider
         uint64_t magic = ((one << 32) * ((one << shift) - d)) / d + 1;
         multiplier[idx] = static_cast<uint32_t>(magic);
     }
+};
+
+struct Metadata {
+    void* data;
+    size_t size;
+    uint32_t count;
+};
+
+class MetadataBuilder {
+public:
+    // the int divider data for the output shape, packed to ndim: divisor[ndim], multiplier[ndim], shift_val[ndim]
+    MetadataBuilder& push(const IntDivider& divider, uint32_t ndim)
+    {
+        beginArray();
+        append(divider.divisor, ndim * sizeof(uint32_t));
+        append(divider.multiplier, ndim * sizeof(uint32_t));
+        append(divider.shift_val, ndim * sizeof(uint32_t));
+        return *this;
+    }
+
+    // one array of per-dimension strides, in elements, packed to ndim
+    MetadataBuilder& push_array(const uint32_t* strides, uint32_t ndim)
+    {
+        beginArray();
+        append(strides, ndim * sizeof(uint32_t));
+        return *this;
+    }
+
+    Metadata build() 
+    { 
+        current_size = (current_size + 7) & ~size_t(7); // the address tensor holds 8 byte entries
+        append(offsets.data(), count * sizeof(uint64_t));
+
+        return {(void*)buffer.data(), current_size, count}; 
+    }
+
+private:
+    void beginArray()
+    {
+        TORCH_CHECK(count < MAX_METADATA_SECTIONS, "torchvulkan [ERROR]: Metadata exceeded ", MAX_METADATA_SECTIONS, " arrays!");
+
+        offsets[count] = current_size;
+        count++;
+    }
+
+    void append(const void* data, size_t size) 
+    {
+        TORCH_CHECK(current_size + size <= MAX_SIZE, "torchvulkan [ERROR]: Metadata exceeded maximum value! Increase if necessary.");
+        
+        std::memcpy(buffer.data() + current_size, data, size);
+        current_size += size;
+    }
+
+    static const uint32_t MAX_SIZE = 2048; // can increase if needed, but this should be sufficient
+    std::array<uint8_t, MAX_SIZE> buffer{}; 
+    std::array<uint64_t, MAX_METADATA_SECTIONS> offsets{};
+    uint32_t count = 0;
+    size_t current_size = 0;
 };

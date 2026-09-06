@@ -79,6 +79,8 @@ at::Tensor& dispatch_compare(
     uint32_t strides_a[MAX_DIMS] = {0};
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
+
+    uint64_t metadata_address = 0;
     if (!contiguous) {
         for (int i = 0; i < out_dims; i++) {
             int td = out_dims - 1 - i;
@@ -87,22 +89,35 @@ at::Tensor& dispatch_compare(
             strides_b[i] = static_cast<uint32_t>(b.stride(td));
             strides_out[i] = static_cast<uint32_t>(out.stride(td));
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_a, out_dims)
+                       .push_array(strides_b, out_dims)
+                       .push_array(strides_out, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-       .push_array(strides_a)
-       .push_array(strides_b)
-       .push_array(strides_out)
+    pcs.push(get_tensor_address(a))
+       .push(use_scalar ? (uint64_t)0 : get_tensor_address(b)) // the shader never reads the second operand for a scalar
+       .push(get_tensor_address(out))
+       .push(metadata_address)
        .push(numel)
        .push_scalar(scalar_value, promoted);
 
+    std::vector<at::Tensor> readTensors = {self_p};
+    if (!use_scalar) readTensors.push_back(other_p);
+
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {self_p, other_p, out}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ readTensors,
+        /* write = */ {out},
         groupX, 1, 1
     );
 
@@ -153,6 +168,8 @@ at::Tensor torchvulkan::where_vulkan(
     uint32_t strides_cond[MAX_DIMS] = {0};
     uint32_t strides_a[MAX_DIMS] = {0};
     uint32_t strides_b[MAX_DIMS] = {0};
+
+    uint64_t metadata_address = 0;
     if (!contiguous) {
         for (int i = 0; i < out_dims; i++) {
             int td = out_dims - 1 - i;
@@ -161,21 +178,32 @@ at::Tensor torchvulkan::where_vulkan(
             strides_a[i] = static_cast<uint32_t>(ae.stride(td));
             strides_b[i] = static_cast<uint32_t>(be.stride(td));
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_cond, out_dims)
+                       .push_array(strides_a, out_dims)
+                       .push_array(strides_b, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-       .push_array(strides_cond)
-       .push_array(strides_a)
-       .push_array(strides_b)
+    pcs.push(get_tensor_address(c))
+       .push(get_tensor_address(a))
+       .push(get_tensor_address(b))
+       .push(get_tensor_address(out))
+       .push(metadata_address)
        .push(numel);
 
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {c, a, b, out}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {c, a, b},
+        /* write = */ {out},
         groupX, 1, 1
     );
 

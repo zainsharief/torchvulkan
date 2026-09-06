@@ -4,51 +4,61 @@
 [[vk::constant_id(1)]] const uint WG_x = 0;
 [[vk::constant_id(2)]] const uint IS_BOOL_CAST = 0;
 
+struct Metadata
+{
+    uint64_t sizes;
+    uint64_t strides_in;
+    uint64_t strides_out;
+};
+
 struct PushConstants
 {
-    IntDivider sizes;
-    uint4 strides_in;
-    uint4 strides_out;
-    uint64_t numel;    
+    uint64_t tensor_in;
+    uint64_t tensor_out;
+    uint64_t metadata;
+    uint64_t numel;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
-void castKernel<
-    let ndim : int
->(
+void castKernel(
     uint3 gi: SV_DispatchThreadID,
-    StructuredBuffer<{{ d1 }}> tensor_in,
-    RWStructuredBuffer<{{ d2 }}> tensor_out
+    uint64_t address_in,
+    uint64_t address_out,
+    uint64_t address_metadata,
+    uint64_t numel
 )
 {
     uint idx = gi.x;
-    if (idx >= pcs.numel) return;
+    if (idx >= numel) return;
+
+    {{ d1 }}* tensor_in = ({{ d1 }}*)address_in;
+    {{ d2 }}* tensor_out = ({{ d2 }}*)address_out;
+
+    Metadata md = *(Metadata*)address_metadata;
+    uint* strides_in = (uint*)md.strides_in;
+    uint* strides_out = (uint*)md.strides_out;
 
     uint idx_in = 0;
     uint idx_out = 0;
     uint linear_idx = idx;
 
-    [unroll]
-    for (int i = 0; i < ndim; i++) {
-        uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
-        uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
+    for (uint i = 0; i < NDIM; i++) 
+    {
+        uint next_linear_idx = fast_div(md.sizes, linear_idx, i, NDIM);
+        uint divisor = get_divisor(md.sizes, i);
+        uint coord = linear_idx - (next_linear_idx * divisor);
         linear_idx = next_linear_idx;
-        idx_in += coord * pcs.strides_in[i];
-        idx_out += coord * pcs.strides_out[i];
+        idx_in += coord * strides_in[i];
+        idx_out += coord * strides_out[i];
     }
 
     if (IS_BOOL_CAST == 1) tensor_out[idx_out] = (tensor_in[idx_in] != 0) ? {{ d2 }}(1) : {{ d2 }}(0);
     else tensor_out[idx_out] = {{ d2 }}(tensor_in[idx_in]);
 }
 
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
-[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d2 }}> tensor_out;
-
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 gi: SV_DispatchThreadID) {
-    {% for dim in range(MAX_DIMS+1) %} 
-    if (NDIM == {{ dim }}) castKernel<{{ dim }}>(gi, tensor_in, tensor_out); 
-    {% endfor %}
+    castKernel(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel);
 }

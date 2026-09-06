@@ -51,27 +51,36 @@ at::Tensor& torchvulkan::fill_scalar_vulkan(
     at::IntArrayRef iter_shape = iter.shape();
     at::IntArrayRef iter_strides_in = iter.strides(0);
 
+    uint64_t metadata_address = 0;
     if (!contiguous) 
     {
         for (int i = 0; i < out_dims; i++) {
             sizes.set(i, iter_shape[i]);
             strides_in[i] = iter_strides_in[i] / el_size;
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_in, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-        .push_array(strides_in)
+    pcs.push(get_tensor_address(self))
+        .push(metadata_address)
         .push(numel)
         .push_scalar(value, self.scalar_type());
 
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {self}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {},
+        /* write = */ {self},
         groupX, 1, 1
     );
 
@@ -142,6 +151,7 @@ at::Tensor torchvulkan::unary_op_vulkan(
     uint32_t strides_in[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
 
+    uint64_t metadata_address = 0;
     if (!contiguous) {
         int64_t el_size = iter.element_size(0);
         at::IntArrayRef iter_shape = iter.shape();
@@ -153,22 +163,31 @@ at::Tensor torchvulkan::unary_op_vulkan(
             strides_in[i] = iter_strides_in[i] / el_size;
             strides_out[i] = iter_strides_out[i] / el_size;
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_in, out_dims)
+                       .push_array(strides_out, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-        .push_array(strides_in)
-        .push_array(strides_out)
+    pcs.push(get_tensor_address(src_in))
+        .push(get_tensor_address(dst))
+        .push(metadata_address)
         .push(numel);
 
     uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {src_in, dst},
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {src_in},
+        /* write = */ {dst},
         groupX, 1, 1
     );
 
