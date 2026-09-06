@@ -1,6 +1,5 @@
 #define VOLK_IMPLEMENTATION
 #include "vulkan_context.h"
-#include <iostream>
 
 thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
 
@@ -177,7 +176,6 @@ void VulkanContext::createDeviceWithExtensions()
     
     for (DeviceContext* device : devices) 
     { 
-
         std::vector<const char*> deviceExtensions;
 
         uint32_t extCount = 0;
@@ -205,8 +203,6 @@ void VulkanContext::createDeviceWithExtensions()
         vkGetPhysicalDeviceFeatures2(device->physicalDevice, &supportedFeatures2);
 
         // chain of feature structs to enable the features we want (only the ones supported by the device)
-        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
-        VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
         enable12.shaderFloat16 = supported12.shaderFloat16;
         enable12.shaderInt8 = supported12.shaderInt8;
@@ -221,6 +217,7 @@ void VulkanContext::createDeviceWithExtensions()
         enable10.shaderFloat64 = supportedFeatures2.features.shaderFloat64;
         enable10.shaderInt64 = supportedFeatures2.features.shaderInt64;
         enable10.shaderInt16 = supportedFeatures2.features.shaderInt16;
+        // no need to chain enable10 -> enable11 here as it is done in features2
 
         device->support_float32 = true;
         device->support_int32 = true;
@@ -231,9 +228,16 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
         device->support_subgroup_extended_types = supported12.shaderSubgroupExtendedTypes;
-        device->support_buffer_device_address = supported12.bufferDeviceAddress;
 
-        // subgroup size control lets reduction kernels pin full, fixed-size subgroups
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+
+        // synchronization2 lets the dispatcher scope its barriers to the stages and accesses it actually uses
+        VkPhysicalDeviceSynchronization2FeaturesKHR enableSync2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
+        enableSync2.synchronization2 = VK_TRUE;
+        enableSync2.pNext = enable12.pNext;
+        enable12.pNext = &enableSync2;
+
         if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl)
         {
             device->support_subgroup_control = true;
@@ -280,6 +284,7 @@ void VulkanContext::createDeviceWithExtensions()
 
         deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
 
         #ifdef __APPLE__
         if (hasExt("VK_KHR_portability_subset")) {
@@ -329,14 +334,20 @@ void VulkanContext::createDeviceAllocator()
         allocatorInfo.instance = instance;
         allocatorInfo.vulkanApiVersion = apiVersion;
         allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
-        if (device->support_buffer_device_address) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
         VmaVulkanFunctions vmaFunctions = {};
         vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
         vmaFunctions.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
         allocatorInfo.pVulkanFunctions = &vmaFunctions;
 
-        if (vmaCreateAllocator(&allocatorInfo, &device->allocator) == VK_SUCCESS) continue;
+        if (vmaCreateAllocator(&allocatorInfo, &device->allocator) == VK_SUCCESS) 
+        {
+            // the shader manager allocates its metadata buffer up front, so it needs the allocator
+            device->shader_manager = new VulkanShaderManager(device);
+            continue;
+        }
+
         TORCH_WARN("torchvulkan [WARNING]: Failed to create VMA allocator for ", device->properties.deviceName, ". This device will be skipped.");
         device->valid = false;
     }

@@ -506,20 +506,28 @@ void torchvulkan::dispatch_copy_shader(const at::Tensor& src, const at::Tensor& 
         strides_in[i] = iter_strides_in[i] / el_size;
         strides_out[i] = iter_strides_out[i] / el_size;
     }
-    
+
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, out_dims)
+                   .push_array(strides_in, out_dims)
+                   .push_array(strides_out, out_dims);
+    Metadata metadata = metadataBuilder.build();
+
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-        .push_array(strides_in)
-        .push_array(strides_out)
+    pcs.push(get_tensor_address(src))
+        .push(get_tensor_address(dst))
+        .push(device->shader_manager->registerMetadata(metadata))
         .push(numel);
 
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {src, dst}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {src},
+        /* write = */ {dst},
         groupX, 1, 1
     );
 }
@@ -569,19 +577,27 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         strides_out[i] = iter_strides_out[i] / el_size_out;
     }
 
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, out_dims)
+                   .push_array(strides_in, out_dims)
+                   .push_array(strides_out, out_dims);
+    Metadata metadata = metadataBuilder.build();
+
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-        .push_array(strides_in)
-        .push_array(strides_out)
+    pcs.push(get_tensor_address(src))
+        .push(get_tensor_address(dst))
+        .push(device->shader_manager->registerMetadata(metadata))
         .push(numel);
 
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {src, dst}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {src},
+        /* write = */ {dst},
         groupX, 1, 1
     );
 }

@@ -3,20 +3,23 @@
 
 struct PushConstants
 {
+    uint64_t tensor_in;
+    uint64_t tensor_val;
+    uint64_t tensor_idx;
     uint64_t num_lines;
     uint scan_size;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
-[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_val;
-[[vk::binding(2, 0)]] RWStructuredBuffer<int64_t> tensor_idx;
-
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 gi: SV_DispatchThreadID) 
 {
+    {{ d1 }}* tensor_in = ({{ d1 }}*)pcs.tensor_in;
+    {{ d1 }}* tensor_val = ({{ d1 }}*)pcs.tensor_val;
+    int64_t* tensor_idx = (int64_t*)pcs.tensor_idx;
+
     uint line = gi.x;
     if (line >= pcs.num_lines || pcs.scan_size == 0) return;
 

@@ -8,6 +8,15 @@ at::Tensor torchvulkan::binary_op_vulkan(
     BinaryOp operation, 
     const std::function<at::Tensor(const at::Tensor&, const at::Tensor&)>& fallback)
 {    
+    // use the scalar function if other is a scalar wrapped in a tensor 
+    if (other.unsafeGetTensorImpl()->is_wrapped_number()) 
+    {
+        return binary_op_vulkan(
+            self, other.item(), alpha, operation,
+            [&fallback, &other](const at::Tensor& a, const at::Scalar&) { return fallback(a, other); }
+        );
+    }
+
     c10::ScalarType promoted_type = at::result_type(self, other);
     
     if (!is_dtype_supported(promoted_type)) {
@@ -72,7 +81,9 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
     
-    if (!contiguous) {
+    uint64_t metadata_address = 0;
+    if (!contiguous) 
+    {
         int64_t el_size = iter.element_size(0);
         at::IntArrayRef iter_shape = iter.shape();
         at::IntArrayRef iter_strides_out = iter.strides(0);
@@ -85,13 +96,21 @@ at::Tensor torchvulkan::binary_op_vulkan(
             strides_b[i] = iter_strides_b[i] / el_size;
             strides_out[i] = iter_strides_out[i] / el_size;
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_a, out_dims)
+                       .push_array(strides_b, out_dims)
+                       .push_array(strides_out, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-       .push_array(strides_a)
-       .push_array(strides_b)
-       .push_array(strides_out)
+    pcs.push(get_tensor_address(self_dtype))
+       .push(get_tensor_address(other_dtype))
+       .push(get_tensor_address(out))
+       .push(metadata_address)
        .push(numel)
        .push_scalar(alpha, promoted_type)
        .push_scalar((at::Scalar)0, promoted_type);
@@ -99,11 +118,13 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize - 1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
 
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {self_dtype, other_dtype, out}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {self_dtype, other_dtype},
+        /* write = */ {out},
         groupX, 1, 1
     );
 
@@ -174,6 +195,7 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
     
+    uint64_t metadata_address = 0;
     if (!contiguous) {
         int64_t el_size = iter.element_size(0);
         at::IntArrayRef iter_shape = iter.shape();
@@ -185,13 +207,21 @@ at::Tensor torchvulkan::binary_op_vulkan(
             strides_a[i] = iter_strides_a[i] / el_size;
             strides_out[i] = iter_strides_out[i] / el_size;
         }
+
+        MetadataBuilder metadataBuilder{};
+        metadataBuilder.push(sizes, out_dims)
+                       .push_array(strides_a, out_dims)
+                       .push_array(strides_b, out_dims)
+                       .push_array(strides_out, out_dims);
+        Metadata metadata = metadataBuilder.build();
+        metadata_address = device->shader_manager->registerMetadata(metadata);
     }
 
     PushConstantBuilder pcs{};
-    pcs.push(sizes)
-       .push_array(strides_a)
-       .push_array(strides_b)
-       .push_array(strides_out)
+    pcs.push(get_tensor_address(self_dtype))
+       .push(/* tensor_b = */ (uint64_t)0) // the second operand is a scalar, so the shader never reads it
+       .push(get_tensor_address(out))
+       .push(metadata_address)
        .push(numel)
        .push_scalar(alpha, promoted_type)
        .push_scalar(other, promoted_type);
@@ -199,11 +229,13 @@ at::Tensor torchvulkan::binary_op_vulkan(
     uint64_t numel_vec = !contiguous ? numel : (numel + (vecSize-1)) / vecSize;
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
     
-    VulkanShader shader(shader_id, specialization, device);
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {self_dtype, self_dtype, out}, 
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ {self_dtype},
+        /* write = */ {out},
         groupX, 1, 1
     );
 

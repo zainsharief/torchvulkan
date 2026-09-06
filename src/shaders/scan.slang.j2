@@ -5,6 +5,8 @@
 
 struct PushConstants
 {
+    uint64_t tensor_in;
+    uint64_t tensor_out;
     uint64_t num_lines;
     uint scan_size;
 };
@@ -31,30 +33,34 @@ void scanKernel<
     Op : ICumScanOp<T>
 >(
     uint3 gi: SV_DispatchThreadID,
-    StructuredBuffer<T> tensor_in,
-    RWStructuredBuffer<T> tensor_out
+    uint64_t address_in,
+    uint64_t address_out,
+    uint64_t num_lines,
+    uint scan_size
 )
 {
     uint line = gi.x;
-    if (line >= pcs.num_lines || pcs.scan_size == 0) return;
+    if (line >= num_lines || scan_size == 0) return;
 
-    uint base = line * pcs.scan_size;
+    T* tensor_in = (T*)address_in;
+    T* tensor_out = (T*)address_out;
+
+    uint base = line * scan_size;
     T acc = tensor_in[base];
     tensor_out[base] = acc;
-    for (uint j = 1; j < pcs.scan_size; j++) 
+    for (uint j = 1; j < scan_size; j++) 
     {
         acc = Op.combine(acc, tensor_in[base + j]);
         tensor_out[base + j] = acc;
     }
 }
 
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
-[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
-
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 gi: SV_DispatchThreadID) {
     {% for op in OPERATIONS %}
-    if (OP_TYPE == {{ op['name'] }}) scanKernel<{{ d1 }}, {{ op['struct'] }}<{{ d1 }}>>(gi, tensor_in, tensor_out);
+    if (OP_TYPE == {{ op['name'] }}) scanKernel<{{ d1 }}, {{ op['struct'] }}<{{ d1 }}>>(
+        gi, pcs.tensor_in, pcs.tensor_out, pcs.num_lines, pcs.scan_size
+    );
     {% endfor %}
 }

@@ -44,8 +44,10 @@ jobs:
           SKBUILD_CMAKE_GENERATOR: Ninja
           MVK_CONFIG_LOG_LEVEL: 3
           VK_LOADER_DEBUG: all
-          MKL_ENABLE_INSTRUCTIONS: AVX2   # avoid AVX-512 GEMM path that faults on some GHA runner CPUs
-          ATEN_CPU_CAPABILITY: avx2       # same clamp for PyTorch's own vectorized kernels
+          MKL_ENABLE_INSTRUCTIONS: AVX2   # cap MKL's fp32 GEMM to AVX2; AVX-512 faults on some GHA runner CPUs
+          ATEN_CPU_CAPABILITY: avx2       # same clamp for PyTorch's own vectorized (Vec256/Vec512) kernels
+          ONEDNN_MAX_CPU_ISA: AVX2        # cap oneDNN's matmul JIT to AVX2; it picks its own ISA and ignores the MKL knob
+          DNNL_MAX_CPU_ISA: AVX2          # legacy name for the same oneDNN ISA cap (older bundled oneDNN)
           LP_NATIVE_VECTOR_WIDTH: "256"   # cap lavapipe's LLVM JIT to AVX2; AVX-512 codegen faults (0xc000001d) on GHA runners
         run: |
           tox -e py-${{ matrix.torch-factor }}

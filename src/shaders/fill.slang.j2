@@ -4,62 +4,78 @@
 [[vk::constant_id(1)]] const uint IS_CONTIG = 0; 
 [[vk::constant_id(2)]] const uint WG_x = 0;
 
+struct Metadata
+{
+    uint64_t sizes;
+    uint64_t strides;
+};
+
 struct PushConstants
 {
-    IntDivider sizes;
-    uint4 strides;
+    uint64_t tensor;
+    uint64_t metadata;
     uint64_t numel;
     {{ d1 }} fill_value;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
 
-void fillKernel
-(
+void fillKernel(
     uint3 gi: SV_DispatchThreadID,
-    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor
+    uint64_t address,
+    uint64_t address_metadata,
+    uint64_t numel,
+    {{ d1 }} fill_value
 )
 {
     uint idx = gi.x;
-    if (idx * {{ v1 }} >= pcs.numel) return;
-    tensor[idx] = (vector<{{ d1 }}, {{ v1 }}>)pcs.fill_value; 
-}
+    {{ d1 }}* tensor = ({{ d1 }}*)address;
 
-void fillKernel<
-    let ndim : int
->(
-    uint3 gi: SV_DispatchThreadID,
-    RWStructuredBuffer<{{ d1 }}> tensor
-)
-{
-    uint idx = gi.x;
-    if (idx >= pcs.numel) return;
+    if (IS_CONTIG == 1)
+    {
+        if (idx * {{ v1 }} >= numel) return;
 
-    uint linear_idx = idx;
-    uint idx_in = 0;
+        vector<{{ d1 }}, {{ v1 }}>* v_tensor = (vector<{{ d1 }}, {{ v1 }}>*)address;
+        vector<{{ d1 }}, {{ v1 }}> value = vector<{{ d1 }}, {{ v1 }}>(fill_value);
 
-    [unroll]
-    for (int i = 0; i < ndim; i++) {
-        uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
-        uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
-        linear_idx = next_linear_idx;
-        idx_in += coord * pcs.strides[i];
+        uint64_t remainder = numel - (idx * {{ v1 }});
+        if (remainder >= {{ v1 }})
+        {
+            v_tensor[idx] = value;
+        }
+        else
+        {
+            for (uint i = 0; i < remainder; i++) {
+                tensor[idx * {{ v1 }} + i] = fill_value;
+            }
+        }
+
+        return;
     }
 
-    tensor[idx_in] = pcs.fill_value; 
-}
+    if (idx >= numel) return;
 
-[[vk::binding(0, 0)]] RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_contig;
-[[vk::binding(0, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_noncontig;
+    Metadata md = *(Metadata*)address_metadata;
+    uint* strides = (uint*)md.strides;
+
+    uint idx_in = 0;
+    uint linear_idx = idx;
+
+    for (uint i = 0; i < NDIM; i++) 
+    {
+        uint next_linear_idx = fast_div(md.sizes, linear_idx, i, NDIM);
+        uint divisor = get_divisor(md.sizes, i);
+        uint coord = linear_idx - (next_linear_idx * divisor);
+        linear_idx = next_linear_idx;
+        idx_in += coord * strides[i];
+    }
+
+    tensor[idx_in] = fill_value;
+}
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 gi: SV_DispatchThreadID) 
 {
-    if (IS_CONTIG == 1) fillKernel(gi, tensor_contig);
-    else {
-        {% for dim in range(MAX_DIMS + 1) %} 
-        if (NDIM == {{ dim }}) fillKernel<{{ dim }}>(gi, tensor_noncontig);
-        {% endfor %}
-    }
+    fillKernel(gi, pcs.tensor, pcs.metadata, pcs.numel, pcs.fill_value);
 }

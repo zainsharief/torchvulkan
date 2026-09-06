@@ -236,7 +236,11 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     }
     
     PushConstantBuilder pcs{};
-    pcs.push_array(strides_a)
+    pcs.push(get_tensor_address(self_b))
+       .push(get_tensor_address(other_b))
+       .push(get_tensor_address(out))
+       .push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0) // the shader only reads the bias when it exists
+       .push_array(strides_a)
        .push_array(strides_b)
        .push_array(strides_out)
        .push_array(strides_bias)
@@ -285,16 +289,21 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
                    ((uint64_t)params->warps_n << 24) | ((uint64_t)params->warps_m << 20) |
                    ((uint64_t)params->subgroup_size << 12) | ((uint64_t)params->workgroup_size);
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
-    VulkanShader shader(shader_id, specialization, device);
 
     uint32_t groupX = N_padded / tile_n;
     uint32_t groupY = M_padded / tile_m;
     uint32_t groupZ = B;
 
-    shader.dispatch(
-        &pcs,
-        pcs.size(),
-        {self_b, other_b, out, has_bias ? bias_b : out},
+    std::vector<at::Tensor> readTensors = {self_b, other_b};
+    if (has_bias) readTensors.push_back(bias_b);
+
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ readTensors,
+        /* write = */ {out},
         groupX, groupY, groupZ
     );
 
@@ -409,6 +418,10 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
 
     PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(self_b));
+    pcs.push(get_tensor_address(other_b));
+    pcs.push(get_tensor_address(out));
+    pcs.push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0); // the shader only reads the bias when it exists
     pcs.push_array(strides_a);
     pcs.push_array(strides_b);
     pcs.push_array(strides_c);
@@ -424,12 +437,16 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     uint32_t groupY = (M + device_tile_m - 1) / device_tile_m;
     uint32_t groupZ = static_cast<uint32_t>(B);
 
-    VulkanShader shader(shader_id, specialization, device);
-    
-    shader.dispatch(
-        &pcs, 
-        pcs.size(), 
-        {self_b, other_b, out, has_bias ? bias_b : out}, 
+    std::vector<at::Tensor> readTensors = {self_b, other_b};
+    if (has_bias) readTensors.push_back(bias_b);
+
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ readTensors,
+        /* write = */ {out},
         groupX, groupY, groupZ
     );
 

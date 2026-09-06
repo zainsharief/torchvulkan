@@ -5,13 +5,20 @@
 [[vk::constant_id(1)]] const uint NDIM = 0;
 [[vk::constant_id(2)]] const uint WG_x = 0;
 
+struct Metadata
+{
+    uint64_t sizes;
+    uint64_t strides_in;
+};
+
 struct PushConstants
 {
-    IntDivider sizes;
-    uint4 strides_in;
+    uint64_t tensor_in;
+    uint64_t tensor_out;
+    uint64_t metadata;
+    uint64_t numel_out;
     uint reduce_stride;
     uint reduce_size;
-    uint64_t numel_out;
 };
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> pcs;
@@ -46,49 +53,54 @@ struct AminReduceOp : IReduceOp<{{ d1 }}>
 
 void baseSubgroupReduceKernel<
     T,
-    let ndim : int,
     Op : IReduceOp<T>
 >(
     uint out_idx,
     uint lane,
-    StructuredBuffer<T> tensor_in,
-    RWStructuredBuffer<T> tensor_out
+    uint64_t address_in,
+    uint64_t address_out,
+    uint64_t address_metadata,
+    uint64_t numel_out,
+    uint reduce_stride,
+    uint reduce_size
 )
 {
-    if (out_idx >= pcs.numel_out) return;
+    if (out_idx >= numel_out) return;
+
+    T* tensor_in = (T*)address_in;
+    T* tensor_out = (T*)address_out;
+
+    Metadata md = *(Metadata*)address_metadata;
+    uint* strides_in = (uint*)md.strides_in;
 
     uint idx_in = 0;
     uint linear_idx = out_idx;
 
-    [unroll]
-    for (int i = 0; i < ndim; i++) {
-        uint next_linear_idx = fast_div(linear_idx, pcs.sizes, i);
-        uint coord = linear_idx - (next_linear_idx * pcs.sizes.divisor[i]);
+    for (uint i = 0; i < NDIM; i++) 
+    {
+        uint next_linear_idx = fast_div(md.sizes, linear_idx, i, NDIM);
+        uint divisor = get_divisor(md.sizes, i);
+        uint coord = linear_idx - (next_linear_idx * divisor);
         linear_idx = next_linear_idx;
-        idx_in += coord * pcs.strides_in[i];
+        idx_in += coord * strides_in[i];
     }
 
     T acc = Op.identity();
-    for (uint r = lane; r < pcs.reduce_size; r += WG_x) {
-        acc = Op.combine(acc, tensor_in[idx_in + r * pcs.reduce_stride]);
+    for (uint r = lane; r < reduce_size; r += WG_x) {
+        acc = Op.combine(acc, tensor_in[idx_in + r * reduce_stride]);
     }
     acc = Op.wave_reduce(acc);
 
     if (lane == 0) tensor_out[out_idx] = acc;
 }
 
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_in;
-[[vk::binding(1, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
-
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
 void main(uint3 group_id: SV_GroupID, uint3 group_thread_id: SV_GroupThreadID) {
 
     {% for op in OPERATIONS %}
-    {% for dim in range(MAX_DIMS+1) %}
-    if (OP_TYPE == {{ op['name'] }} && NDIM == {{ dim }}) baseSubgroupReduceKernel<{{ d1 }}, {{ dim }}, {{ op['struct'] }}>(
-        group_id.x, group_thread_id.x, tensor_in, tensor_out
+    if (OP_TYPE == {{ op['name'] }}) baseSubgroupReduceKernel<{{ d1 }}, {{ op['struct'] }}>(
+        group_id.x, group_thread_id.x, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel_out, pcs.reduce_stride, pcs.reduce_size
     );
-    {% endfor %}
     {% endfor %}
 }

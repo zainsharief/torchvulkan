@@ -1,10 +1,26 @@
-struct IntDivider {
-    uint4 divisor;
-    uint4 multiplier;
-    uint4 shift_val;
-};
+/*
+uint64_t d: address of the int divider data, laid out as three contiguous
+            uint[ndim] arrays: divisor[ndim], multiplier[ndim], shift_val[ndim]
+uint n:     linear index
+uint dim:   dimension
+uint ndim:  number of dimensions (stride between the packed arrays)
+*/
+uint fast_div(uint64_t d, uint n, uint dim, uint ndim) 
+{
+    uint* base = (uint*)d;
+    uint multiplier = base[ndim + dim];
+    uint shift_val = base[2 * ndim + dim];
+    uint t = (uint)(((uint64_t)n * multiplier) >> 32);
+    return (uint)(((uint64_t)t + n) >> shift_val);
+}
 
-uint fast_div(uint n, IntDivider d, int dim) {
-    uint t = (uint)(((uint64_t)n * d.multiplier[dim]) >> 32);
-    return (t + n) >> d.shift_val[dim];
+/*
+uint64_t d: address of the int divider data, laid out as three contiguous
+            uint[ndim] arrays: divisor[ndim], multiplier[ndim], shift_val[ndim]
+uint dim:   dimension
+*/
+uint get_divisor(uint64_t d, int dim) 
+{
+    uint* base = (uint*)d;
+    return base[dim];
 }

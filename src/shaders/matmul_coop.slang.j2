@@ -31,6 +31,10 @@ struct TensorStrides {
 };
 
 struct PushConstants {
+    uint64_t tensor_a;
+    uint64_t tensor_b;
+    uint64_t tensor_out;
+    uint64_t tensor_bias;
     TensorStrides strides_a;
     TensorStrides strides_b;
     TensorStrides strides_out;
@@ -63,14 +67,14 @@ void matmulKernel<
 >(
     uint3 wg: SV_GroupID,
     uint ti: SV_GroupIndex,
-    StructuredBuffer<{{ d1 }}> tensor_a,
-    StructuredBuffer<{{ d1 }}> tensor_b,
-    RWStructuredBuffer<{{ d1 }}> tensor_out,
-    StructuredBuffer<{{ d1 }}> tensor_bias,
-    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_vec,
-    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_vec,
-    RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out_vec,
-    StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias_vec
+    {{ d1 }}* tensor_a,
+    {{ d1 }}* tensor_b,
+    {{ d1 }}* tensor_out,
+    {{ d1 }}* tensor_bias,
+    vector<{{ d1 }}, {{ v1 }}>* tensor_a_vec,
+    vector<{{ d1 }}, {{ v1 }}>* tensor_b_vec,
+    vector<{{ d1 }}, {{ v1 }}>* tensor_out_vec,
+    vector<{{ d1 }}, {{ v1 }}>* tensor_bias_vec
 )
 {
     uint batch_offset_a = wg.z * pcs.strides_a.batch;
@@ -741,16 +745,6 @@ void matmulKernel<
     }
 }
 
-[[vk::binding(0, 0)]] StructuredBuffer<{{ d1 }}> tensor_a;
-[[vk::binding(1, 0)]] StructuredBuffer<{{ d1 }}> tensor_b;
-[[vk::binding(2, 0)]] RWStructuredBuffer<{{ d1 }}> tensor_out;
-[[vk::binding(3, 0)]] StructuredBuffer<{{ d1 }}> tensor_bias;
-
-[[vk::binding(0, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_a_vec;
-[[vk::binding(1, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_b_vec;
-[[vk::binding(2, 0)]] RWStructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_out_vec;
-[[vk::binding(3, 0)]] StructuredBuffer<vector<{{ d1 }}, {{ v1 }}>> tensor_bias_vec;
-
 
 [shader("compute")]
 [numthreads(WORKGROUP_SIZE, 1, 1)]
@@ -759,6 +753,16 @@ void main(
     uint  ti: SV_GroupIndex
 )
 {
+    {{ d1 }}* tensor_a = ({{ d1 }}*)pcs.tensor_a;
+    {{ d1 }}* tensor_b = ({{ d1 }}*)pcs.tensor_b;
+    {{ d1 }}* tensor_out = ({{ d1 }}*)pcs.tensor_out;
+    {{ d1 }}* tensor_bias = ({{ d1 }}*)pcs.tensor_bias;
+
+    vector<{{ d1 }}, {{ v1 }}>* tensor_a_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_a;
+    vector<{{ d1 }}, {{ v1 }}>* tensor_b_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_b;
+    vector<{{ d1 }}, {{ v1 }}>* tensor_out_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_out;
+    vector<{{ d1 }}, {{ v1 }}>* tensor_bias_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_bias;
+
     {% for warp_frags_m in [2, 4] %}
     {% for warp_frags_n in [2, 4] %}
 

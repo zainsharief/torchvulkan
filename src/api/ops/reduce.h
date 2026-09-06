@@ -1,4 +1,4 @@
-#include <iostream>
+#pragma once
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
