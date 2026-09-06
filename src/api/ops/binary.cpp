@@ -8,6 +8,15 @@ at::Tensor torchvulkan::binary_op_vulkan(
     BinaryOp operation, 
     const std::function<at::Tensor(const at::Tensor&, const at::Tensor&)>& fallback)
 {    
+    // use the scalar function if other is a scalar wrapped in a tensor 
+    if (other.unsafeGetTensorImpl()->is_wrapped_number()) 
+    {
+        return binary_op_vulkan(
+            self, other.item(), alpha, operation,
+            [&fallback, &other](const at::Tensor& a, const at::Scalar&) { return fallback(a, other); }
+        );
+    }
+
     c10::ScalarType promoted_type = at::result_type(self, other);
     
     if (!is_dtype_supported(promoted_type)) {
