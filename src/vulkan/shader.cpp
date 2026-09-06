@@ -52,6 +52,9 @@ void VulkanShaderManager::flush()
         delete op;
     }
     operations.clear();
+
+    pending_buffers.clear();
+    pending_bytes = 0;
 }
 
 void VulkanShaderManager::dispatchShader(
@@ -103,11 +106,27 @@ void VulkanShaderManager::dispatchShader(
     info->outputs = std::move(outputs);
     operations.push_back(info);
 
-    size_t dispatch_bytes = 0;
-    for (const at::Tensor& t : readTensors) dispatch_bytes += t.storage().nbytes();
-    for (const at::Tensor& t : writeTensors) dispatch_bytes += t.storage().nbytes();
-    device->pending_bytes += dispatch_bytes;
-    if (device->pending_bytes > DeviceContext::PENDING_BYTES_FLUSH_THRESHOLD) flush();
+    for (const MemoryRange* range : info->inputs) trackPending(range);
+    for (const MemoryRange* range : info->outputs) trackPending(range);
+    flushIfPending();
+}
+
+void VulkanShaderManager::trackPending(const MemoryRange* range)
+{
+    if (range->base_addr == 0) return; // an empty tensor has no buffer behind it
+    if (!pending_buffers.insert(range->base_addr).second) return;
+
+    pending_bytes += reinterpret_cast<VulkanBuffer*>(range->base_addr)->size();
+}
+
+size_t VulkanShaderManager::flushThreshold() const
+{
+    return std::max(globalVulkanAllocator.vram_budget() / 4, MIN_PENDING_BYTES_FLUSH_THRESHOLD);
+}
+
+void VulkanShaderManager::flushIfPending()
+{
+    if (pending_bytes > flushThreshold() || operations.size() >= MAX_PENDING_OPS) flush();
 }
 
 void VulkanShaderManager::dispatchCopy(
@@ -127,8 +146,9 @@ void VulkanShaderManager::dispatchCopy(
     info->outputs.push_back(new MemoryRange{reinterpret_cast<uint64_t>(dst), dstOffset, count});
     operations.push_back(info);
 
-    device->pending_bytes += 2 * count; // source + destination
-    if (device->pending_bytes > DeviceContext::PENDING_BYTES_FLUSH_THRESHOLD) flush();
+    for (const MemoryRange* range : info->inputs) trackPending(range);
+    for (const MemoryRange* range : info->outputs) trackPending(range);
+    flushIfPending();
 }
 
 ShaderSubmitInfo* VulkanShaderManager::allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec)

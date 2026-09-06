@@ -96,6 +96,8 @@ public:
      */
     void clearResources() const;
 
+    size_t vram_budget() const { return vram_limit.load(std::memory_order_relaxed); }
+
 private:
     mutable std::vector<VulkanBuffer*> deleteQueue;
     mutable std::mutex mutex_; // thread safety

@@ -141,7 +141,6 @@ void DAGDispatcher::dispatch(const std::vector<OpInfo*> operations)
         ready = std::move(next_wave);
     }
 
-    device->pending_bytes = 0;
     device->device_table.vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submitInfo{};

@@ -6,6 +6,8 @@
 #include "builders.h"
 #include "dispatch.h"
 
+#include <unordered_set>
+
 class DeviceContext;
 class VulkanBuffer;
 
@@ -93,6 +95,15 @@ private:
     VulkanBuffer* metadata_buffer;
     void* metadata_base_ptr;
     uint64_t metadata_offset;
+
+    static constexpr size_t MIN_PENDING_BYTES_FLUSH_THRESHOLD = 256ull << 20;
+    static constexpr size_t MAX_PENDING_OPS = 512;
+    std::unordered_set<uint64_t> pending_buffers;
+    size_t pending_bytes = 0;
+
+    size_t flushThreshold() const;
+    void trackPending(const MemoryRange* range);
+    void flushIfPending();
 
     void clearCache();
     ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);
