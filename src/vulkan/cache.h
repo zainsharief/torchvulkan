@@ -31,7 +31,6 @@ struct CoopMatParams {
 
 class VulkanCache {
 public:
-    void softClearCache();
     void clearCache();
     ~VulkanCache() { clearCache(); }
 
@@ -44,8 +43,6 @@ public:
     VulkanBuffer* allocateBuffer(size_t size, MemoryUsage usage);
     void deleteBuffer(VulkanBuffer* buffer, MemoryUsage usage);
 
-    ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);
-
     void addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR bType, VkComponentTypeKHR cType, VkComponentTypeKHR resultType, CoopMatConfig config);
     std::vector<CoopMatConfig> getCoopMatConfig(c10::ScalarType aType, c10::ScalarType bType, c10::ScalarType cType, c10::ScalarType resultType) const;
     CoopMatParams* getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes, uint32_t M, uint32_t N);
@@ -54,11 +51,6 @@ public:
     void setDeviceTable(VolkDeviceTable& table) { device_table = table; }
 
 private:
-    VkShaderModule allocateShaderModule(const torchvulkan::Shader shader);
-    VkDescriptorSetLayout allocateDescriptorSetLayout(const torchvulkan::Shader shader);
-    VkPipelineLayout allocatePipelineLayout(const torchvulkan::Shader shader);
-    ShaderSubmitInfo* allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec);
-
     VkDevice device_;
     VolkDeviceTable device_table;
     std::mutex mutex_;
@@ -71,11 +63,6 @@ private:
     size_t getBinIndex(size_t size);
     size_t nextPowerOf2(size_t n);
 
-    std::array<std::unordered_map<uint64_t, ShaderSubmitInfo*>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
-
-    std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
-    std::unordered_map<uint64_t, VkDescriptorSetLayout> descriptorSetLayoutCache;
-    std::unordered_map<uint64_t, VkShaderModule> shaderModuleCache;
     std::unordered_map<uint64_t, std::vector<CoopMatConfig>> coopMatCache;
     std::unordered_map<uint64_t, CoopMatParams> coopMatParamCache;
 };
