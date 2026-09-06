@@ -6,7 +6,11 @@
 #include "builders.h"
 #include "dispatch.h"
 
+#include <array>
+#include <mutex>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 class DeviceContext;
 class VulkanBuffer;
