@@ -104,6 +104,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("special_i1", &i1_vulkan);
     m.impl("lgamma.out", &lgamma_out_vulkan);
     m.impl("gelu.out", &gelu_out_vulkan);
+    m.impl("gelu_backward", &gelu_backward_vulkan);
     m.impl("erfc.out", &erfc_out_vulkan);
     m.impl("special_i0e.out", &i0e_out_vulkan);
     m.impl("special_i1e.out", &i1e_out_vulkan);
@@ -287,4 +288,17 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("where.ScalarOther", &where_scalar_other_vulkan);
     m.impl("where.ScalarSelf", &where_scalar_self_vulkan);
     m.impl("where.Scalar", &where_scalar_vulkan);
+
+    // attention: force the math backend so stock ATen's own composite scaled_dot_product_attention
+    m.impl("_fused_sdp_choice", &fused_sdp_choice_vulkan);
+
+    // embedding / layer norm (composite: no dedicated shader)
+    m.impl("embedding", &embedding_vulkan);
+    m.impl("embedding_dense_backward", &embedding_dense_backward_vulkan);
+    m.impl("native_layer_norm", &native_layer_norm_vulkan);
+    m.impl("native_layer_norm_backward", &native_layer_norm_backward_vulkan);
+
+    // RNG
+    m.impl("normal_", &normal_vulkan_);
+    m.impl("uniform_", &uniform_vulkan_);
 }
