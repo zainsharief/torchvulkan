@@ -90,8 +90,12 @@ void VulkanContext::initVulkan()
 
     volkLoadInstance(instance);
 
-    const char* env = std::getenv("TORCHVULKAN_STRICT");
-    isStrict_ = env != nullptr && env[0] != '\0' && env[0] != '0';
+    auto validateEnv = [&](const char* name) {
+        return name != nullptr && name[0] != '\0' && name[0] != '0';
+    };
+
+    isStrict_ = validateEnv(std::getenv("TORCHVULKAN_STRICT"));
+    enableProfiling_ = validateEnv(std::getenv("TORCHVULKAN_PROFILE"));
 }
 
 void VulkanContext::createDeviceContexts()
@@ -190,6 +194,8 @@ void VulkanContext::createDeviceWithExtensions()
         
         // chain of feature structs to query what the device supports
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT supportedSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+        supportedSubgroupControl.pNext = &supportedPipelineExec;
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR supportedCoopMat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         supportedCoopMat.pNext = &supportedSubgroupControl;
         VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -231,6 +237,7 @@ void VulkanContext::createDeviceWithExtensions()
 
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enablePipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
 
         // synchronization2 lets the dispatcher scope its barriers to the stages and accesses it actually uses
         VkPhysicalDeviceSynchronization2FeaturesKHR enableSync2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
@@ -270,7 +277,20 @@ void VulkanContext::createDeviceWithExtensions()
             }
         }
 
-        // creating the device 
+        if (hasExt(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME) && supportedPipelineExec.pipelineExecutableInfo)
+        {
+            device->support_pipeline_statistics = true;
+            enablePipelineExec.pipelineExecutableInfo = VK_TRUE;
+            enablePipelineExec.pNext = enable12.pNext;
+            enable12.pNext = &enablePipelineExec;
+            deviceExtensions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+        }
+        else if (enableProfiling_)
+        {
+            TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", device->properties.deviceName, "' does not support ", VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, "; pipeline statistics will not be reported.");
+        }
+
+        // creating the device
         VkDeviceQueueCreateInfo queueInfo{};
         queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queueInfo.queueFamilyIndex = device->computeQueueFamily;

@@ -4,6 +4,7 @@
 #include "vulkan_context.h"
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 
 VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
     : device(device)
@@ -245,17 +246,84 @@ ShaderSubmitInfo* VulkanShaderManager::allocatePipeline(const torchvulkan::Shade
     stageInfo.pName = "main";
     stageInfo.pSpecializationInfo = &specInfo;
 
+    VkPipelineCreateFlags flags = 0;
+    const bool capturePipelineStatistics = device->support_pipeline_statistics && VulkanContext::Instance().profilingEnabled();
+    if (capturePipelineStatistics) {
+        flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    }
+
     VkComputePipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.stage = stageInfo;
     pipelineInfo.layout = pipelineLayout;
+    pipelineInfo.flags = flags;
     
     if (device->device_table.vkCreateComputePipelines(device->device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
         TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to create compute pipeline.");
     }
 
+    if (capturePipelineStatistics) {
+        displayPipelineStatistics(pipeline);
+    }
+
     ShaderSubmitInfo* info = new ShaderSubmitInfo{ pipeline, pipelineLayout };
     return info;
+}
+
+void VulkanShaderManager::displayPipelineStatistics(VkPipeline pipeline)
+{
+    VkPipelineExecutableInfoKHR pipelineExecInfo{};
+    pipelineExecInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
+    pipelineExecInfo.pipeline = pipeline;
+    pipelineExecInfo.executableIndex = 0; 
+
+    uint32_t pStatisticCount = 0;
+
+    if (device->device_table.vkGetPipelineExecutableStatisticsKHR( device->device, &pipelineExecInfo, &pStatisticCount, nullptr) != VK_SUCCESS) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to fetch pipeline statistics count.");
+    }
+
+    if (pStatisticCount <= 0) {
+        std::cout << "No statistics available." << std::endl;
+        return;
+    }
+    
+    std::vector<VkPipelineExecutableStatisticKHR> statistics(pStatisticCount);
+    
+    for (auto& stat : statistics) {
+        stat.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
+        stat.pNext = nullptr;
+    }
+
+    if (device->device_table.vkGetPipelineExecutableStatisticsKHR(device->device, &pipelineExecInfo, &pStatisticCount, statistics.data()) != VK_SUCCESS) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to fetch pipeline statistics.");
+    }
+
+    for (const auto& stat : statistics) 
+    {
+        std::cout << "Metric: " << stat.name << " (" << stat.description << ") = ";
+        
+        switch (stat.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                std::cout << (stat.value.b32 ? "true" : "false");
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                std::cout << stat.value.i64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                std::cout << stat.value.u64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                std::cout << stat.value.f64;
+                break;
+            default:
+                std::cout << "Unknown format";
+                break;
+        }
+        std::cout << " | ";
+    }
+    
+    std::cout << "\n";
 }
 
 void VulkanShaderManager::clearCache()
