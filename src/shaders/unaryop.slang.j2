@@ -256,25 +256,19 @@ void baseUnaryKernel<
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        vector<T, VEC_SIZE>* v_tensor_in = (vector<T, VEC_SIZE>*)address_in;
-        vector<T, VEC_SIZE>* v_tensor_out = (vector<T, VEC_SIZE>*)address_out;
+        T* tensor_in = (T*)address_in;
+        T* tensor_out = (T*)address_out;
 
-        vector<T, VEC_SIZE> v = v_tensor_in[idx];
+        vector<T, VEC_SIZE> v;
+        [unroll] for (int k = 0; k < VEC_SIZE; k++) v[k] = tensor_in[idx * VEC_SIZE + k];
+
         vector<T, VEC_SIZE> res;
-
         [unroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = Op.eval(v[k]);
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        if (remainder >= VEC_SIZE) 
-        { 
-            v_tensor_out[idx] = res; 
-        }
-        else 
-        {
-            T* tensor_out = (T*)address_out;
-            for (uint i = 0; i < remainder; i++) {
-                tensor_out[idx * VEC_SIZE + i] = res[i];
-            }
+        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
+        for (uint i = 0; i < count; i++) {
+            tensor_out[idx * VEC_SIZE + i] = res[i];
         }
     }
     else

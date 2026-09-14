@@ -70,11 +70,7 @@ void matmulKernel<
     {{ d1 }}* tensor_a,
     {{ d1 }}* tensor_b,
     {{ d1 }}* tensor_out,
-    {{ d1 }}* tensor_bias,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_a_vec,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_b_vec,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_out_vec,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_bias_vec
+    {{ d1 }}* tensor_bias
 )
 {
     uint batch_offset_a = wg.z * pcs.strides_a.batch;
@@ -443,7 +439,8 @@ void matmulKernel<
                 if (A_VEC_ALIGNED == 1 && (0 + c + {{ v1 }}) <= pcs.k_dim)
                 {
                     uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (0 + c); // K = 0
-                    vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
+                    vector<{{ d1 }}, {{ v1 }}> vec_val;
+                    [unroll] for (uint k = 0; k < {{ v1 }}; ++k) vec_val[k] = tensor_a[global_idx + k];
                     [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
                         smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
                     }
@@ -503,7 +500,8 @@ void matmulKernel<
                 else if (B_VEC_ALIGNED == 1 && (tile_n + c + {{ v1 }}) <= pcs.n_dim)
                 {
                     uint global_idx = batch_offset_b + (0 + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col; // K = 0
-                    vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+                    vector<{{ d1 }}, {{ v1 }}> vec_val;
+                    [unroll] for (uint k = 0; k < {{ v1 }}; ++k) vec_val[k] = tensor_b[global_idx + k];
                     [unroll] for (uint v = 0; v < {{ v1 }}; ++v) {
                         smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
                     }
@@ -565,7 +563,8 @@ void matmulKernel<
                     if (A_VEC_ALIGNED == 1 && (next_k + c + {{ v1 }}) <= pcs.k_dim)
                     {
                         uint global_idx = batch_offset_a + a_row * pcs.strides_a.row + (next_k + c);
-                        vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_a_vec[global_idx / {{ v1 }}];
+                        vector<{{ d1 }}, {{ v1 }}> vec_val;
+                    [unroll] for (uint k = 0; k < {{ v1 }}; ++k) vec_val[k] = tensor_a[global_idx + k];
                         [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                         {
                             smemA[smem_a_offset + padded_smem_idx + v] = vec_val[v];
@@ -627,7 +626,8 @@ void matmulKernel<
                     else if (B_VEC_ALIGNED == 1 && (tile_n + c + {{ v1 }}) <= pcs.n_dim)
                     {
                         uint global_idx = batch_offset_b + (next_k + r) * pcs.strides_b.row + (tile_n + c) * pcs.strides_b.col;
-                        vector<{{ d1 }}, {{ v1 }}> vec_val = tensor_b_vec[global_idx / {{ v1 }}];
+                        vector<{{ d1 }}, {{ v1 }}> vec_val;
+                    [unroll] for (uint k = 0; k < {{ v1 }}; ++k) vec_val[k] = tensor_b[global_idx + k];
                         [unroll] for (uint v = 0; v < {{ v1 }}; ++v)
                         {
                             smemB[smem_b_offset + padded_smem_idx + v] = vec_val[v];
@@ -758,11 +758,6 @@ void main(
     {{ d1 }}* tensor_out = ({{ d1 }}*)pcs.tensor_out;
     {{ d1 }}* tensor_bias = ({{ d1 }}*)pcs.tensor_bias;
 
-    vector<{{ d1 }}, {{ v1 }}>* tensor_a_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_a;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_b_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_b;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_out_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_out;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_bias_vec = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_bias;
-
     {% for warp_frags_m in [2, 4] %}
     {% for warp_frags_n in [2, 4] %}
 
@@ -774,8 +769,7 @@ void main(
             {{ BLOCK_SIZE }}, {{ BLOCK_SIZE }}, {{ warp_frags_m }}, {{ warp_frags_n }}
         >(
             wg, ti, 
-            tensor_a, tensor_b, tensor_out, tensor_bias,
-            tensor_a_vec, tensor_b_vec, tensor_out_vec, tensor_bias_vec
+            tensor_a, tensor_b, tensor_out, tensor_bias
         );
     }
 
