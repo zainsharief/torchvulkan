@@ -375,42 +375,69 @@ at::Tensor cumscan(
         return cpu.to(self.device());
     }
 
-    at::Tensor xt = x.transpose(d, -1).contiguous();
-    int64_t scan_size = xt.size(-1);
-    int64_t num_lines = scan_size > 0 ? xt.numel() / scan_size : 0;
-    at::Tensor out_t = at::empty_like(xt);
-    if (num_lines == 0) return out_t.transpose(d, -1).contiguous();
+    int64_t ndim = x.dim();
+    int64_t scan_size = x.size(d);
+    int64_t num_lines = scan_size > 0 ? x.numel() / scan_size : 0;
+    at::Tensor out = at::empty(x.sizes(), x.options());
+    if (num_lines == 0) return out;
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(compute, 1);
+    uint32_t workgroupSizeX = std::min<uint32_t>(256u, device->properties.limits.maxComputeWorkGroupInvocations);
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan(compute);
     uint32_t opv = static_cast<uint32_t>(op);
+    int32_t ndim32 = static_cast<int32_t>(ndim);
 
     SpecializationBuilder spd{};
     spd.push(opv)
+       .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
+    uint32_t key = (workgroupSizeX << 8) | (ndim32 << 4) | opv;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
-       .push(get_tensor_address(out_t))
-       .push(static_cast<uint64_t>(num_lines))
-       .push(static_cast<uint32_t>(scan_size));
+    std::vector<int64_t> self_strides(x.strides().begin(), x.strides().end());
+    std::vector<int64_t> out_strides(out.strides().begin(), out.strides().end());
+    std::vector<int64_t> sizes_kept(x.sizes().begin(), x.sizes().end());
+    sizes_kept[d] = 1;
 
-    uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
+    IntDivider sizes;
+    uint32_t strides_in[MAX_DIMS] = {0};
+    uint32_t strides_out[MAX_DIMS] = {0};
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t actual_dim = ndim - 1 - i;
+        sizes.set(i, static_cast<uint32_t>(sizes_kept[actual_dim]));
+        strides_in[i] = static_cast<uint32_t>(self_strides[actual_dim]);
+        strides_out[i] = static_cast<uint32_t>(out_strides[actual_dim]);
+    }
+
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, ndim32)
+                   .push_array(strides_in, ndim32)
+                   .push_array(strides_out, ndim32);
+    Metadata metadata = metadataBuilder.build();
+
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(x))
+       .push(get_tensor_address(out))
+       .push(device->shader_manager->registerMetadata(metadata))
+       .push(static_cast<uint64_t>(num_lines))
+       .push(static_cast<uint32_t>(scan_size))
+       .push(static_cast<uint32_t>(self_strides[d]))
+       .push(static_cast<uint32_t>(out_strides[d]));
+
+    // one workgroup per line - the shader itself distributes each line across workgroupSizeX threads
+    uint32_t groupX = static_cast<uint32_t>(num_lines);
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
         shader_id,
         specialization,
         pushConstants,
-        /* read = */ {xt},
-        /* write = */ {out_t},
+        /* read = */ {x},
+        /* write = */ {out},
         groupX, 1, 1
     );
 
-    return out_t.transpose(d, -1).contiguous();
+    return out;
 }
 
 } // namespace
@@ -464,30 +491,48 @@ at::Tensor argreduce(
         return cpu.to(self.device());
     }
 
-    std::vector<int64_t> perm;
-    for (int64_t i = 0; i < x.dim(); i++) if (i != d) perm.push_back(i);
-    perm.push_back(d);
-    at::Tensor xt = x.permute(perm).contiguous();
-
-    int64_t reduce_size = xt.size(-1);
-    int64_t num_lines = reduce_size > 0 ? xt.numel() / reduce_size : 0;
-    at::Tensor idx = at::empty({num_lines}, self.options().dtype(at::kLong));
+    int64_t ndim = x.dim();
+    std::vector<int64_t> out_sizes(x.sizes().begin(), x.sizes().end());
+    int64_t reduce_size = out_sizes[d];
+    out_sizes[d] = 1;
+    int64_t num_lines = reduce_size > 0 ? x.numel() / reduce_size : 0;
+    at::Tensor idx = at::empty(out_sizes, x.options().dtype(at::kLong));
+    if (num_lines == 0) return keepdim ? idx : idx.squeeze(d);
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(x.scalar_type(), 1);
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_arg_reduce(x.scalar_type());
     uint32_t opv = static_cast<uint32_t>(op);
+    int32_t ndim32 = static_cast<int32_t>(ndim);
 
     SpecializationBuilder spd{};
     spd.push(opv)
+       .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
+    uint32_t key = (workgroupSizeX << 8) | (ndim32 << 4) | opv;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
+    std::vector<int64_t> x_strides(x.strides().begin(), x.strides().end());
+
+    IntDivider sizes;
+    uint32_t strides_in[MAX_DIMS] = {0};
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t actual_dim = ndim - 1 - i;
+        sizes.set(i, static_cast<uint32_t>(out_sizes[actual_dim]));
+        strides_in[i] = static_cast<uint32_t>(x_strides[actual_dim]);
+    }
+
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, ndim32)
+                   .push_array(strides_in, ndim32);
+    Metadata metadata = metadataBuilder.build();
+
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
+    pcs.push(get_tensor_address(x))
        .push(get_tensor_address(idx))
+       .push(device->shader_manager->registerMetadata(metadata))
        .push(static_cast<uint64_t>(num_lines))
+       .push(static_cast<uint32_t>(x_strides[d]))
        .push(static_cast<uint32_t>(reduce_size));
 
     uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
@@ -497,15 +542,12 @@ at::Tensor argreduce(
         shader_id,
         specialization,
         pushConstants,
-        /* read = */ {xt},
+        /* read = */ {x},
         /* write = */ {idx},
         groupX, 1, 1
     );
 
-    std::vector<int64_t> oshape(xt.sizes().begin(), xt.sizes().end() - 1);
-    at::Tensor result = idx.reshape(oshape);
-    if (keepdim) result = result.unsqueeze(d);
-    return result;
+    return keepdim ? idx : idx.squeeze(d);
 }
 
 } // namespace
@@ -554,45 +596,72 @@ void cumscanarg(
         return;
     }
 
-    at::Tensor xt = self.transpose(d, -1).contiguous();
-    int64_t scan_size = xt.size(-1);
-    int64_t num_lines = scan_size > 0 ? xt.numel() / scan_size : 0;
-    at::Tensor val_t = at::empty_like(xt);
-    at::Tensor idx_t = at::empty(xt.sizes(), self.options().dtype(at::kLong));
+    int64_t ndim = self.dim();
+    int64_t scan_size = self.size(d);
+    int64_t num_lines = scan_size > 0 ? self.numel() / scan_size : 0;
+    at::Tensor val_t = at::empty(self.sizes(), self.options());
+    at::Tensor idx_t = at::empty(self.sizes(), self.options().dtype(at::kLong));
     if (num_lines == 0) return;
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(self.scalar_type(), 1);
+    uint32_t workgroupSizeX = std::min<uint32_t>(256u, device->properties.limits.maxComputeWorkGroupInvocations);
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan_arg(self.scalar_type());
-
     uint32_t opv = static_cast<uint32_t>(op);
+    int32_t ndim32 = static_cast<int32_t>(ndim);
+
     SpecializationBuilder spd{};
     spd.push(opv)
+       .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
+    uint32_t key = (workgroupSizeX << 8) | (ndim32 << 4) | opv;
     SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
 
+    std::vector<int64_t> self_strides(self.strides().begin(), self.strides().end());
+    std::vector<int64_t> out_strides(val_t.strides().begin(), val_t.strides().end());
+    std::vector<int64_t> sizes_kept(self.sizes().begin(), self.sizes().end());
+    sizes_kept[d] = 1;
+
+    IntDivider sizes;
+    uint32_t strides_in[MAX_DIMS] = {0};
+    uint32_t strides_out[MAX_DIMS] = {0};
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t actual_dim = ndim - 1 - i;
+        sizes.set(i, static_cast<uint32_t>(sizes_kept[actual_dim]));
+        strides_in[i] = static_cast<uint32_t>(self_strides[actual_dim]);
+        strides_out[i] = static_cast<uint32_t>(out_strides[actual_dim]);
+    }
+
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, ndim32)
+                   .push_array(strides_in, ndim32)
+                   .push_array(strides_out, ndim32);
+    Metadata metadata = metadataBuilder.build();
+
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
+    pcs.push(get_tensor_address(self))
        .push(get_tensor_address(val_t))
        .push(get_tensor_address(idx_t))
+       .push(device->shader_manager->registerMetadata(metadata))
        .push(static_cast<uint64_t>(num_lines))
-       .push(static_cast<uint32_t>(scan_size));
+       .push(static_cast<uint32_t>(scan_size))
+       .push(static_cast<uint32_t>(self_strides[d]))
+       .push(static_cast<uint32_t>(out_strides[d]));
 
-    uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
+    // one workgroup per line - the shader itself distributes each line across workgroupSizeX threads
+    uint32_t groupX = static_cast<uint32_t>(num_lines);
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
         shader_id,
         specialization,
         pushConstants,
-        /* read = */ {xt},
+        /* read = */ {self},
         /* write = */ {val_t, idx_t},
         groupX, 1, 1
     );
 
-    values.copy_(val_t.transpose(d, -1));
-    indices.copy_(idx_t.transpose(d, -1));
+    values.copy_(val_t);
+    indices.copy_(idx_t);
 }
 
 } // namespace

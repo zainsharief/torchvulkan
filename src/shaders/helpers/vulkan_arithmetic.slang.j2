@@ -4,6 +4,7 @@ interface IVulkanArithmetic
     static This ext_max(This a, This b);
     static This ext_min(This a, This b);
     static This ext_zero();
+    static This ext_one();
     static This ext_lowest();
     static This ext_highest();
     static This ext_neg(This a);
@@ -120,6 +121,7 @@ extension {{ d1 }} : IVulkanArithmetic
     static {{ d1 }} ext_max({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return max(a, b); }
     static {{ d1 }} ext_min({{ d1 }} a, {{ d1 }} b) { {% if 'float' in d1 %}if (isnan(a) || isnan(b)) return a + b; {% endif %}return min(a, b); }
     static {{ d1 }} ext_zero() { return {{ d1 }}(0); }
+    static {{ d1 }} ext_one() { return {{ d1 }}(1); }
 
     {% if 'float' in d1 %}
     static {{ d1 }} ext_lowest() { {{ d1 }} zero = {{ d1 }}(0); return {{ d1 }}(-1.0) / zero; }
