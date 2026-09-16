@@ -1,6 +1,12 @@
 #include <torch/extension.h>
-#include "api/ops/matmul.h"
-#include "api/ops/binary.h"
+#include <c10/core/MemoryFormat.h>
+#include <functional>
+#include "vulkan/memory.h"
+#include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
+#include "shaders/shader_registry.h"
+#include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
 
@@ -64,261 +70,7 @@ MatmulOperands prepare_matmul_operands(
     return result;
 }
 
-} // namespace
-
-at::Tensor torchvulkan::dispatch_matmul_shader(
-    const at::Tensor& self, 
-    const at::Tensor& other,
-    const at::Tensor& bias,
-    const at::Scalar& alpha,
-    const at::Scalar& beta,
-    std::function<at::Tensor()> cpu_fallback)
-{
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-
-    if (device->support_coopmat) return dispatch_matmul_coop_shader(self, other, bias, alpha, beta, cpu_fallback);
-    return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, cpu_fallback);
-}
-
-at::Tensor torchvulkan::dispatch_matmul_coop_shader(
-    const at::Tensor& self_, 
-    const at::Tensor& other_,
-    const at::Tensor& bias_,
-    const at::Scalar& alpha,
-    const at::Scalar& beta,
-    std::function<at::Tensor()> cpu_fallback)
-{
-    at::Tensor self = self_;
-    at::Tensor other = other_;
-    c10::ScalarType promoted_type = at::result_type(self, other);
-
-    if (!is_dtype_supported(promoted_type)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
-        return cpu_fallback();
-    }
-
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    std::vector<CoopMatConfig> config = device->cache.getCoopMatConfig(promoted_type, promoted_type, promoted_type, promoted_type);
-    if (config.empty()) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
-    std::vector<uint32_t> available_block_sizes;
-    available_block_sizes.reserve(config.size());
-
-    for (CoopMatConfig c : config) 
-    {
-        if (c.m != c.n || c.m != c.k) continue; // we do not support differing block_m and block_n sizes
-        available_block_sizes.push_back(c.m);
-    }
-
-    bool self_unsqueezed = false;
-    bool other_unsqueezed = false;
-
-    if (self.dim() < 2) {
-        self = self.unsqueeze(0);
-        self_unsqueezed = true;
-    }
-    if (other.dim() < 2) {
-        other = other.unsqueeze(1);
-        other_unsqueezed = true;
-    }
-
-    TORCH_CHECK(self.size(-1) == other.size(-2), "torchvulkan: inner dimensions must match");
-
-    uint32_t M = self.size(-2);
-    uint32_t K = self.size(-1);
-    uint32_t N = other.size(-1);
-
-    CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes, M, N);
-    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
-
-    if (bias_.defined()) {
-        at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
-        if (beta.toDouble() == 0.0) return out;
-        return add_vulkan(out, bias_.to(out.scalar_type()), beta);
-    }
-
-    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
-    uint32_t has_bias = (bias_.defined()) ? 1 : 0;
-    uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
-    
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
-
-    at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
-    at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);
-    std::vector<int64_t> batch_shape = at::infer_size(self_batch, other_batch);
-
-    int64_t B = 1;
-    for (int64_t s : batch_shape) {
-        B *= s;
-    }
-
-    std::vector<int64_t> out_shape_vec = batch_shape;
-    out_shape_vec.push_back(M);
-    out_shape_vec.push_back(N);
-    at::IntArrayRef out_shape(out_shape_vec);
-
-    if (M == 0 || N == 0 || B == 0) return at::empty({B, M, N}, self_.options()).reshape(out_shape);
-    if (K == 0) {
-        if (!has_bias) return at::zeros({B, M, N}, self_.options().dtype(promoted_type)).reshape(out_shape);
-        std::vector<int64_t> bias_expand_shape(batch_shape);
-        bias_expand_shape.push_back(M);
-        bias_expand_shape.push_back(N);
-        at::Tensor bias_b = bias_.to(promoted_type).expand(bias_expand_shape).reshape({B, M, N});
-        return (bias_b * beta).reshape(out_shape);
-    }
-
-    const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
-    const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
-
-    // might be better ways than to just hardcode this
-    const uint32_t target_grid = 512;
-    uint32_t grid = ((M + tile_m - 1) / tile_m) * ((N + tile_n - 1) / tile_n) * (uint32_t)B;
-    uint32_t split = 1;
-    if (
-        B == 1 && 
-        grid < target_grid && 
-        K >= 4096 && 
-        self.storage_offset() == 0 && 
-        other.storage_offset() == 0
-    ) {
-        while (
-            split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
-            ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512
-        ) {
-            split *= 2;
-        }
-    }
-
-    if (split > 1) {
-        at::Tensor a2 = self.reshape({(int64_t)M, (int64_t)K});
-        at::Tensor b2 = other.reshape({(int64_t)K, (int64_t)N});
-        int64_t ks = K / split;
-        at::Tensor a_chunks = a2.as_strided({split, (int64_t)M, ks}, {ks * a2.stride(1), a2.stride(0), a2.stride(1)});
-        at::Tensor b_chunks = b2.as_strided({split, ks, (int64_t)N}, {ks * b2.stride(0), b2.stride(0), b2.stride(1)});
-
-        at::Tensor partial = dispatch_matmul_coop_shader(a_chunks, b_chunks, {}, alpha, 0, cpu_fallback);
-        for (int64_t s = split / 2; s >= 1; s /= 2) {
-            partial = add_vulkan(partial.narrow(0, 0, s), partial.narrow(0, s, s), 1);
-        }
-
-        at::Tensor out = partial.reshape(out_shape);
-        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1);
-        else if (self_unsqueezed) out = out.squeeze(-2);
-        else if (other_unsqueezed) out = out.squeeze(-1);
-        return out;
-    }
-
-    MatmulOperands ops = prepare_matmul_operands(self, other, bias_, has_bias, promoted_type, M, K, N, B, batch_shape);
-    at::Tensor self_b = ops.self_b;
-    at::Tensor other_b = ops.other_b;
-    at::Tensor bias_b = ops.bias_b;
-    uint32_t M_padded = ((M + tile_m - 1) / tile_m) * tile_m;
-    uint32_t N_padded = ((N + tile_n - 1) / tile_n) * tile_n;
-    at::Tensor out = at::empty({B, M_padded, N_padded}, self_b.options());
-
-    uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
-    uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
-    uint32_t strides_out[4] = {static_cast<uint32_t>(out.stride(0)), static_cast<uint32_t>(out.stride(1)), static_cast<uint32_t>(out.stride(2)), 0};
-    uint32_t strides_bias[4] = {0, 0, 0, 0};
-    if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
-
-    uint32_t self_transposed = (self_b.stride(-1) != 1 && self_b.stride(-2) == 1) ? 1 : 0;
-    uint32_t other_transposed = (other_b.stride(-1) != 1 && other_b.stride(-2) == 1) ? 1 : 0;
-    uint32_t out_transposed = (out.stride(-1) != 1 && out.stride(-2) == 1) ? 1 : 0;
-    uint32_t bias_transposed = (has_bias && bias_b.stride(-1) != 1 && bias_b.stride(-2) == 1) ? 1 : 0;
-
-    uint32_t m_aligned = (M % tile_m == 0) ? 1 : 0;
-    uint32_t n_aligned = (N % tile_n == 0) ? 1 : 0;
-
-    auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
-    if (!coop_loadable(self_b) || !coop_loadable(other_b) || !coop_loadable(out) ||
-        (has_bias && !coop_loadable(bias_b))) {
-        return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
-    }
-    
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(self_b))
-       .push(get_tensor_address(other_b))
-       .push(get_tensor_address(out))
-       .push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0) // the shader only reads the bias when it exists
-       .push_array(strides_a)
-       .push_array(strides_b)
-       .push_array(strides_out)
-       .push_array(strides_bias)
-       .push(M)
-       .push(N)
-       .push(K)
-       .push((uint32_t)0) // padding
-       .push_scalar(alpha, promoted_type)
-       .push_scalar(beta, promoted_type);
-
-    const uint32_t vecSize = get_dtype_vec_size(promoted_type);
-    uint32_t a_vec_aligned = (!self_transposed &&
-                        strides_a[1] % vecSize == 0 &&
-                        strides_a[0] % vecSize == 0 &&
-                        params->bk % vecSize == 0) ? 1 : 0;
-    uint32_t b_vec_aligned = (!other_transposed &&
-                        strides_b[1] % vecSize == 0 &&
-                        strides_b[0] % vecSize == 0) ? 1 : 0;
-
-    SpecializationBuilder spd{};
-    spd.push(params->workgroup_size)
-       .push(params->subgroup_size)
-       .push(params->warps_m)
-       .push(params->warps_n)
-       .push(params->warp_frags_m)
-       .push(params->warp_frags_n)
-       .push(params->bk)
-       .push(has_alpha)
-       .push(has_beta)
-       .push(has_bias)
-       .push(self_transposed)
-       .push(other_transposed)
-       .push(out_transposed)
-       .push(bias_transposed)
-       .push(m_aligned)
-       .push(n_aligned)
-       .push(a_vec_aligned)
-       .push(b_vec_aligned);
-    uint64_t key = ((uint64_t)a_vec_aligned << 53) | ((uint64_t)b_vec_aligned << 52) |
-                   ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
-                   ((uint64_t)self_transposed << 49) | ((uint64_t)other_transposed << 48) |
-                   ((uint64_t)out_transposed << 47) | ((uint64_t)bias_transposed << 46) |
-                   ((uint64_t)has_bias << 45) | ((uint64_t)has_beta << 44) |
-                   ((uint64_t)has_alpha << 43) | ((uint64_t)params->bk << 36) |
-                   ((uint64_t)params->warp_frags_n << 32) | ((uint64_t)params->warp_frags_m << 28) |
-                   ((uint64_t)params->warps_n << 24) | ((uint64_t)params->warps_m << 20) |
-                   ((uint64_t)params->subgroup_size << 12) | ((uint64_t)params->workgroup_size);
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
-
-    uint32_t groupX = N_padded / tile_n;
-    uint32_t groupY = M_padded / tile_m;
-    uint32_t groupZ = B;
-
-    std::vector<at::Tensor> readTensors = {self_b, other_b};
-    if (has_bias) readTensors.push_back(bias_b);
-
-    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
-    device->shader_manager->dispatchShader(
-        shader_id,
-        specialization,
-        pushConstants,
-        /* read = */ readTensors,
-        /* write = */ {out},
-        groupX, groupY, groupZ
-    );
-
-    out = out.narrow(1, 0, M).narrow(2, 0, N);
-    out = out.reshape(out_shape);
-    if (self_unsqueezed || other_unsqueezed) {
-        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1); 
-        else if (self_unsqueezed) out = out.squeeze(-2); 
-        else out = out.squeeze(-1); 
-    }
-
-    return out;
-}
-
-at::Tensor torchvulkan::dispatch_matmul_simd_shader(
+at::Tensor dispatch_matmul_simd_shader(
     const at::Tensor& self_, 
     const at::Tensor& other_,
     const at::Tensor& bias_,
@@ -460,7 +212,259 @@ at::Tensor torchvulkan::dispatch_matmul_simd_shader(
     return out;
 }
 
-at::Tensor torchvulkan::mm_vulkan(
+at::Tensor dispatch_matmul_coop_shader(
+    const at::Tensor& self_, 
+    const at::Tensor& other_,
+    const at::Tensor& bias_,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    std::function<at::Tensor()> cpu_fallback)
+{
+    at::Tensor self = self_;
+    at::Tensor other = other_;
+    c10::ScalarType promoted_type = at::result_type(self, other);
+
+    if (!is_dtype_supported(promoted_type)) {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
+        return cpu_fallback();
+    }
+
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+    std::vector<CoopMatConfig> config = device->cache.getCoopMatConfig(promoted_type, promoted_type, promoted_type, promoted_type);
+    if (config.empty()) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+    std::vector<uint32_t> available_block_sizes;
+    available_block_sizes.reserve(config.size());
+
+    for (CoopMatConfig c : config) 
+    {
+        if (c.m != c.n || c.m != c.k) continue; // we do not support differing block_m and block_n sizes
+        available_block_sizes.push_back(c.m);
+    }
+
+    bool self_unsqueezed = false;
+    bool other_unsqueezed = false;
+
+    if (self.dim() < 2) {
+        self = self.unsqueeze(0);
+        self_unsqueezed = true;
+    }
+    if (other.dim() < 2) {
+        other = other.unsqueeze(1);
+        other_unsqueezed = true;
+    }
+
+    TORCH_CHECK(self.size(-1) == other.size(-2), "torchvulkan: inner dimensions must match");
+
+    uint32_t M = self.size(-2);
+    uint32_t K = self.size(-1);
+    uint32_t N = other.size(-1);
+
+    CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes, M, N);
+    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+
+    if (bias_.defined()) {
+        at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
+        if (beta.toDouble() == 0.0) return out;
+        return torchvulkan::add_vulkan(out, bias_.to(out.scalar_type()), beta);
+    }
+
+    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
+    uint32_t has_bias = (bias_.defined()) ? 1 : 0;
+    uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
+    
+    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
+
+    at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
+    at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);
+    std::vector<int64_t> batch_shape = at::infer_size(self_batch, other_batch);
+
+    int64_t B = 1;
+    for (int64_t s : batch_shape) {
+        B *= s;
+    }
+
+    std::vector<int64_t> out_shape_vec = batch_shape;
+    out_shape_vec.push_back(M);
+    out_shape_vec.push_back(N);
+    at::IntArrayRef out_shape(out_shape_vec);
+
+    if (M == 0 || N == 0 || B == 0) return at::empty({B, M, N}, self_.options()).reshape(out_shape);
+    if (K == 0) {
+        if (!has_bias) return at::zeros({B, M, N}, self_.options().dtype(promoted_type)).reshape(out_shape);
+        std::vector<int64_t> bias_expand_shape(batch_shape);
+        bias_expand_shape.push_back(M);
+        bias_expand_shape.push_back(N);
+        at::Tensor bias_b = bias_.to(promoted_type).expand(bias_expand_shape).reshape({B, M, N});
+        return (bias_b * beta).reshape(out_shape);
+    }
+
+    const uint32_t tile_m = params->block_size * params->warps_m * params->warp_frags_m;
+    const uint32_t tile_n = params->block_size_acc * params->warps_n * params->warp_frags_n;
+
+    // might be better ways than to just hardcode this
+    const uint32_t target_grid = 512;
+    uint32_t grid = ((M + tile_m - 1) / tile_m) * ((N + tile_n - 1) / tile_n) * (uint32_t)B;
+    uint32_t split = 1;
+    if (
+        B == 1 && 
+        grid < target_grid && 
+        K >= 4096 && 
+        self.storage_offset() == 0 && 
+        other.storage_offset() == 0
+    ) {
+        while (
+            split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
+            ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512
+        ) {
+            split *= 2;
+        }
+    }
+
+    if (split > 1) {
+        at::Tensor a2 = self.reshape({(int64_t)M, (int64_t)K});
+        at::Tensor b2 = other.reshape({(int64_t)K, (int64_t)N});
+        int64_t ks = K / split;
+        at::Tensor a_chunks = a2.as_strided({split, (int64_t)M, ks}, {ks * a2.stride(1), a2.stride(0), a2.stride(1)});
+        at::Tensor b_chunks = b2.as_strided({split, ks, (int64_t)N}, {ks * b2.stride(0), b2.stride(0), b2.stride(1)});
+
+        at::Tensor partial = dispatch_matmul_coop_shader(a_chunks, b_chunks, {}, alpha, 0, cpu_fallback);
+        for (int64_t s = split / 2; s >= 1; s /= 2) {
+            partial = torchvulkan::add_vulkan(partial.narrow(0, 0, s), partial.narrow(0, s, s), 1);
+        }
+
+        at::Tensor out = partial.reshape(out_shape);
+        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1);
+        else if (self_unsqueezed) out = out.squeeze(-2);
+        else if (other_unsqueezed) out = out.squeeze(-1);
+        return out;
+    }
+
+    MatmulOperands ops = prepare_matmul_operands(self, other, bias_, has_bias, promoted_type, M, K, N, B, batch_shape);
+    at::Tensor self_b = ops.self_b;
+    at::Tensor other_b = ops.other_b;
+    at::Tensor bias_b = ops.bias_b;
+    uint32_t M_padded = ((M + tile_m - 1) / tile_m) * tile_m;
+    uint32_t N_padded = ((N + tile_n - 1) / tile_n) * tile_n;
+    at::Tensor out = at::empty({B, M_padded, N_padded}, self_b.options());
+
+    uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
+    uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
+    uint32_t strides_out[4] = {static_cast<uint32_t>(out.stride(0)), static_cast<uint32_t>(out.stride(1)), static_cast<uint32_t>(out.stride(2)), 0};
+    uint32_t strides_bias[4] = {0, 0, 0, 0};
+    if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
+
+    uint32_t self_transposed = (self_b.stride(-1) != 1 && self_b.stride(-2) == 1) ? 1 : 0;
+    uint32_t other_transposed = (other_b.stride(-1) != 1 && other_b.stride(-2) == 1) ? 1 : 0;
+    uint32_t out_transposed = (out.stride(-1) != 1 && out.stride(-2) == 1) ? 1 : 0;
+    uint32_t bias_transposed = (has_bias && bias_b.stride(-1) != 1 && bias_b.stride(-2) == 1) ? 1 : 0;
+
+    uint32_t m_aligned = (M % tile_m == 0) ? 1 : 0;
+    uint32_t n_aligned = (N % tile_n == 0) ? 1 : 0;
+
+    auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
+    if (!coop_loadable(self_b) || !coop_loadable(other_b) || !coop_loadable(out) ||
+        (has_bias && !coop_loadable(bias_b))) {
+        return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+    }
+    
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(self_b))
+       .push(get_tensor_address(other_b))
+       .push(get_tensor_address(out))
+       .push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0) // the shader only reads the bias when it exists
+       .push_array(strides_a)
+       .push_array(strides_b)
+       .push_array(strides_out)
+       .push_array(strides_bias)
+       .push(M)
+       .push(N)
+       .push(K)
+       .push((uint32_t)0) // padding
+       .push_scalar(alpha, promoted_type)
+       .push_scalar(beta, promoted_type);
+
+    const uint32_t vecSize = get_dtype_vec_size(promoted_type);
+    uint32_t a_vec_aligned = (!self_transposed &&
+                        strides_a[1] % vecSize == 0 &&
+                        strides_a[0] % vecSize == 0 &&
+                        params->bk % vecSize == 0) ? 1 : 0;
+    uint32_t b_vec_aligned = (!other_transposed &&
+                        strides_b[1] % vecSize == 0 &&
+                        strides_b[0] % vecSize == 0) ? 1 : 0;
+
+    SpecializationBuilder spd{};
+    spd.push(params->workgroup_size)
+       .push(params->subgroup_size)
+       .push(params->warps_m)
+       .push(params->warps_n)
+       .push(params->warp_frags_m)
+       .push(params->warp_frags_n)
+       .push(params->bk)
+       .push(has_alpha)
+       .push(has_beta)
+       .push(has_bias)
+       .push(self_transposed)
+       .push(other_transposed)
+       .push(out_transposed)
+       .push(bias_transposed)
+       .push(m_aligned)
+       .push(n_aligned)
+       .push(a_vec_aligned)
+       .push(b_vec_aligned);
+    uint64_t key = ((uint64_t)a_vec_aligned << 53) | ((uint64_t)b_vec_aligned << 52) |
+                   ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
+                   ((uint64_t)self_transposed << 49) | ((uint64_t)other_transposed << 48) |
+                   ((uint64_t)out_transposed << 47) | ((uint64_t)bias_transposed << 46) |
+                   ((uint64_t)has_bias << 45) | ((uint64_t)has_beta << 44) |
+                   ((uint64_t)has_alpha << 43) | ((uint64_t)params->bk << 36) |
+                   ((uint64_t)params->warp_frags_n << 32) | ((uint64_t)params->warp_frags_m << 28) |
+                   ((uint64_t)params->warps_n << 24) | ((uint64_t)params->warps_m << 20) |
+                   ((uint64_t)params->subgroup_size << 12) | ((uint64_t)params->workgroup_size);
+    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+
+    uint32_t groupX = N_padded / tile_n;
+    uint32_t groupY = M_padded / tile_m;
+    uint32_t groupZ = B;
+
+    std::vector<at::Tensor> readTensors = {self_b, other_b};
+    if (has_bias) readTensors.push_back(bias_b);
+
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_id,
+        specialization,
+        pushConstants,
+        /* read = */ readTensors,
+        /* write = */ {out},
+        groupX, groupY, groupZ
+    );
+
+    out = out.narrow(1, 0, M).narrow(2, 0, N);
+    out = out.reshape(out_shape);
+    if (self_unsqueezed || other_unsqueezed) {
+        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1); 
+        else if (self_unsqueezed) out = out.squeeze(-2); 
+        else out = out.squeeze(-1); 
+    }
+
+    return out;
+}
+
+at::Tensor dispatch_matmul_shader(
+    const at::Tensor& self, 
+    const at::Tensor& other,
+    const at::Tensor& bias,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    std::function<at::Tensor()> cpu_fallback)
+{
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+
+    if (device->support_coopmat) return dispatch_matmul_coop_shader(self, other, bias, alpha, beta, cpu_fallback);
+    return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, cpu_fallback);
+}
+
+at::Tensor mm_vulkan(
     const at::Tensor& self,
     const at::Tensor& other)
 {
@@ -470,7 +474,7 @@ at::Tensor torchvulkan::mm_vulkan(
     );
 }
 
-at::Tensor torchvulkan::bmm_vulkan(
+at::Tensor bmm_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
@@ -480,7 +484,7 @@ at::Tensor torchvulkan::bmm_vulkan(
     );
 }
 
-at::Tensor torchvulkan::matmul_vulkan(
+at::Tensor matmul_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
@@ -490,7 +494,7 @@ at::Tensor torchvulkan::matmul_vulkan(
     );
 }
 
-at::Tensor torchvulkan::addmm_vulkan(
+at::Tensor addmm_vulkan(
     const at::Tensor& input, 
     const at::Tensor& mat1, 
     const at::Tensor& mat2, 
@@ -503,7 +507,7 @@ at::Tensor torchvulkan::addmm_vulkan(
     );
 }
 
-at::Tensor torchvulkan::baddbmm_vulkan(
+at::Tensor baddbmm_vulkan(
     const at::Tensor& input, 
     const at::Tensor& mat1, 
     const at::Tensor& mat2, 
@@ -514,4 +518,14 @@ at::Tensor torchvulkan::baddbmm_vulkan(
         mat1, mat2, input, alpha, beta,
         [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha); }
     );
+}
+
+} // namespace
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("mm", &mm_vulkan);
+    m.impl("bmm", &bmm_vulkan);
+    m.impl("matmul", &matmul_vulkan);
+    m.impl("addmm", &addmm_vulkan);
+    m.impl("baddbmm", &baddbmm_vulkan);
 }
