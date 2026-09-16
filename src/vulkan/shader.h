@@ -7,7 +7,10 @@
 #include "dispatch.h"
 
 #include <array>
+#include <functional>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,12 +23,9 @@ struct ShaderSubmitInfo {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 };
 
-struct SpecializationArgs {
-    const void* data = nullptr;
-    const size_t* offsets = nullptr;
-    const size_t* sizes = nullptr;
-    const uint32_t numConstants = 0;
-    const uint64_t packedArgs = 0;
+struct SpecializationKeyHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view key) const { return std::hash<std::string_view>{}(key); }
 };
 
 struct MemoryRange {
@@ -114,7 +114,7 @@ private:
     VkShaderModule allocateShaderModule(const torchvulkan::Shader shader);
     VkPipelineLayout allocatePipelineLayout();
     ShaderSubmitInfo* allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec);
-    std::array<std::unordered_map<uint64_t, ShaderSubmitInfo*>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
+    std::array<std::unordered_map<std::string, ShaderSubmitInfo*, SpecializationKeyHash, std::equal_to<>>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
     std::unordered_map<uint64_t, VkShaderModule> shaderModuleCache;
 };

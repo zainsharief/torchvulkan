@@ -32,8 +32,7 @@ void dispatch_nllloss_shader(
     SpecializationBuilder spd{};
     spd.push(static_cast<uint32_t>(mode))
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 2) | static_cast<uint32_t>(mode);
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(in))

@@ -32,8 +32,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
     SpecializationBuilder spd{};
     spd.push(out_dims)
         .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | out_dims;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};

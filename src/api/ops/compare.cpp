@@ -90,8 +90,7 @@ at::Tensor& dispatch_compare(
        .push(usc)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 12) | (out_dims << 8) | (usc << 7) | (contiguous << 6) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_a[MAX_DIMS] = {0};
@@ -179,8 +178,7 @@ at::Tensor where_vulkan(
     spd.push(contiguous)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 8) | (static_cast<uint32_t>(out_dims) << 4) | contiguous;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_cond[MAX_DIMS] = {0};

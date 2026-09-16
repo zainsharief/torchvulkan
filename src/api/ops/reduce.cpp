@@ -79,8 +79,7 @@ at::Tensor dispatch_reduce_shader(
     spd.push(op)
        .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 8) | (ndim32 << 4) | op;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_in[MAX_DIMS] = {0};
@@ -307,8 +306,7 @@ at::Tensor argreduce(
     SpecializationBuilder spd{};
     spd.push(opv)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(xt))

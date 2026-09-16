@@ -40,8 +40,7 @@ at::Tensor cumscan(
     SpecializationBuilder spd{};
     spd.push(opv)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(xt))
@@ -121,8 +120,7 @@ void cumscanarg(
     SpecializationBuilder spd{};
     spd.push(opv)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(xt))

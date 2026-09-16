@@ -46,8 +46,7 @@ at::Tensor& fill_scalar_vulkan(
     spd.push(out_dims)
         .push(contiguous)
         .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 8) | (contiguous << 4) | out_dims;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};

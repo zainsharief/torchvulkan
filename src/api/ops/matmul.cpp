@@ -160,8 +160,7 @@ at::Tensor dispatch_matmul_simd_shader(
        .push(workgroupSizeY)
        .push(isAligned)
        .push(has_bias);
-    uint32_t key = (has_bias << 21) | (isAligned << 20) | (workgroupSizeX << 10) | workgroupSizeY;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
     uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
@@ -411,16 +410,7 @@ at::Tensor dispatch_matmul_coop_shader(
        .push(n_aligned)
        .push(a_vec_aligned)
        .push(b_vec_aligned);
-    uint64_t key = ((uint64_t)a_vec_aligned << 53) | ((uint64_t)b_vec_aligned << 52) |
-                   ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
-                   ((uint64_t)self_transposed << 49) | ((uint64_t)other_transposed << 48) |
-                   ((uint64_t)out_transposed << 47) | ((uint64_t)bias_transposed << 46) |
-                   ((uint64_t)has_bias << 45) | ((uint64_t)has_beta << 44) |
-                   ((uint64_t)has_alpha << 43) | ((uint64_t)params->bk << 36) |
-                   ((uint64_t)params->warp_frags_n << 32) | ((uint64_t)params->warp_frags_m << 28) |
-                   ((uint64_t)params->warps_n << 24) | ((uint64_t)params->warps_m << 20) |
-                   ((uint64_t)params->subgroup_size << 12) | ((uint64_t)params->workgroup_size);
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     uint32_t groupX = N_padded / tile_n;
     uint32_t groupY = M_padded / tile_m;

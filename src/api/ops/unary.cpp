@@ -101,8 +101,7 @@ at::Tensor unary_op_vulkan(
         .push(contiguous)
         .push(out_dims)
         .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 11) | (out_dims << 7) | (contiguous << 6) | op;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_in[MAX_DIMS] = {0};

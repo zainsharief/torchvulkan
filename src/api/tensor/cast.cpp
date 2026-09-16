@@ -31,8 +31,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     spd.push(out_dims)
         .push(workgroupSizeX)
         .push(isBoolCast);
-    uint32_t key = (isBoolCast << 8) | (workgroupSizeX << 4) | out_dims;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes; 
     uint32_t strides_in[MAX_DIMS] = {0};

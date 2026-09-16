@@ -157,12 +157,12 @@ ShaderSubmitInfo* VulkanShaderManager::allocateShader(const torchvulkan::ShaderI
     std::lock_guard<std::mutex> lock(mutex_);
     auto& shaderMap = shaderCache[id];
 
-    auto it = shaderMap.find(spec.packedArgs);
+    auto it = shaderMap.find(spec.key);
     if (it != shaderMap.end()) return it->second;
 
     torchvulkan::Shader shader = torchvulkan::getShader(shaderID);
     ShaderSubmitInfo* shaderSubmitInfo = allocatePipeline(shader, spec);
-    shaderMap[spec.packedArgs] = shaderSubmitInfo;
+    shaderMap.emplace(std::string(spec.key), shaderSubmitInfo);
     return shaderSubmitInfo;
 }
 
