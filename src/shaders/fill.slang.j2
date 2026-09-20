@@ -35,19 +35,10 @@ void fillKernel(
     {
         if (idx * {{ v1 }} >= numel) return;
 
-        vector<{{ d1 }}, {{ v1 }}>* v_tensor = (vector<{{ d1 }}, {{ v1 }}>*)address;
-        vector<{{ d1 }}, {{ v1 }}> value = vector<{{ d1 }}, {{ v1 }}>(fill_value);
-
         uint64_t remainder = numel - (idx * {{ v1 }});
-        if (remainder >= {{ v1 }})
-        {
-            v_tensor[idx] = value;
-        }
-        else
-        {
-            for (uint i = 0; i < remainder; i++) {
-                tensor[idx * {{ v1 }} + i] = fill_value;
-            }
+        uint64_t count = (remainder >= {{ v1 }}) ? {{ v1 }} : remainder;
+        for (uint i = 0; i < count; i++) {
+            tensor[idx * {{ v1 }} + i] = fill_value;
         }
 
         return;

@@ -82,13 +82,15 @@ at::Tensor binary_op_vulkan(
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
     uint32_t op = static_cast<uint32_t>(operation);
     uint32_t use_scalar = 1;
+    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1u : 0u;
 
     SpecializationBuilder spd{};
     spd.push(op)
        .push(contiguous)
        .push(use_scalar)
        .push(out_dims)
-       .push(workgroupSizeX);
+       .push(workgroupSizeX)
+       .push(has_alpha);
     SpecializationArgs specialization = spd.build();
 
     IntDivider sizes; 
@@ -208,22 +210,24 @@ at::Tensor binary_op_vulkan(
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
     uint32_t op = static_cast<uint32_t>(operation);
     uint32_t use_scalar = 0;
+    uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1u : 0u;
 
     SpecializationBuilder spd{};
     spd.push(op)
        .push(contiguous)
        .push(use_scalar)
        .push(out_dims)
-       .push(workgroupSizeX);
+       .push(workgroupSizeX)
+       .push(has_alpha);
     SpecializationArgs specialization = spd.build();
 
-    IntDivider sizes; 
+    IntDivider sizes;
     uint32_t strides_a[MAX_DIMS] = {0};
     uint32_t strides_b[MAX_DIMS] = {0};
     uint32_t strides_out[MAX_DIMS] = {0};
-    
+
     uint64_t metadata_address = 0;
-    if (!contiguous) 
+    if (!contiguous)
     {
         int64_t el_size = iter.element_size(0);
         at::IntArrayRef iter_shape = iter.shape();

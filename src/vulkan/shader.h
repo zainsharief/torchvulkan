@@ -114,6 +114,7 @@ private:
     VkShaderModule allocateShaderModule(const torchvulkan::Shader shader);
     VkPipelineLayout allocatePipelineLayout();
     ShaderSubmitInfo* allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec);
+    void displayPipelineStatistics(VkPipeline pipeline);
     std::array<std::unordered_map<std::string, ShaderSubmitInfo*, SpecializationKeyHash, std::equal_to<>>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
     std::unordered_map<uint64_t, VkShaderModule> shaderModuleCache;

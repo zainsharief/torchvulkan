@@ -123,7 +123,10 @@ for data, targets in train_loader:
 
 ## Benchmarks
 
-[`benchmark/mnist_benchmark.py`](benchmark/mnist_benchmark.py) times a combined forward + backward pass of the MNIST network (in `float16`), sweeping the hidden width so the parameter count grows from ~50K up to ~312M.
+[`benchmark/benchmark.py`](benchmark/benchmark.py) times a combined forward + backward pass (`float16` on accelerators, `float32` on CPU) across every available backend, sweeping model size so parameter count grows from small up to as large as the `mnist`/`llm` subcommand's `--sizes` default reaches. The model is picked by subcommand; the harness (backend detection, subprocess isolation per backend, timing, plotting) is shared:
+
+- `mnist` — the MNIST network from [`examples/mnist.py`](examples/mnist.py), sweeping hidden width from ~50K up to ~312M params.
+- `llm` — the small GPT-style transformer from [`examples/llm.py`](examples/llm.py), sweeping model width (`n_embd`) up to ~30M params.
 
 Compared against the platform-native GPU backend, the `vulkan` device tracks closely and stays orders of magnitude ahead of the CPU as the model grows:
 
@@ -133,12 +136,13 @@ Compared against the platform-native GPU backend, the `vulkan` device tracks clo
 </p>
 
 <p align="center">
-  <i>Left: NVIDIA GPU (vulkan vs. CUDA). Right: Apple Silicon (vulkan vs. MPS).</i>
+  <i>Left: NVIDIA GPU (vulkan vs. CUDA). Right: Apple Silicon (vulkan vs. MPS). Both from the <code>mnist</code> subcommand.</i>
 </p>
 
 ```bash
 pip install matplotlib
-python benchmark/mnist_benchmark.py
+python benchmark/benchmark.py mnist
+python benchmark/benchmark.py llm
 ```
 
 ## Python API
@@ -168,7 +172,6 @@ TORCHVULKAN_STRICT=1 python your_script.py
 ## Limitations
 
 - `bfloat16` and complex dtypes not natively supported; falls back to the CPU.
-- Tensor rank ≤ 4. Tensors with more than 4 dimensions fall back to the CPU.
 - `torch>=2.10.0` only. The extension is compiled against 2.13.0 but has testing support for >=2.10.0.
 - APIs and coverage may change before `1.0.0`.
 

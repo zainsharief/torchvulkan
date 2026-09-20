@@ -79,7 +79,8 @@ at::Tensor& dispatch_compare(
     int32_t out_dims = static_cast<int32_t>(out.dim());
 
     uint32_t contiguous = (a.is_contiguous() && b.is_contiguous() && out.is_contiguous()) ? 1 : 0;
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, 1);
+    uint32_t vecSize = get_dtype_vec_size(promoted);
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, vecSize);
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_compareop(promoted);
     uint32_t opv = static_cast<uint32_t>(op);
     uint32_t usc = use_scalar ? 1u : 0u;
@@ -127,7 +128,8 @@ at::Tensor& dispatch_compare(
     std::vector<at::Tensor> readTensors = {self_p};
     if (!use_scalar) readTensors.push_back(other_p);
 
-    uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
+    uint64_t numel_vec = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
+    uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
         shader_id,

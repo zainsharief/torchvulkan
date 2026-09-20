@@ -6,6 +6,7 @@
 [[vk::constant_id(2)]] const uint USE_SCALAR = 0;
 [[vk::constant_id(3)]] const uint NDIM = 0;
 [[vk::constant_id(4)]] const uint WG_x = 0;
+[[vk::constant_id(5)]] const uint HAS_ALPHA = 0;
 
 struct Metadata
 {
@@ -33,17 +34,17 @@ interface IBinaryOp<T>
 
 struct AddOp<T : IArithmetic> : IBinaryOp<T>
 {
-    static T eval(T a, T b, T alpha) { return a + (alpha * b); }
+    static T eval(T a, T b, T alpha) { return (HAS_ALPHA != 0) ? (a + (alpha * b)) : (a + b); }
 }
 
 struct SubOp<T : IArithmetic> : IBinaryOp<T>
 {
-    static T eval(T a, T b, T alpha) { return a - (alpha * b); }
+    static T eval(T a, T b, T alpha) { return (HAS_ALPHA != 0) ? (a - (alpha * b)) : (a - b); }
 }
 
 struct RSubOp<T : IArithmetic> : IBinaryOp<T>
 {
-    static T eval(T a, T b, T alpha) { return b - (alpha * a); }
+    static T eval(T a, T b, T alpha) { return (HAS_ALPHA != 0) ? (b - (alpha * a)) : (b - a); }
 }
 
 struct MulOp<T : IArithmetic> : IBinaryOp<T>
@@ -146,36 +147,31 @@ void baseBinaryKernel<
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        vector<T, VEC_SIZE>* v_tensor_a = (vector<T, VEC_SIZE>*)address_a;
-        vector<T, VEC_SIZE>* v_tensor_out = (vector<T, VEC_SIZE>*)address_out;
+        T* tensor_a = (T*)address_a;
+        T* tensor_out = (T*)address_out;
 
-        vector<T, VEC_SIZE> va = v_tensor_a[idx];
+        vector<T, VEC_SIZE> va;
+        [unroll] for (int k = 0; k < VEC_SIZE; k++) va[k] = tensor_a[idx * VEC_SIZE + k];
+
         vector<T, VEC_SIZE> vb = vector<T, VEC_SIZE>(scalar_value);
         vector<T, VEC_SIZE> res;
 
         // the second operand has no address when it is a scalar, so it is only read when it exists
-        if (USE_SCALAR == 0) 
+        if (USE_SCALAR == 0)
         {
-            vector<T, VEC_SIZE>* v_tensor_b = (vector<T, VEC_SIZE>*)address_b;
-            vb = v_tensor_b[idx];
+            T* tensor_b = (T*)address_b;
+            [unroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = tensor_b[idx * VEC_SIZE + k];
         }
 
-        [unroll] for (int k = 0; k < VEC_SIZE; k++) 
+        [unroll] for (int k = 0; k < VEC_SIZE; k++)
         {
             res[k] = Op.eval(va[k], vb[k], alpha);
         }
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        if (remainder >= VEC_SIZE) 
-        { 
-            v_tensor_out[idx] = res; 
-        }
-        else 
-        {
-            T* tensor_out = (T*)address_out;
-            for (uint i = 0; i < remainder; i++) { 
-                tensor_out[idx * VEC_SIZE + i] = res[i]; 
-            }
+        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
+        for (uint i = 0; i < count; i++) {
+            tensor_out[idx * VEC_SIZE + i] = res[i];
         }
     }
     else

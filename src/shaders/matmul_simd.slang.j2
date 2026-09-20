@@ -47,14 +47,14 @@ static const int VECTORS_PER_THREAD_ROW_M = THREAD_SIZE_N / {{ v1 }};
 groupshared {{ d1 }} smemA[TILE_M][TILE_K + 1];
 groupshared vector<{{ d1 }}, {{ v1 }}> smemB[TILE_K][TILE_N / {{ v1 }}];
 
-void matmulKernel(
+void matmulKernelAligned(
     uint3 gi: SV_DispatchThreadID,
     uint3 li: SV_GroupThreadID,
     uint3 wg: SV_GroupID,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_a,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_b,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_out,
-    vector<{{ d1 }}, {{ v1 }}>* tensor_bias
+    {{ d1 }}* tensor_a,
+    {{ d1 }}* tensor_b,
+    {{ d1 }}* tensor_out,
+    {{ d1 }}* tensor_bias
 )
 {
     vector<{{ d1 }}, {{ v1 }}> accum[THREAD_SIZE_M * (THREAD_SIZE_N / {{ v1 }})] = { 0 };
@@ -90,7 +90,7 @@ void matmulKernel(
             vector<{{ d1 }}, {{ v1 }}> loaded_vec = { 0 };
             if (global_row < pcs.M && global_col < pcs.K) {
                 uint flat_idx = batch_offset_A + (global_row * pcs.strides_A.row) + global_col;
-                loaded_vec = tensor_a[flat_idx / {{ v1 }}];
+                [unroll] for (int k = 0; k < {{ v1 }}; ++k) loaded_vec[k] = tensor_a[flat_idx + k];
             }
 
             [unroll] for (int v = 0; v < {{ v1 }}; ++v) {
@@ -111,7 +111,7 @@ void matmulKernel(
             vector<{{ d1 }}, {{ v1 }}> loaded_vec = { 0 };
             if (global_row < pcs.K && global_col < pcs.N) {
                 uint flat_idx = batch_offset_B + (global_row * pcs.strides_B.row) + global_col;
-                loaded_vec = tensor_b[flat_idx / {{ v1 }}];
+                [unroll] for (int k = 0; k < {{ v1 }}; ++k) loaded_vec[k] = tensor_b[flat_idx + k];
             }
         
             uint vec_col = col_B / {{ v1 }}; 
@@ -158,11 +158,11 @@ void matmulKernel(
                 
                 if (HAS_BIAS == 1) {
                     uint bias_flat_idx = (batch_offset_bias + (g_row * pcs.strides_bias.row) + (g_col * pcs.strides_bias.col));
-                    result_vec += tensor_bias[bias_flat_idx / {{ v1 }}] * pcs.beta;
+                    [unroll] for (int k = 0; k < {{ v1 }}; ++k) result_vec[k] += tensor_bias[bias_flat_idx + k] * pcs.beta;
                 }
                 
                 uint flat_idx = batch_offset_C + (g_row * pcs.strides_C.row) + g_col;
-                tensor_out[flat_idx / {{ v1 }}] = result_vec;
+                [unroll] for (int k = 0; k < {{ v1 }}; ++k) tensor_out[flat_idx + k] = result_vec[k];
             }
         }
     }
@@ -306,16 +306,11 @@ void main(
     uint3 wg: SV_GroupID 
 ) 
 {
-    vector<{{ d1 }}, {{ v1 }}>* tensor_a = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_a;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_b = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_b;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_out = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_out;
-    vector<{{ d1 }}, {{ v1 }}>* tensor_bias = (vector<{{ d1 }}, {{ v1 }}>*)pcs.tensor_bias;
-
     {{ d1 }}* tensor_a_scalar = ({{ d1 }}*)pcs.tensor_a;
     {{ d1 }}* tensor_b_scalar = ({{ d1 }}*)pcs.tensor_b;
     {{ d1 }}* tensor_out_scalar = ({{ d1 }}*)pcs.tensor_out;
     {{ d1 }}* tensor_bias_scalar = ({{ d1 }}*)pcs.tensor_bias;
 
-    if (IS_ALIGNED == 1) matmulKernel(gi, li, wg, tensor_a, tensor_b, tensor_out, tensor_bias);
+    if (IS_ALIGNED == 1) matmulKernelAligned(gi, li, wg, tensor_a_scalar, tensor_b_scalar, tensor_out_scalar, tensor_bias_scalar);
     else matmulKernel(gi, li, wg, tensor_a_scalar, tensor_b_scalar, tensor_out_scalar, tensor_bias_scalar);
 }

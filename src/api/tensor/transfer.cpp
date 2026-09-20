@@ -26,8 +26,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_copy(dst.scalar_type());
-    uint32_t vecSize = get_dtype_vec_size(dst.scalar_type()); // our workgroup must match the shader workgroup
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), vecSize);
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), 1);
 
     SpecializationBuilder spd{};
     spd.push(out_dims)
