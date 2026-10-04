@@ -165,6 +165,7 @@ class TestVulkanOps(TestCase):
                 "nn.functional.layer_norm", "nn.functional.group_norm",
                 "nn.functional.bilinear", "nn.functional.poisson_nll_loss",
                 "var", "var_mean", "nn.functional.binary_cross_entropy",
+                "nn.functional.cross_entropy", "nn.functional.linear_cross_entropy",
             ):
                 self.assertEqual(actual, expected, atol=1e-1, rtol=5e-2, exact_dtype=False)
                 continue
