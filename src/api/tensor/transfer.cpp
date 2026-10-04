@@ -3,11 +3,23 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
 namespace {
+
+c10::ScalarType copy_variant_dtype(c10::ScalarType dtype)
+{
+    switch (c10::elementSize(dtype))
+    {
+        case 1: return c10::ScalarType::Byte;
+        case 2: return c10::ScalarType::UInt16;
+        case 4: return c10::ScalarType::UInt32;
+        case 8: return c10::ScalarType::UInt64;
+        case 16: return c10::ScalarType::ComplexDouble;
+        default: TORCH_CHECK(false, "torchvulkan [ERROR]: no copy shader for ", dtype, " elements.");
+    }
+}
 
 void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst) 
 {
@@ -25,7 +37,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_copy(dst.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::COPY, copy_variant_dtype(dst.scalar_type())};
     uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), 1);
 
     SpecializationBuilder spd{};
@@ -64,7 +76,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {src},

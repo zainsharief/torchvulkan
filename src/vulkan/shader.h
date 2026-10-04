@@ -2,7 +2,7 @@
 #include <volk.h>
 #include <ATen/ATen.h>
 
-#include "shaders/shader_registry.h"
+#include "shaders/shader_kernels.h"
 #include "builders.h"
 #include "dispatch.h"
 
@@ -17,6 +17,12 @@
 
 class DeviceContext;
 class VulkanBuffer;
+
+struct ShaderKey {
+    torchvulkan::Kernel kernel;
+    c10::ScalarType dtype;
+    c10::ScalarType dtype2 = c10::ScalarType::Undefined;
+};
 
 struct ShaderSubmitInfo {
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -71,7 +77,7 @@ public:
     );
 
     void dispatchShader(
-        torchvulkan::ShaderID shaderid, 
+        ShaderKey key,
         SpecializationArgs specConstants,
         PushConstants pushConstants,
         at::TensorList readTensors,
@@ -87,7 +93,7 @@ public:
 
     void flush();
 
-    ~VulkanShaderManager() { clearCache(); delete metadata_buffer; delete dispatcher; };
+    ~VulkanShaderManager();
 
 private:
     std::mutex mutex_;
@@ -110,12 +116,15 @@ private:
     void flushIfPending();
 
     void clearCache();
-    ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);
-    VkShaderModule allocateShaderModule(const torchvulkan::Shader shader);
+    uint32_t resolveBinary(ShaderKey key) const;
+    ShaderSubmitInfo* allocateShader(uint32_t binary, const SpecializationArgs spec);
+    VkShaderModule allocateShaderModule(uint32_t binary);
     VkPipelineLayout allocatePipelineLayout();
-    ShaderSubmitInfo* allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec);
+    ShaderSubmitInfo* allocatePipeline(uint32_t binary, const SpecializationArgs spec);
     void displayPipelineStatistics(VkPipeline pipeline);
-    std::array<std::unordered_map<std::string, ShaderSubmitInfo*, SpecializationKeyHash, std::equal_to<>>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
+
+    std::vector<int32_t> binaryIndex;
+    std::vector<std::unordered_map<std::string, ShaderSubmitInfo*, SpecializationKeyHash, std::equal_to<>>> shaderCache;
+    std::vector<VkShaderModule> shaderModuleCache;
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
-    std::unordered_map<uint64_t, VkShaderModule> shaderModuleCache;
 };

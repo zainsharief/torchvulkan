@@ -2,7 +2,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 
 namespace {
@@ -37,7 +36,7 @@ at::Tensor& fill_scalar_vulkan(
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_fill(self.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::FILL, self.scalar_type()};
     uint32_t vecSize = get_dtype_vec_size(self.scalar_type()); // our workgroup must match the shader workgroup
     uint32_t workgroupSizeX = get_dtype_workgroup_size(self.scalar_type(), vecSize);
     uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
@@ -80,7 +79,7 @@ at::Tensor& fill_scalar_vulkan(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {},

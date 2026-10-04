@@ -12,6 +12,8 @@
 #define VK_CHECK(x) \
     if (x != VK_SUCCESS) TORCH_CHECK(false, "torchvulkan [ERROR]: Vulkan error in Cache");
 
+inline constexpr VkComponentTypeKHR COMPONENT_TYPE_BFLOAT16 = static_cast<VkComponentTypeKHR>(1000141000);
+
 struct CoopMatConfig {
     uint32_t m, n, k;
 };
@@ -27,6 +29,7 @@ struct CoopMatParams {
     uint32_t warp_frags_m;
     uint32_t warp_frags_n;
     uint32_t bk;
+    bool use_shared_memory;
 };
 
 class VulkanCache {

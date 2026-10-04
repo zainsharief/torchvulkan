@@ -4,7 +4,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 
 namespace {
@@ -81,7 +80,7 @@ at::Tensor& dispatch_compare(
     uint32_t contiguous = (a.is_contiguous() && b.is_contiguous() && out.is_contiguous()) ? 1 : 0;
     uint32_t vecSize = get_dtype_vec_size(promoted);
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, vecSize);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_compareop(promoted);
+    ShaderKey shader_key{torchvulkan::Kernel::COMPARE, promoted};
     uint32_t opv = static_cast<uint32_t>(op);
     uint32_t usc = use_scalar ? 1u : 0u;
 
@@ -132,7 +131,7 @@ at::Tensor& dispatch_compare(
     uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ readTensors,
@@ -174,7 +173,7 @@ at::Tensor where_vulkan(
     int32_t out_dims = static_cast<int32_t>(out.dim());
     uint32_t contiguous = (ce.is_contiguous() && ae.is_contiguous() && be.is_contiguous()) ? 1 : 0;
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_where(promoted);
+    ShaderKey shader_key{torchvulkan::Kernel::WHERE, promoted};
 
     SpecializationBuilder spd{};
     spd.push(contiguous)
@@ -217,7 +216,7 @@ at::Tensor where_vulkan(
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {c, a, b},

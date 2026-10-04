@@ -5,7 +5,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
@@ -79,7 +78,7 @@ at::Tensor binary_op_vulkan(
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted_type, vecSize);
 
     uint32_t contiguous = iter.is_contiguous();
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
+    ShaderKey shader_key{torchvulkan::Kernel::BINARY, promoted_type};
     uint32_t op = static_cast<uint32_t>(operation);
     uint32_t use_scalar = 1;
     uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1u : 0u;
@@ -134,7 +133,7 @@ at::Tensor binary_op_vulkan(
     
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {self_dtype},
@@ -207,7 +206,7 @@ at::Tensor binary_op_vulkan(
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted_type, vecSize);
 
     uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_binaryop(promoted_type);
+    ShaderKey shader_key{torchvulkan::Kernel::BINARY, promoted_type};
     uint32_t op = static_cast<uint32_t>(operation);
     uint32_t use_scalar = 0;
     uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1u : 0u;
@@ -265,7 +264,7 @@ at::Tensor binary_op_vulkan(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {self_dtype, other_dtype},

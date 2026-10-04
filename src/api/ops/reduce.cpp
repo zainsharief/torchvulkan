@@ -6,7 +6,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
@@ -57,7 +56,8 @@ at::Tensor dispatch_reduce_shader(
     at::ScalarType stype = self.scalar_type();
     bool dtype_needs_extended = c10::elementSize(stype) != 4;
     bool dtype_supported_subgroup =
-        at::isFloatingType(stype) && c10::elementSize(stype) <= 4 &&
+        at::isFloatingType(stype) && stype != at::kBFloat16 &&
+        c10::elementSize(stype) <= 4 &&
         (!dtype_needs_extended || device->support_subgroup_extended_types);
 
     bool use_subgroup =
@@ -71,9 +71,8 @@ at::Tensor dispatch_reduce_shader(
     uint32_t workgroupSizeX = use_subgroup
         ? device->subgroup_size
         : get_dtype_workgroup_size(self.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = use_subgroup
-        ? torchvulkan::get_shader_id_reduce_subgroup(self.scalar_type())
-        : torchvulkan::get_shader_id_reduce(self.scalar_type());
+    torchvulkan::Kernel kernel = use_subgroup ? torchvulkan::Kernel::REDUCE_SUBGROUP : torchvulkan::Kernel::REDUCE;
+    ShaderKey shader_key{kernel, self.scalar_type()};
 
     SpecializationBuilder spd{};
     spd.push(op)
@@ -108,7 +107,7 @@ at::Tensor dispatch_reduce_shader(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {self},
@@ -187,7 +186,10 @@ at::Tensor sum_dim_vulkan(
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, dim, keepdim, ReduceOp::SUM, 0.0, true);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, dim, keepdim, ReduceOp::SUM, 0.0, true).to(out_dtype);
 }
 
 } // namespace
@@ -224,7 +226,10 @@ at::Tensor prod_dim_vulkan(
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, at::IntArrayRef{dim}, keepdim, ReduceOp::PROD, 1.0, false);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, at::IntArrayRef{dim}, keepdim, ReduceOp::PROD, 1.0, false).to(out_dtype);
 }
 
 at::Tensor prod_vulkan(
@@ -232,7 +237,10 @@ at::Tensor prod_vulkan(
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, at::OptionalIntArrayRef(), false, ReduceOp::PROD, 1.0, false);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, at::OptionalIntArrayRef(), false, ReduceOp::PROD, 1.0, false).to(out_dtype);
 }
 
 at::Tensor mean_dim_vulkan(
@@ -299,7 +307,7 @@ at::Tensor argreduce(
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(x.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_arg_reduce(x.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::ARG_REDUCE, x.scalar_type()};
     uint32_t opv = static_cast<uint32_t>(op);
     int32_t ndim32 = static_cast<int32_t>(ndim);
 
@@ -336,7 +344,7 @@ at::Tensor argreduce(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {x},

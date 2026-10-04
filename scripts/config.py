@@ -1,199 +1,146 @@
-import sys
+"""
+Which shader variants are compiled ahead of time.
 
-SHADER_DIR = 'src/shaders'
+Each Kernel names a Slang module and its generic entry point; each Entry lists
+the dtypes to specialise it for. One variant is built as:
 
-UNSIGNED_INTEGERS = [
-    [{'name' : 'u64', 'dtype' : 'uint64_t', 'bytes' : 8, 'kwargs' : {}}],
-    [{'name' : 'u32', 'dtype' : 'uint32_t', 'bytes' : 4, 'kwargs' : {}}],
-    [{'name' : 'u16', 'dtype' : 'uint16_t', 'bytes' : 2, 'kwargs' : {}}],
-    [{'name' : 'u8',  'dtype' : 'uint8_t',  'bytes' : 1, 'kwargs' : {}}]
-]
+    slangc ops/binary.slang -entry binary_main -specialize float32_t -specialize 4
 
-SIGNED_INTEGERS = [
-    [{'name' : 'i64', 'dtype' : 'int64_t', 'bytes' : 8, 'kwargs' : {}}],
-    [{'name' : 'i32', 'dtype' : 'int32_t', 'bytes' : 4, 'kwargs' : {}}],
-    [{'name' : 'i16', 'dtype' : 'int16_t', 'bytes' : 2, 'kwargs' : {}}],
-    [{'name' : 'i8',  'dtype' : 'int8_t',  'bytes' : 1, 'kwargs' : {}}]
-]
+The host looks a variant up by ShaderKey{Kernel::BINARY, dtype}. To add a
+kernel, write its module in src/shaders/ops/ and add a Kernel here.
+"""
 
-FLOATS = [
-    [{'name' : 'f64', 'dtype' : 'float64_t', 'bytes' : 8, 'kwargs' : {}}],
-    [{'name' : 'f32', 'dtype' : 'float32_t', 'bytes' : 4, 'kwargs' : {}}],
-    [{'name' : 'f16', 'dtype' : 'float16_t', 'bytes' : 2, 'kwargs' : {}}]
-]
+from dataclasses import dataclass
 
-BYTES = [
-    [{'name' : '16', 'dtype' : 'uint4',    'bytes' : 16, 'kwargs' : {}}],
-    [{'name' : '8',  'dtype' : 'uint64_t', 'bytes' : 8,  'kwargs' : {}}],
-    [{'name' : '4',  'dtype' : 'uint32_t', 'bytes' : 4,  'kwargs' : {}}],
-    [{'name' : '2',  'dtype' : 'uint16_t', 'bytes' : 2,  'kwargs' : {}}],
-    [{'name' : '1',  'dtype' : 'uint8_t',  'bytes' : 1,  'kwargs' : {}}]
-]
 
+@dataclass(frozen=True)
+class DType:
+    name:  str   # short name; part of the generated .spv filename
+    slang: str   # the Slang type the entry point is specialised with
+    bytes: int   # size in bytes
+    aten:  tuple # the c10::ScalarType values this variant serves
+
+
+U64 = DType('u64', 'uint64_t', 8, ('UInt64',))
+U32 = DType('u32', 'uint32_t', 4, ('UInt32',))
+U16 = DType('u16', 'uint16_t', 2, ('UInt16',))
+U8  = DType('u8',  'uint8_t',  1, ('Byte', 'Bool'))
+
+I64 = DType('i64', 'int64_t', 8, ('Long',))
+I32 = DType('i32', 'int32_t', 4, ('Int',))
+I16 = DType('i16', 'int16_t', 2, ('Short',))
+I8  = DType('i8',  'int8_t',  1, ('Char',))
+
+F64 = DType('f64', 'float64_t', 8, ('Double',))
+F32 = DType('f32', 'float32_t', 4, ('Float',))
+F16 = DType('f16', 'float16_t', 2, ('Half',))
+
+BF16 = DType('bf16', 'BFloat16', 2, ('BFloat16',))
+
+UNSIGNED_INTEGERS = [U64, U32, U16, U8]
+SIGNED_INTEGERS = [I64, I32, I16, I8]
 INTEGERS = UNSIGNED_INTEGERS + SIGNED_INTEGERS
+BUILTIN_FLOATS = [F64, F32, F16]
+FLOATS = BUILTIN_FLOATS + [BF16]
 DTYPES = INTEGERS + FLOATS
-DTYPES_SUPERSET = [[i[0], j[0]] for i in DTYPES for j in DTYPES] 
 
-SHADERS = [
-    {
-        'name' : 'binaryop.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'AddOp'},
-                    {"name" : '1', 'struct' : 'SubOp'},
-                    {"name" : '2', 'struct' : 'RSubOp'},
-                    {"name" : '3', 'struct' : 'MulOp'},
-                    {"name" : '4', 'struct' : 'DivOp'},
-                    {"name" : '5', 'struct' : 'MaxOp'},
-                    {"name" : '6', 'struct' : 'MinOp'},
-                    {"name" : '7', 'struct' : 'PowOp'},
-                    {"name" : '8', 'struct' : 'RPowOp'},
-                    {"name" : '9', 'struct' : 'Atan2Op', 'float_only' : True},
-                    {"name" : '10', 'struct' : 'ThresholdBackwardOp'},
-                    {"name" : '11', 'struct' : 'FmaxOp'},
-                    {"name" : '12', 'struct' : 'FminOp'},
-                    {"name" : '13', 'struct' : 'FmodOp'},
-                    {"name" : '14', 'struct' : 'RemainderOp'},
-                    {"name" : '15', 'struct' : 'HypotOp', 'float_only' : True},
-                    {"name" : '16', 'struct' : 'XlogyOp', 'float_only' : True},
-                    {"name" : '17', 'struct' : 'LogaddexpOp', 'float_only' : True},
-                    {"name" : '18', 'struct' : 'Logaddexp2Op', 'float_only' : True}
-                ]}
-    },
-    {
-        'name' : 'copy.slang.j2',
-        'dtypes' : BYTES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'unaryop.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'ReluOp'},
-                    {"name" : '1', 'struct' : 'ExpOp', 'float_only' : True},
-                    {"name" : '2', 'struct' : 'LogOp', 'float_only' : True},
-                    {"name" : '3', 'struct' : 'SqrtOp', 'float_only' : True},
-                    {"name" : '4', 'struct' : 'NegOp'},
-                    {"name" : '5', 'struct' : 'ReciprocalOp', 'float_only' : True},
-                    {"name" : '6', 'struct' : 'SinOp', 'float_only' : True},
-                    {"name" : '7', 'struct' : 'CosOp', 'float_only' : True},
-                    {"name" : '8', 'struct' : 'TanOp', 'float_only' : True},
-                    {"name" : '9', 'struct' : 'AsinOp', 'float_only' : True},
-                    {"name" : '10', 'struct' : 'AcosOp', 'float_only' : True},
-                    {"name" : '11', 'struct' : 'AtanOp', 'float_only' : True},
-                    {"name" : '12', 'struct' : 'SinhOp', 'float_only' : True},
-                    {"name" : '13', 'struct' : 'CoshOp', 'float_only' : True},
-                    {"name" : '14', 'struct' : 'TanhOp', 'float_only' : True},
-                    {"name" : '15', 'struct' : 'Exp2Op', 'float_only' : True},
-                    {"name" : '16', 'struct' : 'Log2Op', 'float_only' : True},
-                    {"name" : '17', 'struct' : 'Log10Op', 'float_only' : True},
-                    {"name" : '18', 'struct' : 'Expm1Op', 'float_only' : True},
-                    {"name" : '19', 'struct' : 'Log1pOp', 'float_only' : True},
-                    {"name" : '20', 'struct' : 'RsqrtOp', 'float_only' : True},
-                    {"name" : '21', 'struct' : 'SigmoidOp', 'float_only' : True},
-                    {"name" : '22', 'struct' : 'AsinhOp', 'float_only' : True},
-                    {"name" : '23', 'struct' : 'AcoshOp', 'float_only' : True},
-                    {"name" : '24', 'struct' : 'AtanhOp', 'float_only' : True},
-                    {"name" : '25', 'struct' : 'Deg2radOp', 'float_only' : True},
-                    {"name" : '26', 'struct' : 'Rad2degOp', 'float_only' : True},
-                    {"name" : '27', 'struct' : 'FloorOp'},
-                    {"name" : '28', 'struct' : 'CeilOp'},
-                    {"name" : '29', 'struct' : 'TruncOp'},
-                    {"name" : '30', 'struct' : 'RoundOp'},
-                    {"name" : '31', 'struct' : 'FracOp'},
-                    {"name" : '32', 'struct' : 'AbsOp'},
-                    {"name" : '33', 'struct' : 'SignOp'},
-                    {"name" : '34', 'struct' : 'ErfOp', 'float_only' : True},
-                    {"name" : '35', 'struct' : 'ErfinvOp', 'float_only' : True},
-                    {"name" : '36', 'struct' : 'SincOp', 'float_only' : True},
-                    {"name" : '37', 'struct' : 'EntrOp', 'float_only' : True},
-                    {"name" : '38', 'struct' : 'LgammaOp', 'float_only' : True},
-                    {"name" : '39', 'struct' : 'DigammaOp', 'float_only' : True},
-                    {"name" : '40', 'struct' : 'I0Op', 'float_only' : True},
-                    {"name" : '41', 'struct' : 'I1Op', 'float_only' : True}
-                ]}
-    },
-    {
-        'name' : 'cast.slang.j2',
-        'dtypes' : DTYPES_SUPERSET,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'compareop.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'EqOp'},
-                    {"name" : '1', 'struct' : 'NeOp'},
-                    {"name" : '2', 'struct' : 'LtOp'},
-                    {"name" : '3', 'struct' : 'LeOp'},
-                    {"name" : '4', 'struct' : 'GtOp'},
-                    {"name" : '5', 'struct' : 'GeOp'},
-                    {"name" : '6', 'struct' : 'LogicalAndOp'},
-                    {"name" : '7', 'struct' : 'LogicalOrOp'},
-                    {"name" : '8', 'struct' : 'LogicalXorOp'}
-                ]}
-    },
-    {
-        'name' : 'fill.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'where.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'reduce.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'SumReduceOp'},
-                    {"name" : '1', 'struct' : 'AmaxReduceOp'},
-                    {"name" : '2', 'struct' : 'AminReduceOp'},
-                    {"name" : '3', 'struct' : 'ProdReduceOp'}
-                ]}
-    },
-    {
-        'name' : 'reduce_subgroup.slang.j2',
-        'dtypes' : [f for f in FLOATS if f[0]['bytes'] <= 4],
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'SumReduceOp'},
-                    {"name" : '1', 'struct' : 'AmaxReduceOp'},
-                    {"name" : '2', 'struct' : 'AminReduceOp'}
-                ]}
-    },
-    {
-        'name' : 'nllloss.slang.j2',
-        'dtypes' : FLOATS,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'scan.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {'OPERATIONS' : [
-                    {"name" : '0', 'struct' : 'SumScanOp'},
-                    {"name" : '1', 'struct' : 'ProdScanOp'}
-                ]}
-    },
-    {
-        'name' : 'arg_reduce.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'scan_arg.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'matmul_simd.slang.j2',
-        'dtypes' : DTYPES,
-        'kwargs' : {}
-    },
-    {
-        'name' : 'matmul_coop.slang.j2',
-        'dtypes' : [[{**t[0], 'kwargs': {**t[0]['kwargs'], 'BLOCK_SIZE': s}}] for s in [8, 16, 32, 64] for t in DTYPES],
-        'kwargs' : {'os': sys.platform}
-    }
+BYTE_WIDTHS = [
+    DType('16', 'Raw16',    16, ('ComplexDouble',)),
+    DType('8',  'uint64_t', 8,  ('UInt64',)),
+    DType('4',  'uint32_t', 4,  ('UInt32',)),
+    DType('2',  'uint16_t', 2,  ('UInt16',)),
+    DType('1',  'uint8_t',  1,  ('Byte',)),
 ]
 
+
+def vec_size(nbytes):
+    """
+    How many elements a thread handles per step: as many as fit in 128 bits,
+    capped at 4. Mirrored by get_dtype_vec_size in src/api/ops/helpers.h.
+    """
+    return int(min(16 / nbytes, 4))
+
+
+# The integer arguments an entry point takes after its type arguments, derived
+# from the dtype's size. For a pairwise entry point they come from the wider of
+# the two dtypes, since both tensors are stepped by the same amount.
+VALUE_ARGS = {
+    'vec': vec_size,
+}
+
+
+@dataclass(frozen=True)
+class Entry:
+    function: str          # the entrypoint in the kernel's module
+    dtypes: list           # the dtypes to specialise it for
+    value_args: tuple = () # names from VALUE_ARGS, in the order the entry point declares them
+    constants: tuple = ()  # literal integer arguments that follow the value args
+    pairwise: bool = False # specialise over every (src, dst) pair rather than one dtype
+
+
+@dataclass(frozen=True)
+class Kernel:
+    name: str
+    module: str # path relative to src/shaders
+    entries: list 
+
+
+KERNELS = [
+    Kernel('binary', 'ops/binary.slang', [
+        Entry('binary_main', DTYPES, ('vec',)),
+    ]),
+    Kernel('unary', 'ops/unary.slang', [
+        Entry('unary_main', DTYPES, ('vec',)),
+    ]),
+    Kernel('compare', 'ops/compare.slang', [
+        Entry('compare_main', DTYPES, ('vec',)),
+    ]),
+    Kernel('fill', 'ops/fill.slang', [
+        Entry('fill_main', DTYPES, ('vec',)),
+    ]),
+    Kernel('where', 'ops/where.slang', [
+        Entry('where_main', DTYPES),
+    ]),
+    Kernel('reduce', 'ops/reduce.slang', [
+        Entry('reduce_main', DTYPES),
+    ]),
+    Kernel('reduce_subgroup', 'ops/reduce_subgroup.slang', [
+        Entry('reduce_subgroup_main', [F32, F16]),
+    ]),
+    Kernel('arg_reduce', 'ops/arg_reduce.slang', [
+        Entry('arg_reduce_main', DTYPES),
+    ]),
+    Kernel('scan', 'ops/scan.slang', [
+        Entry('scan_main', DTYPES),
+    ]),
+    Kernel('scan_arg', 'ops/scan_arg.slang', [
+        Entry('scan_arg_main', DTYPES),
+    ]),
+    Kernel('nllloss', 'ops/nllloss.slang', [
+        Entry('nllloss_main', FLOATS),
+    ]),
+    Kernel('copy', 'ops/copy.slang', [
+        Entry('copy_main', BYTE_WIDTHS),
+    ]),
+    Kernel('cast', 'ops/cast.slang', [
+        Entry('cast_main', DTYPES, ('vec',), pairwise=True),
+    ]),
+    Kernel('matmul_simd_128', 'ops/matmul_simd.slang', [
+        Entry('matmul_simd_main', [d for d in DTYPES if d.bytes < 8], ('vec',), constants=(128,)),
+    ]),
+    Kernel('matmul_simd_64', 'ops/matmul_simd.slang', [
+        Entry('matmul_simd_main', DTYPES, ('vec',), constants=(64,)),
+    ]),
+    Kernel('matmul_coop_8', 'ops/matmul_coop.slang', [
+        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(8,)),
+    ]),
+    Kernel('matmul_coop_16', 'ops/matmul_coop.slang', [
+        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(16,)),
+    ]),
+    Kernel('matmul_coop_32', 'ops/matmul_coop.slang', [
+        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(32,)),
+    ]),
+    Kernel('matmul_coop_64', 'ops/matmul_coop.slang', [
+        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(64,)),
+    ]),
+]

@@ -4,7 +4,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 
 namespace {
@@ -93,7 +92,7 @@ at::Tensor unary_op_vulkan(
     uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), vecSize);
 
     uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_unaryop(dst.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::UNARY, dst.scalar_type()};
     uint32_t op = static_cast<uint32_t>(operation);
 
     SpecializationBuilder spd{};
@@ -139,7 +138,7 @@ at::Tensor unary_op_vulkan(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {src_in},

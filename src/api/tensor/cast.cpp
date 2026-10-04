@@ -2,7 +2,6 @@
 #include <algorithm>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
@@ -23,7 +22,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_cast(src.scalar_type(), dst.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::CAST, src.scalar_type(), dst.scalar_type()};
     uint32_t vecSize = std::min(get_dtype_vec_size(src.scalar_type()), get_dtype_vec_size(dst.scalar_type()));
     uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), vecSize);
     uint32_t isBoolCast = (dst.scalar_type() == at::kBool) ? 1 : 0;
@@ -79,7 +78,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {src},

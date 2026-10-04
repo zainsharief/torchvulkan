@@ -5,7 +5,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 
 namespace {
@@ -18,25 +17,27 @@ at::Tensor cumscan(
     c10::optional<at::ScalarType> dtype,
     ScanOp op)
 {
-    c10::ScalarType compute = reduce_compute_dtype(self, dtype);
+    c10::ScalarType out_dtype = reduce_compute_dtype(self, dtype);
+    c10::ScalarType compute = reduce_accumulate_dtype(out_dtype);
+
     at::Tensor x = self.to(compute);
-    if (x.dim() == 0 || x.numel() == 0) return x.clone();
+    if (x.dim() == 0 || x.numel() == 0) return x.clone().to(out_dtype);
 
     int64_t d = c10::maybe_wrap_dim(dim, x.dim());
     if (!is_dtype_supported(compute) || x.dim() > MAX_DIMS) {
-        at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), dim) : at::cumprod(x.cpu(), dim);
-        return cpu.to(self.device());
+        at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), d) : at::cumprod(x.cpu(), d);
+        return cpu.to(out_dtype).to(self.device());
     }
 
     int64_t ndim = x.dim();
     int64_t scan_size = x.size(d);
     int64_t num_lines = scan_size > 0 ? x.numel() / scan_size : 0;
     at::Tensor out = at::empty(x.sizes(), x.options());
-    if (num_lines == 0) return out;
+    if (num_lines == 0) return out.to(out_dtype);
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = std::min<uint32_t>(256u, device->properties.limits.maxComputeWorkGroupInvocations);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan(compute);
+    ShaderKey shader_key{torchvulkan::Kernel::SCAN, compute};
     uint32_t opv = static_cast<uint32_t>(op);
     int32_t ndim32 = static_cast<int32_t>(ndim);
 
@@ -81,7 +82,7 @@ at::Tensor cumscan(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {x},
@@ -89,7 +90,7 @@ at::Tensor cumscan(
         groupX, 1, 1
     );
 
-    return out;
+    return out.to(out_dtype);
 }
 
 at::Tensor& cumsum_out_vulkan(
@@ -143,7 +144,7 @@ void cumscanarg(
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = std::min<uint32_t>(256u, device->properties.limits.maxComputeWorkGroupInvocations);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan_arg(self.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::SCAN_ARG, self.scalar_type()};
     uint32_t opv = static_cast<uint32_t>(op);
     int32_t ndim32 = static_cast<int32_t>(ndim);
 
@@ -189,7 +190,7 @@ void cumscanarg(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {self},

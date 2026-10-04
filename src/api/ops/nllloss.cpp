@@ -3,7 +3,6 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
-#include "shaders/shader_registry.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
@@ -27,7 +26,7 @@ void dispatch_nllloss_shader(
 {
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(in.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_nllloss(in.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::NLLLOSS, in.scalar_type()};
 
     SpecializationBuilder spd{};
     spd.push(static_cast<uint32_t>(mode))
@@ -46,7 +45,7 @@ void dispatch_nllloss_shader(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {in, target},

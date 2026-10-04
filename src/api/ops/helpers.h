@@ -32,7 +32,7 @@ inline bool is_dtype_supported(at::ScalarType dtype)
         case at::kUInt32: return device->support_int32;
         
         case at::kHalf: return device->support_float16;
-        case at::kBFloat16: return false; // we cannot support it yet
+        case at::kBFloat16: return device->support_bfloat16;
         case at::kShort: return device->support_int16;
         case at::kUInt16: return device->support_int16;
         
@@ -105,4 +105,10 @@ inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optiona
         return at::kLong;
     }
     return self.scalar_type();
+}
+
+// the dtype a reduction accumulates in is not always the dtype it returns
+inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
+{
+    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
 }

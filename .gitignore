@@ -1,6 +1,7 @@
 # torchvulkan
 torchvulkan/_version.py
 src/shaders/shader_registry.h
+src/shaders/shader_kernels.h
 
 # testing data
 data/

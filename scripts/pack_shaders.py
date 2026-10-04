@@ -1,214 +1,110 @@
 """
-When distributing the shaders, we have two options, either include the raw .spv files
-and load them at runtime, or convert them to C++ arrays and compile them into the binary.
+Embeds the compiled shaders in the binary: for each variant listed by
+scripts/build_shaders.py, writes its SPIR-V as a uint32_t array plus one index
+row per dtype it serves.
 
-The latter is more efficient for loading and ensures the shaders are always present, but requires
-an extra build step to convert the .spv files into a C++ header. This script implements that build step.
+Output (src/shaders/shader_registry.h), included only by src/vulkan/shader.cpp:
 
-The process is as follows:
-1. Compile the .comp shader sources into .spv binaries 
-2. Run this script to read the .spv files, extract metadata, and generate a registry header with the 
-   binary data and lookup functions.
-3. Include the shader_lookup.h generated with scripts/build_shaders.py to get the shader binaries at 
-   runtime.
+    inline constexpr uint32_t spv_binary_f32[] = { 0x07230203, ... };
+
+    inline constexpr ShaderBinary SHADER_BINARIES[] = {
+        { "binary_f32", spv_binary_f32, sizeof(spv_binary_f32) },
+    };
+
+    inline constexpr ShaderIndexEntry SHADER_INDEX[] = {
+        { Kernel::BINARY, c10::ScalarType::Float, c10::ScalarType::Undefined, 0 },
+    };
 """
 
-import os
-import struct
-import glob
 import argparse
-from pathlib import Path
-import subprocess
+import itertools
 import json
-
-def parse_spv_file(filepath: str) -> tuple[int, int]:
-    """
-    Extracts num_bindings and push_constant_size from a .spv file.
-    
-    Inputs:
-    - filepath: Path to the .spv file to analyze.
-
-    Outputs:
-    - num_bindings: Total number of resource bindings used by the shader.
-    - push_constant_size: Total size in bytes of the push constant block used by the shader
-    """
-    
-    result = subprocess.run(
-        ["spirv-cross", filepath, "--reflect"], 
-        capture_output=True, text=True, check=True
-    )
-    
-    reflection = json.loads(result.stdout)
-    
-    num_bindings = 0
-    resource_categories = ["ssbos", "ubos", "sampled_images", "storage_images", "separate_images"]
-    for category in resource_categories:
-        num_bindings += len(reflection.get(category, []))
-        
-    push_constants = reflection.get("push_constants", [])
-    pc_info = push_constants[0]
-    pc_type_id = pc_info["type"]
-
-    types = reflection.get("types", {})
-    members = types[pc_type_id].get("members", [])
-
-    last_member = max(members, key=lambda m: m["offset"])
-    offset = last_member["offset"]
-
-    last_member_size = 4
-    if "array" in last_member and "array_stride" in last_member:
-        array_length = last_member["array"][0]
-        array_stride = last_member["array_stride"]
-        last_member_size = array_length * array_stride
-
-    pc_size = offset + last_member_size
-        
-    return num_bindings, pc_size
+import struct
+from pathlib import Path
 
 
-def try_parse_spv_file(filepath: str) -> tuple[int, int]:
-    """
-    Attempts to extract num_bindings and push_constant_size from a .spv file.
-    If spirv-cross fails, uses hardcoded values
-    
-    Inputs:
-    - filepath: Path to the .spv file to analyze.
+def spv_to_c_array(spv_file: Path, array_name: str) -> str:
+    """Reads a .spv binary and formats it as a C++ uint32_t array definition."""
+    binary_data = spv_file.read_bytes()
 
-    Outputs:
-    - num_bindings: Total number of resource bindings used by the shader.
-    - push_constant_size: Total size in bytes of the push constant block used by the shader
-    """
-    
-    try:
-        return parse_spv_file(filepath)
-    except subprocess.CalledProcessError as e:
-
-        if 'matmul_coop' in filepath:
-            return 4, 128
-
-        print(f"Warning: Failed to parse {filepath} with spirv-cross. Defaulting to 0 bindings and 0 push constant size.")
-        return 0, 0
-
-def spv_to_c_array(spv_file: str, array_name: str) -> str:
-    """
-    Reads a .spv binary and converts it to a formatted C++ uint32_t array string.
-    
-    Inputs:
-    - spv_file: Path to the .spv file to convert.
-    - array_name: Desired name of the generated C++ array.
-
-    Output:
-    - A string containing the C++ array definition with the binary data from the .spv
-
-    Example output:
-    `inline constexpr uint32_t spv_example[] = {
-        0x07230203, 0x00010000, 0x0008000a, 0x0000000b, ...
-    };`
-    """
-    
-    with open(spv_file, 'rb') as f:
-        binary_data = f.read()
-    
     # pad to a multiple of 4 bytes
     if len(binary_data) % 4 != 0:
         binary_data += b'\x00' * (4 - (len(binary_data) % 4))
-        
-    words = struct.unpack(f'<{len(binary_data)//4}I', binary_data)
-    
-    line = "    "
-    for word in words:
-        line += f"0x{word:08x}, "
-        
-    return f"inline constexpr uint32_t {array_name}[] = {{\n" + line + "\n};\n"
 
-def generate_shader_registry(enum_entries: list[str], array_definitions: list[str], catalog_entries: list[str]) -> str:
+    words = struct.unpack(f'<{len(binary_data) // 4}I', binary_data)
+    body = ''.join(f'0x{word:08x}, ' for word in words)
+    return f'inline constexpr uint32_t {array_name}[] = {{\n    {body}\n}};\n'
+
+
+def index_rows(variant: dict, binary: int) -> list[str]:
     """
-    Generates the shader registry content based on the provided entries.
-
-    Inputs:
-    - enum_entries: List of strings representing the entries for the ShaderID enum.
-    - array_definitions: List of strings containing the C++ array definitions for the shader binaries
-    - catalog_entries: List of strings representing the entries for the SHADER_CATALOG array, 
-      each entry should be formatted as:
-      `{ ShaderID::ENUM_NAME, array_name, sizeof(array_name), push_constant_size, num_bindings },`
-
-    Output:
-    - A string containing the complete C++ header content for the shader registry, including the
-      enum definition, array definitions, and the shader catalog array.
+    One SHADER_INDEX row per aten dtype combination the variant serves - a u8
+    variant serves both Byte and Bool, and a copy width serves every dtype of
+    that size.
     """
+    kernel = f'Kernel::{variant["kernel"].upper()}'
+    rows = []
 
-    registry_content = []
-    registry_content.append("// --- AUTO-GENERATED BY pack_shaders.py --- //")
-    registry_content.append("// Do not edit manually!\n")
-    registry_content.append("#pragma once")
-    registry_content.append("#include <cstdint>")
-    registry_content.append("#include <cstddef>\n")
-    registry_content.append("namespace torchvulkan {\n")
+    for combo in itertools.product(*variant['aten']):
+        dtype = f'c10::ScalarType::{combo[0]}'
+        dtype2 = f'c10::ScalarType::{combo[1]}' if len(combo) > 1 else 'c10::ScalarType::Undefined'
+        rows.append(f'    {{ {kernel}, {dtype}, {dtype2}, {binary} }}, // {variant["name"]}')
 
-    registry_content.append("enum class ShaderID {")
-    registry_content.extend(enum_entries)
-    registry_content.append("    SHADER_COUNT\n")
-    registry_content.append("};\n")
+    return rows
 
-    registry_content.append("struct Shader {")
-    registry_content.append("    ShaderID shaderId;")
-    registry_content.append("    const uint32_t* binaryCode;")
-    registry_content.append("    size_t binarySize;")
-    registry_content.append("    uint32_t pushConstantSize;")
-    registry_content.append("    uint32_t numBindings;\n")
-    registry_content.append("};\n")  
-
-    registry_content.extend(array_definitions)
-
-    registry_content.append("inline constexpr Shader SHADER_CATALOG[] = {")
-    registry_content.extend(catalog_entries)
-    registry_content.append("};\n")
-
-    registry_content.append("inline Shader getShader(ShaderID id) {")
-    registry_content.append('    return SHADER_CATALOG[static_cast<uint32_t>(id)];')
-    registry_content.append("};\n")
-
-    registry_content.append("} // namespace torchvulkan\n")
-    
-    return "\n".join(registry_content)
 
 def main(args):
-    
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    spv_files = glob.glob(os.path.join(args.build, "*.spv"))
-    
-    if not spv_files:
-        print(f"Warning: No .spv files found in {args.build}. Creating empty registry.")
+    variants = json.loads(args.variants.read_text())
 
-    enum_entries = []
-    array_definitions = []
-    catalog_entries = []
-    
-    for spv_path in sorted(spv_files):
-        filename = os.path.basename(spv_path)
-        base_name = os.path.splitext(filename)[0]
-        enum_name = base_name.upper()
-        array_name = f"spv_{base_name}"
+    arrays = []
+    binaries = []
+    index = []
 
-        enum_entries.append(f"    {enum_name},")
-        array_definitions.append(spv_to_c_array(spv_path, array_name))
+    for binary, variant in enumerate(variants):
+        array_name = f'spv_{variant["name"]}'
+        arrays.append(spv_to_c_array(args.build / f'{variant["name"]}.spv', array_name))
+        binaries.append(f'    {{ "{variant["name"]}", {array_name}, sizeof({array_name}) }},')
+        index.extend(index_rows(variant, binary))
 
-        num_bindings, pc_size = try_parse_spv_file(spv_path)
-        catalog_entries.append(f"    {{ ShaderID::{enum_name}, {array_name}, sizeof({array_name}), {pc_size}, {num_bindings} }}, // {enum_name}")
-        
-    header_content = generate_shader_registry(enum_entries, array_definitions, catalog_entries)
-    lookup_content = args.lookup.read_text()
-    
-    with open(args.out, 'w') as f:
-        f.write(header_content)
-        f.write(lookup_content)
+    header = [
+        '// --- AUTO-GENERATED BY scripts/pack_shaders.py --- //',
+        '// Do not edit manually!\n',
+        '#pragma once',
+        '#include <c10/core/ScalarType.h>',
+        '#include <cstddef>',
+        '#include <cstdint>',
+        '#include "shader_kernels.h"\n',
+        'namespace torchvulkan {\n',
+    ]
+    header.extend(arrays)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pack compiled Vulkan shaders into a C++ header.")
-    parser.add_argument("--src", type=Path, default=Path("src/shaders"), help="Directory containing .comp source files")
-    parser.add_argument("--build", type=Path, default=Path("build/shaders"), help="Directory containing compiled .spv files")
-    parser.add_argument("--lookup", type=Path, default=Path("build/shaders/shader_lookup.h"), help="Lookup header file generated by build_shaders.py")
-    parser.add_argument("--out", type=Path, default=Path("src/shaders/shader_registry.h"), help="Output header file path")
-    args = parser.parse_args()
+    header.append('struct ShaderBinary {')
+    header.append('    const char* name;')
+    header.append('    const uint32_t* code;')
+    header.append('    size_t size;')
+    header.append('};\n')
+    header.append('inline constexpr ShaderBinary SHADER_BINARIES[] = {')
+    header.extend(binaries)
+    header.append('};\n')
 
-    main(args)
+    header.append('struct ShaderIndexEntry {')
+    header.append('    Kernel kernel;')
+    header.append('    c10::ScalarType dtype;')
+    header.append('    c10::ScalarType dtype2;')
+    header.append('    uint32_t binary;')
+    header.append('};\n')
+    header.append('inline constexpr ShaderIndexEntry SHADER_INDEX[] = {')
+    header.extend(index)
+    header.append('};\n')
+
+    header.append('} // namespace torchvulkan\n')
+    args.out.write_text('\n'.join(header))
+    print(f'Packed {len(variants)} shaders into {args.out}')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Pack compiled Vulkan shaders into a C++ header.')
+    parser.add_argument('--build', type=Path, default=Path('build/shaders'), help='Directory containing compiled .spv files')
+    parser.add_argument('--variants', type=Path, default=Path('build/shaders/variants.json'), help='Variant list written by build_shaders.py')
+    parser.add_argument('--out', type=Path, default=Path('src/shaders/shader_registry.h'), help='Output header file path')
+    main(parser.parse_args())
