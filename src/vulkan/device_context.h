@@ -31,6 +31,7 @@ struct DeviceContext {
     bool support_int8 = false;
 
     bool support_coopmat = false;
+    bool support_bfloat16_coopmat = false;
     bool support_subgroup_control = false;
     bool support_subgroup_extended_types = false;
     bool support_subgroup_arithmetic = false;

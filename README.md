@@ -60,9 +60,8 @@ Prebuilt wheels are published for Linux (x86_64), macOS (Apple Silicon), and Win
 | Requirement | Notes |
 | --- | --- |
 | A Vulkan driver / loader | Your GPU's Vulkan driver, or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html). On macOS this is [MoltenVK](https://github.com/KhronosGroup/MoltenVK). |
-| [Vulkan SDK](https://vulkan.lunarg.com/) | Provides Vulkan headers and `spirv-cross`. |
+| [Vulkan SDK](https://vulkan.lunarg.com/) | Provides the Vulkan headers. |
 | [`slangc`](https://github.com/shader-slang/slang/releases) | The Slang shader compiler, on your `PATH`. |
-| `spirv-cross` | Ships with the Vulkan SDK (or your package manager). |
 | CMake ≥ 3.18 + a C++20 compiler | Ninja is recommended (`SKBUILD_CMAKE_GENERATOR=Ninja`). |
 | `torch==2.13.0` | Install before building; the extension is compiled against this exact version. |
 
@@ -171,7 +170,8 @@ TORCHVULKAN_STRICT=1 python your_script.py
 
 ## Limitations
 
-- `bfloat16` and complex dtypes not natively supported; falls back to the CPU.
+- `bfloat16` runs on the GPU only on devices with `VK_KHR_shader_bfloat16`; elsewhere (including MoltenVK) it falls back to the CPU.
+- Complex dtypes are not supported; they fall back to the CPU.
 - `torch>=2.10.0` only. The extension is compiled against 2.13.0 but has testing support for >=2.10.0.
 - APIs and coverage may change before `1.0.0`.
 

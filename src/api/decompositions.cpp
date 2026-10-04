@@ -278,8 +278,8 @@ at::Tensor& nan_to_num_out_vulkan(const at::Tensor& self, c10::optional<double> 
     if (!self.is_floating_point()) { out.copy_(self); return out; }
     double type_max, type_min;
     switch (self.scalar_type()) {
-        case at::kHalf: type_max = 65504.0; break;
-        case at::kBFloat16: type_max = 3.38953139e38; break;
+        case at::kHalf: type_max = static_cast<double>(std::numeric_limits<c10::Half>::max()); break;
+        case at::kBFloat16: type_max = static_cast<double>(std::numeric_limits<c10::BFloat16>::max()); break;
         case at::kFloat: type_max = std::numeric_limits<float>::max(); break;
         default: type_max = std::numeric_limits<double>::max(); break;
     }
