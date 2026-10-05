@@ -1,6 +1,11 @@
 #define VOLK_IMPLEMENTATION
 #include "vulkan_context.h"
 
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include <filesystem>
+#endif
+
 // VK_KHR_shader_bfloat16 is newer than some Vulkan SDKs still in use (1.4.309 lacks
 // it). These are its definitions from vulkan_core.h, so whether bfloat16 runs on
 // the GPU depends on the device, not on which headers the build happened to find.
@@ -18,6 +23,34 @@ typedef struct VkPhysicalDeviceShaderBfloat16FeaturesKHR {
 
 thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
 
+static bool isEnvSet(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static VkResult loadVulkan()
+{
+#ifdef __APPLE__
+    Dl_info info{};
+    if (!isEnvSet("TORCHVULKAN_SYSTEM_VULKAN") && dladdr(reinterpret_cast<const void*>(&loadVulkan), &info) && info.dli_fname != nullptr) 
+    {
+        auto bundled = std::filesystem::path(info.dli_fname).parent_path() / "libMoltenVK.dylib";
+        if (std::filesystem::exists(bundled)) {
+            void* module = dlopen(bundled.c_str(), RTLD_NOW | RTLD_LOCAL);
+            auto getInstanceProcAddr = module ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(module, "vkGetInstanceProcAddr")) : nullptr;
+            if (getInstanceProcAddr != nullptr) {
+                volkInitializeCustom(getInstanceProcAddr);
+                return VK_SUCCESS;
+            }
+            const char* error = dlerror();
+            TORCH_WARN("torchvulkan: failed to load the bundled MoltenVK (", error ? error : "vkGetInstanceProcAddr not found", "); falling back to the system Vulkan loader.");
+        }
+    }
+#endif
+    return volkInitialize();
+}
+
 VulkanContext& VulkanContext::Instance() 
 {
     static VulkanContext* vulkanContextInstance = new VulkanContext();
@@ -34,27 +67,18 @@ VulkanContext::VulkanContext()
     validateDevices();
 }
 
-void VulkanContext::queryVulkanVersion() 
-{
-    if (vkEnumerateInstanceVersion == nullptr) {
-        apiVersion = VK_API_VERSION_1_0;
-    } else {
-        vkEnumerateInstanceVersion(&apiVersion);
-    }
-
-    major = VK_API_VERSION_MAJOR(apiVersion);
-    minor = VK_API_VERSION_MINOR(apiVersion);
-    patch = VK_API_VERSION_PATCH(apiVersion);
-}
-
 void VulkanContext::initVulkan()
 {
-    VkResult result = volkInitialize(); 
+    VkResult result = loadVulkan();
     if (result != VK_SUCCESS) {
         TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to initialize volk with error code ", std::to_string(result), ". Vulkan loader cannot be found.");
     }
 
-    queryVulkanVersion();
+    uint32_t instanceVersion = VK_API_VERSION_1_0;
+    if (vkEnumerateInstanceVersion != nullptr) vkEnumerateInstanceVersion(&instanceVersion);
+    TORCH_CHECK(instanceVersion >= apiVersion, "torchvulkan [ERROR]: Vulkan 1.3 or newer is required, but the Vulkan loader only supports ",
+        VK_API_VERSION_MAJOR(instanceVersion), ".", VK_API_VERSION_MINOR(instanceVersion), "."
+    );
 
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -62,7 +86,7 @@ void VulkanContext::initVulkan()
     appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
     appInfo.pEngineName = "torchvulkan backend";
     appInfo.engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
-    appInfo.apiVersion = apiVersion; // if changed, edit VmaAllocatorCreateInfo below
+    appInfo.apiVersion = apiVersion;
 
     uint32_t extensionCount = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
@@ -85,11 +109,16 @@ void VulkanContext::initVulkan()
         instanceExtensions.push_back("VK_KHR_portability_enumeration");
         createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
-    instanceExtensions.push_back("VK_KHR_get_physical_device_properties2"); 
     #endif
 
     #ifndef NDEBUG
-    instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+    uint32_t layerCount = 0;
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    std::vector<VkLayerProperties> supportedLayers(layerCount);
+    vkEnumerateInstanceLayerProperties(&layerCount, supportedLayers.data());
+    for (const auto& layer : supportedLayers) {
+        if (strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0) instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+    }
     #endif
 
     createInfo.enabledExtensionCount = static_cast<uint32_t>(instanceExtensions.size());
@@ -105,12 +134,8 @@ void VulkanContext::initVulkan()
 
     volkLoadInstance(instance);
 
-    auto validateEnv = [&](const char* name) {
-        return name != nullptr && name[0] != '\0' && name[0] != '0';
-    };
-
-    isStrict_ = validateEnv(std::getenv("TORCHVULKAN_STRICT"));
-    enableProfiling_ = validateEnv(std::getenv("TORCHVULKAN_PROFILE"));
+    isStrict_ = isEnvSet("TORCHVULKAN_STRICT");
+    enableProfiling_ = isEnvSet("TORCHVULKAN_PROFILE");
 }
 
 void VulkanContext::createDeviceContexts()
@@ -123,11 +148,17 @@ void VulkanContext::createDeviceContexts()
 
     for (const VkPhysicalDevice& physicalDevice : physicalDevices) 
     {                
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        if (props.apiVersion < apiVersion) {
+            TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", props.deviceName, "' only supports Vulkan ", VK_API_VERSION_MAJOR(props.apiVersion), ".",
+                VK_API_VERSION_MINOR(props.apiVersion), " (1.3 or newer is required) and will be skipped.");
+            continue;
+        }
+
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
         if (queueFamilyCount == 0) {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(physicalDevice, &props);
             TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", props.deviceName, "' does not have any queue families and will be skipped.");
             continue;
         }
@@ -145,8 +176,6 @@ void VulkanContext::createDeviceContexts()
         }
         // make sure there exists a compute core
         if (bestQueueFamily == -1) {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(physicalDevice, &props);
             TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", props.deviceName, "' does not have a compute queue family and will be skipped.");
             continue;
         }
@@ -208,13 +237,13 @@ void VulkanContext::createDeviceWithExtensions()
         };
         
         // chain of feature structs to query what the device supports
-        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT supportedSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
-        supportedSubgroupControl.pNext = &supportedPipelineExec;
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR supportedCoopMat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
-        supportedCoopMat.pNext = &supportedSubgroupControl;
+        supportedCoopMat.pNext = &supportedPipelineExec;
+        VkPhysicalDeviceVulkan13Features supported13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        supported13.pNext = &supportedCoopMat;
         VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        supported12.pNext = &supportedCoopMat;
+        supported12.pNext = &supported13;
         VkPhysicalDeviceVulkan11Features supported11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
         supported11.pNext = &supported12;
         VkPhysicalDeviceFeatures2 supportedFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -230,7 +259,13 @@ void VulkanContext::createDeviceWithExtensions()
         vkGetPhysicalDeviceFeatures2(device->physicalDevice, &supportedFeatures2);
 
         // chain of feature structs to enable the features we want (only the ones supported by the device)
+        // synchronization2 lets the dispatcher scope its barriers to the stages and accesses it actually uses
+        VkPhysicalDeviceVulkan13Features enable13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        enable13.synchronization2 = VK_TRUE;
+        enable13.subgroupSizeControl = supported13.subgroupSizeControl;
+        enable13.computeFullSubgroups = supported13.computeFullSubgroups;
         VkPhysicalDeviceVulkan12Features enable12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        enable12.pNext = &enable13;
         enable12.shaderFloat16 = supported12.shaderFloat16;
         enable12.shaderInt8 = supported12.shaderInt8;
         enable12.storageBuffer8BitAccess = supported12.storageBuffer8BitAccess;
@@ -255,17 +290,11 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
         device->support_subgroup_extended_types = supported12.shaderSubgroupExtendedTypes;
+        device->support_subgroup_control = supported13.subgroupSizeControl;
 
         VkPhysicalDeviceShaderBfloat16FeaturesKHR enableBfloat16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR};
-        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enablePipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
-
-        // synchronization2 lets the dispatcher scope its barriers to the stages and accesses it actually uses
-        VkPhysicalDeviceSynchronization2FeaturesKHR enableSync2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
-        enableSync2.synchronization2 = VK_TRUE;
-        enableSync2.pNext = enable12.pNext;
-        enable12.pNext = &enableSync2;
 
         if (supportedBfloat16.shaderBFloat16Type && enable11.storageBuffer16BitAccess)
         {
@@ -280,16 +309,6 @@ void VulkanContext::createDeviceWithExtensions()
             enableBfloat16.pNext = enable12.pNext;
             enable12.pNext = &enableBfloat16;
             deviceExtensions.push_back(VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME);
-        }
-
-        if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl)
-        {
-            device->support_subgroup_control = true;
-            enableSubgroupControl.subgroupSizeControl = VK_TRUE;
-            enableSubgroupControl.computeFullSubgroups = supportedSubgroupControl.computeFullSubgroups;
-            enableSubgroupControl.pNext = enable12.pNext;
-            enable12.pNext = &enableSubgroupControl;
-            deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
         }
 
         if (hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix)
@@ -344,9 +363,14 @@ void VulkanContext::createDeviceWithExtensions()
         features2.features = enable10;
         features2.pNext = &enable11;
 
+        // without memory budget, VMA estimates the budget as 80% of the heap size
+        if (hasExt(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME))
+        {
+            device->support_memory_budget = true;
+            deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        }
+
         deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
 
         #ifdef __APPLE__
         if (hasExt("VK_KHR_portability_subset")) {
@@ -395,8 +419,8 @@ void VulkanContext::createDeviceAllocator()
         allocatorInfo.device = device->device;
         allocatorInfo.instance = instance;
         allocatorInfo.vulkanApiVersion = apiVersion;
-        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
-        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        if (device->support_memory_budget) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 
         VmaVulkanFunctions vmaFunctions = {};
         vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

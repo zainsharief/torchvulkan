@@ -9,7 +9,7 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = ["torch>=2.10.0"]
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "licenses/MoltenVK-LICENSE"]
 authors = [{ name = "Zain Sharief"}]
 
 [project.urls]
@@ -46,7 +46,8 @@ environment = { PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu", VU
 repair-wheel-command = "auditwheel repair --exclude libtorch.so --exclude libtorch_cpu.so --exclude libtorch_python.so --exclude libtorch_global_deps.so --exclude libc10.so -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
-environment = { PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu", MACOSX_DEPLOYMENT_TARGET = "14.0" }
+before-all = "bash .github/scripts/fetch-moltenvk-macos.sh"
+environment = { PIP_EXTRA_INDEX_URL = "https://download.pytorch.org/whl/cpu", MACOSX_DEPLOYMENT_TARGET = "14.0", SKBUILD_CMAKE_DEFINE = "TORCHVULKAN_MOLTENVK=/tmp/moltenvk/libMoltenVK.dylib" }
 repair-wheel-command = ""
 
 [tool.cibuildwheel.windows]

@@ -62,7 +62,7 @@ jobs:
           python -m pip install --upgrade setuptools_scm
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TORCHVULKAN=$(python -m setuptools_scm)" >> "$GITHUB_ENV"
 
-      - name: Install toolchain (Slang, Vulkan, spirv-cross)
+      - name: Install toolchain (Slang, Vulkan)
         if: runner.os != 'Linux'
         uses: ./.github/actions/setup-toolchain
 

@@ -45,7 +45,7 @@ print(z.sum().item())   # move a scalar back to the CPU
 pip install torchvulkan
 ```
 
-At runtime you need a **Vulkan driver**: your GPU's driver on Linux and Windows (or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)), or [MoltenVK](https://github.com/KhronosGroup/MoltenVK) on macOS. Verify it worked:
+At runtime you need a **Vulkan 1.3 (or newer) driver**: your GPU's driver on Linux and Windows (or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)). On macOS the wheel bundles [MoltenVK](https://github.com/KhronosGroup/MoltenVK), so nothing else is needed; set `TORCHVULKAN_SYSTEM_VULKAN=1` to use the system Vulkan loader instead. Verify it worked:
 
 ```python
 import torchvulkan
@@ -59,7 +59,7 @@ Prebuilt wheels are published for Linux (x86_64), macOS (Apple Silicon), and Win
 
 | Requirement | Notes |
 | --- | --- |
-| A Vulkan driver / loader | Your GPU's Vulkan driver, or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html). On macOS this is [MoltenVK](https://github.com/KhronosGroup/MoltenVK). |
+| A Vulkan driver / loader | Your GPU's Vulkan driver, or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html). On macOS, [MoltenVK](https://github.com/KhronosGroup/MoltenVK) (e.g. `brew install molten-vk`) is found at build time and bundled into the package; pass `-DTORCHVULKAN_MOLTENVK=/path/to/libMoltenVK.dylib` to bundle a specific build. |
 | [Vulkan SDK](https://vulkan.lunarg.com/) | Provides the Vulkan headers. |
 | [`slangc`](https://github.com/shader-slang/slang/releases) | The Slang shader compiler, on your `PATH`. |
 | CMake ≥ 3.18 + a C++20 compiler | Ninja is recommended (`SKBUILD_CMAKE_GENERATOR=Ninja`). |

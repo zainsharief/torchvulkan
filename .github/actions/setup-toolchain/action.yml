@@ -1,7 +1,8 @@
 name: Setup torchvulkan toolchain
 description: >
   Install the build/runtime toolchain for the current runner OS: the Slang
-  compiler, a Vulkan driver + SDK headers, and spirv-cross. Exports the needed
+  compiler, the Vulkan headers + loader, and a Vulkan driver (on macOS, the
+  MoltenVK release that gets bundled into the package). Exports the needed
   PATH / env entries so later steps in the job can build and run torchvulkan.
 
 inputs:
@@ -49,25 +50,17 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
-        sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-$(lsb_release -cs).list http://packages.lunarg.com/vulkan/lunarg-vulkan-$(lsb_release -cs).list
         sudo apt-get update
-        sudo apt-get install -y vulkan-sdk mesa-vulkan-drivers
-        vulkaninfo --summary
+        sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers
 
     - name: Install Vulkan (macOS)
       if: runner.os == 'macOS'
       shell: bash
       run: |
-        brew install molten-vk vulkan-tools ninja libxshmfence spirv-cross
-        MVK_ICD=$(find $(brew --prefix)/share $(brew --prefix)/etc $(brew --prefix molten-vk) -name "MoltenVK_icd.json" 2>/dev/null | head -n 1)
-        echo "VK_ICD_FILENAMES=$MVK_ICD" >> "$GITHUB_ENV"
+        brew install vulkan-headers vulkan-loader ninja
+        bash .github/scripts/fetch-moltenvk-macos.sh
+        echo "SKBUILD_CMAKE_DEFINE=TORCHVULKAN_MOLTENVK=/tmp/moltenvk/libMoltenVK.dylib" >> "$GITHUB_ENV"
         echo "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0" >> "$GITHUB_ENV"
-        echo "DYLD_LIBRARY_PATH=$(brew --prefix)/lib:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
-        export VK_ICD_FILENAMES="$MVK_ICD"
-        export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
-        export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:$DYLD_LIBRARY_PATH"
-        vulkaninfo --summary
 
     - name: Install Vulkan (Windows)
       if: runner.os == 'Windows'
