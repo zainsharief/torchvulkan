@@ -1,6 +1,11 @@
 #define VOLK_IMPLEMENTATION
 #include "vulkan_context.h"
 
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include <filesystem>
+#endif
+
 // VK_KHR_shader_bfloat16 is newer than some Vulkan SDKs still in use (1.4.309 lacks
 // it). These are its definitions from vulkan_core.h, so whether bfloat16 runs on
 // the GPU depends on the device, not on which headers the build happened to find.
@@ -17,6 +22,34 @@ typedef struct VkPhysicalDeviceShaderBfloat16FeaturesKHR {
 #endif
 
 thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
+
+static bool isEnvSet(const char* name)
+{
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static VkResult loadVulkan()
+{
+#ifdef __APPLE__
+    Dl_info info{};
+    if (!isEnvSet("TORCHVULKAN_SYSTEM_VULKAN") && dladdr(reinterpret_cast<const void*>(&loadVulkan), &info) && info.dli_fname != nullptr) 
+    {
+        auto bundled = std::filesystem::path(info.dli_fname).parent_path() / "libMoltenVK.dylib";
+        if (std::filesystem::exists(bundled)) {
+            void* module = dlopen(bundled.c_str(), RTLD_NOW | RTLD_LOCAL);
+            auto getInstanceProcAddr = module ? reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(module, "vkGetInstanceProcAddr")) : nullptr;
+            if (getInstanceProcAddr != nullptr) {
+                volkInitializeCustom(getInstanceProcAddr);
+                return VK_SUCCESS;
+            }
+            const char* error = dlerror();
+            TORCH_WARN("torchvulkan: failed to load the bundled MoltenVK (", error ? error : "vkGetInstanceProcAddr not found", "); falling back to the system Vulkan loader.");
+        }
+    }
+#endif
+    return volkInitialize();
+}
 
 VulkanContext& VulkanContext::Instance() 
 {
@@ -49,7 +82,7 @@ void VulkanContext::queryVulkanVersion()
 
 void VulkanContext::initVulkan()
 {
-    VkResult result = volkInitialize(); 
+    VkResult result = loadVulkan();
     if (result != VK_SUCCESS) {
         TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to initialize volk with error code ", std::to_string(result), ". Vulkan loader cannot be found.");
     }
@@ -89,7 +122,13 @@ void VulkanContext::initVulkan()
     #endif
 
     #ifndef NDEBUG
-    instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+    uint32_t layerCount = 0;
+    vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+    std::vector<VkLayerProperties> supportedLayers(layerCount);
+    vkEnumerateInstanceLayerProperties(&layerCount, supportedLayers.data());
+    for (const auto& layer : supportedLayers) {
+        if (strcmp(layer.layerName, "VK_LAYER_KHRONOS_validation") == 0) instanceLayers.push_back("VK_LAYER_KHRONOS_validation");
+    }
     #endif
 
     createInfo.enabledExtensionCount = static_cast<uint32_t>(instanceExtensions.size());
@@ -105,12 +144,8 @@ void VulkanContext::initVulkan()
 
     volkLoadInstance(instance);
 
-    auto validateEnv = [&](const char* name) {
-        return name != nullptr && name[0] != '\0' && name[0] != '0';
-    };
-
-    isStrict_ = validateEnv(std::getenv("TORCHVULKAN_STRICT"));
-    enableProfiling_ = validateEnv(std::getenv("TORCHVULKAN_PROFILE"));
+    isStrict_ = isEnvSet("TORCHVULKAN_STRICT");
+    enableProfiling_ = isEnvSet("TORCHVULKAN_PROFILE");
 }
 
 void VulkanContext::createDeviceContexts()

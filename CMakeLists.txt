@@ -25,3 +25,14 @@ target_compile_definitions(torchvulkan_lib PRIVATE VK_NO_PROTOTYPES TORCH_EXTENS
 target_compile_features(torchvulkan_lib PRIVATE cxx_std_20)
 
 install(TARGETS torchvulkan_lib DESTINATION torchvulkan)
+
+if(APPLE)
+    find_library(TORCHVULKAN_MOLTENVK NAMES libMoltenVK.dylib)
+    if(TORCHVULKAN_MOLTENVK)
+        get_filename_component(TORCHVULKAN_MOLTENVK_REAL "${TORCHVULKAN_MOLTENVK}" REALPATH)
+        message(STATUS "Bundling MoltenVK: ${TORCHVULKAN_MOLTENVK_REAL}")
+        install(FILES "${TORCHVULKAN_MOLTENVK_REAL}" DESTINATION torchvulkan RENAME libMoltenVK.dylib)
+    else()
+        message(WARNING "libMoltenVK.dylib not found; torchvulkan will need a system Vulkan loader at runtime.")
+    endif()
+endif()

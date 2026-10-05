@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the torchvulkan build toolchain inside the cibuildwheel manylinux
-# container (AlmaLinux 8 / manylinux_2_28): the Vulkan SDK (headers + loader +
-# the spirv-cross executable) and the Slang compiler (slangc).
+# container (AlmaLinux 8 / manylinux_2_28): the Vulkan SDK (headers + loader)
+# and the Slang compiler (slangc).
 #
 # The install paths here MUST match the VULKAN_SDK / SLANG_DIR / PATH entries in
 # [tool.cibuildwheel.linux].environment in pyproject.toml.
@@ -23,5 +23,4 @@ mkdir -p /opt/slang
 unzip -q /tmp/slang.zip -d /opt/slang
 
 test -f /opt/vulkan/x86_64/include/vulkan/vulkan.h
-test -x /opt/vulkan/x86_64/bin/spirv-cross
 test -x /opt/slang/bin/slangc

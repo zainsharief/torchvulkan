@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install toolchain (Slang, Vulkan, spirv-cross)
+      - name: Install toolchain (Slang, Vulkan)
         uses: ./.github/actions/setup-toolchain
 
       - name: Install Tox
