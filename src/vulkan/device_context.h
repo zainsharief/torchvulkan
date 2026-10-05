@@ -36,6 +36,7 @@ struct DeviceContext {
     bool support_subgroup_extended_types = false;
     bool support_subgroup_arithmetic = false;
     bool support_pipeline_statistics = false;
+    bool support_memory_budget = false;
     uint32_t subgroup_size = 0;
 
     void flush();

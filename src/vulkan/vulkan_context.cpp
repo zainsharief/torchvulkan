@@ -363,8 +363,14 @@ void VulkanContext::createDeviceWithExtensions()
         features2.features = enable10;
         features2.pNext = &enable11;
 
+        // without memory budget, VMA estimates the budget as 80% of the heap size
+        if (hasExt(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME))
+        {
+            device->support_memory_budget = true;
+            deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        }
+
         deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-        deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
         #ifdef __APPLE__
         if (hasExt("VK_KHR_portability_subset")) {
@@ -413,8 +419,8 @@ void VulkanContext::createDeviceAllocator()
         allocatorInfo.device = device->device;
         allocatorInfo.instance = instance;
         allocatorInfo.vulkanApiVersion = apiVersion;
-        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
-        allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        if (device->support_memory_budget) allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 
         VmaVulkanFunctions vmaFunctions = {};
         vmaFunctions.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
