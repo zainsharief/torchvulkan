@@ -45,7 +45,7 @@ FLOATS = BUILTIN_FLOATS + [BF16]
 DTYPES = INTEGERS + FLOATS
 
 BYTE_WIDTHS = [
-    DType('16', 'Raw16',    16, ('ComplexDouble',)),
+    DType('16', 'uint4',    16, ('ComplexDouble',)),
     DType('8',  'uint64_t', 8,  ('UInt64',)),
     DType('4',  'uint32_t', 4,  ('UInt32',)),
     DType('2',  'uint16_t', 2,  ('UInt16',)),

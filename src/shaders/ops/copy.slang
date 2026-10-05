@@ -2,14 +2,6 @@ module copy;
 
 import core.indexing;
 
-public struct Raw16
-{
-    public uint x;
-    public uint y;
-    public uint z;
-    public uint w;
-}
-
 [[vk::constant_id(0)]] public const uint NDIM = 0;
 [[vk::constant_id(1)]] public const uint WG_x = 0;
 
