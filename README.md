@@ -45,7 +45,7 @@ print(z.sum().item())   # move a scalar back to the CPU
 pip install torchvulkan
 ```
 
-At runtime you need a **Vulkan driver**: your GPU's driver on Linux and Windows (or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)). On macOS the wheel bundles [MoltenVK](https://github.com/KhronosGroup/MoltenVK), so nothing else is needed; set `TORCHVULKAN_SYSTEM_VULKAN=1` to use the system Vulkan loader instead. Verify it worked:
+At runtime you need a **Vulkan 1.3 (or newer) driver**: your GPU's driver on Linux and Windows (or a software rasterizer such as Mesa [lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)). On macOS the wheel bundles [MoltenVK](https://github.com/KhronosGroup/MoltenVK), so nothing else is needed; set `TORCHVULKAN_SYSTEM_VULKAN=1` to use the system Vulkan loader instead. Verify it worked:
 
 ```python
 import torchvulkan

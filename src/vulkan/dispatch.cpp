@@ -50,7 +50,7 @@ void DAGDispatcher::recordBarrier(VkCommandBuffer cmd)
     dep.memoryBarrierCount = 1;
     dep.pMemoryBarriers    = &barrier;
 
-    device->device_table.vkCmdPipelineBarrier2KHR(cmd, &dep);
+    device->device_table.vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 void DAGDispatcher::dispatch(const std::vector<OpInfo*> operations)

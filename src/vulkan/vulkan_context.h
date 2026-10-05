@@ -35,8 +35,8 @@ private:
     void createDeviceCommandPools();
     void validateDevices();
 
-    void queryVulkanVersion();
-    uint32_t apiVersion, major, minor, patch;
+    // minimum Vulkan version
+    static constexpr uint32_t apiVersion = VK_API_VERSION_1_3;
     bool isStrict_ = true;
     bool enableProfiling_ = false;
 
