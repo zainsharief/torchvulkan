@@ -1,7 +1,24 @@
 #include <torch/extension.h>
 #include <ATen/ExpandUtils.h>
 #include <limits>
-#include "api/ops/compare.h"
+#include "vulkan/memory.h"
+#include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
+#include "api/ops/helpers.h"
+
+namespace {
+
+enum class CompareOp {
+    EQ = 0,
+    NE = 1,
+    LT = 2,
+    LE = 3,
+    GT = 4,
+    GE = 5,
+    LAND = 6,
+    LOR = 7,
+    LXOR = 8
+};
 
 at::Tensor cpu_compare(const at::Tensor& a, const at::Tensor& b, CompareOp op) 
 {
@@ -61,8 +78,9 @@ at::Tensor& dispatch_compare(
     int32_t out_dims = static_cast<int32_t>(out.dim());
 
     uint32_t contiguous = (a.is_contiguous() && b.is_contiguous() && out.is_contiguous()) ? 1 : 0;
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_compareop(promoted);
+    uint32_t vecSize = get_dtype_vec_size(promoted);
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, vecSize);
+    ShaderKey shader_key{torchvulkan::Kernel::COMPARE, promoted};
     uint32_t opv = static_cast<uint32_t>(op);
     uint32_t usc = use_scalar ? 1u : 0u;
 
@@ -72,8 +90,7 @@ at::Tensor& dispatch_compare(
        .push(usc)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 12) | (out_dims << 8) | (usc << 7) | (contiguous << 6) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_a[MAX_DIMS] = {0};
@@ -110,10 +127,11 @@ at::Tensor& dispatch_compare(
     std::vector<at::Tensor> readTensors = {self_p};
     if (!use_scalar) readTensors.push_back(other_p);
 
-    uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
+    uint64_t numel_vec = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
+    uint32_t groupX = (numel_vec + (workgroupSizeX - 1)) / workgroupSizeX;
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ readTensors,
@@ -124,7 +142,7 @@ at::Tensor& dispatch_compare(
     return out;
 }
 
-at::Tensor torchvulkan::where_vulkan(
+at::Tensor where_vulkan(
     const at::Tensor& condition, 
     const at::Tensor& self, 
     const at::Tensor& other
@@ -155,14 +173,13 @@ at::Tensor torchvulkan::where_vulkan(
     int32_t out_dims = static_cast<int32_t>(out.dim());
     uint32_t contiguous = (ce.is_contiguous() && ae.is_contiguous() && be.is_contiguous()) ? 1 : 0;
     uint32_t workgroupSizeX = get_dtype_workgroup_size(promoted, 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_where(promoted);
+    ShaderKey shader_key{torchvulkan::Kernel::WHERE, promoted};
 
     SpecializationBuilder spd{};
     spd.push(contiguous)
        .push(out_dims)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 8) | (static_cast<uint32_t>(out_dims) << 4) | contiguous;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_cond[MAX_DIMS] = {0};
@@ -199,7 +216,7 @@ at::Tensor torchvulkan::where_vulkan(
     uint32_t groupX = (numel + (workgroupSizeX - 1)) / workgroupSizeX;
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {c, a, b},
@@ -210,7 +227,7 @@ at::Tensor torchvulkan::where_vulkan(
     return out;
 }
 
-at::Tensor& torchvulkan::compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out, CompareOp op) 
+at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out, CompareOp op) 
 {
     std::vector<int64_t> shape = at::infer_size(self.sizes(), other.sizes());
     if (!out.sizes().equals(shape)) out.resize_(shape);
@@ -222,7 +239,7 @@ at::Tensor& torchvulkan::compare_out_vulkan(const at::Tensor& self, const at::Te
     return dispatch_compare(self, &other, at::Scalar(0), out, op, promoted);
 }
 
-at::Tensor& torchvulkan::compare_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out, CompareOp op) 
+at::Tensor& compare_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out, CompareOp op) 
 {
     if (!out.sizes().equals(self.sizes())) out.resize_(self.sizes());
     c10::ScalarType promoted = at::result_type(self, other);
@@ -233,62 +250,99 @@ at::Tensor& torchvulkan::compare_scalar_out_vulkan(const at::Tensor& self, const
     return dispatch_compare(self, nullptr, other, out, op, promoted);
 }
 
-at::Tensor torchvulkan::where_scalar_other_vulkan(const at::Tensor& condition, const at::Tensor& self, const at::Scalar& other) 
+at::Tensor where_scalar_other_vulkan(const at::Tensor& condition, const at::Tensor& self, const at::Scalar& other) 
 {
     c10::ScalarType promoted = at::result_type(self, other);
     return where_vulkan(condition, self, at::scalar_tensor(other, self.options().dtype(promoted)));
 }
 
-at::Tensor torchvulkan::where_scalar_self_vulkan(const at::Tensor& condition, const at::Scalar& self, const at::Tensor& other) 
+at::Tensor where_scalar_self_vulkan(const at::Tensor& condition, const at::Scalar& self, const at::Tensor& other) 
 {
     c10::ScalarType promoted = at::result_type(other, self);
     return where_vulkan(condition, at::scalar_tensor(self, other.options().dtype(promoted)), other);
 }
 
-at::Tensor torchvulkan::where_scalar_vulkan(const at::Tensor& condition, const at::Scalar& self, const at::Scalar& other) 
+at::Tensor where_scalar_vulkan(const at::Tensor& condition, const at::Scalar& self, const at::Scalar& other) 
 {
     c10::ScalarType promoted = at::result_type(self, other);
     at::TensorOptions opts = condition.options().dtype(promoted);
     return where_vulkan(condition, at::scalar_tensor(self, opts), at::scalar_tensor(other, opts));
 }
 
-at::Tensor torchvulkan::isnan_vulkan(const at::Tensor& self) 
-{
-    return at::ne(self, self);
-}
-
-at::Tensor& torchvulkan::isinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
+at::Tensor& isinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
     if (!self.is_floating_point()) { out.fill_(false); return out; }
     return compare_scalar_out_vulkan(at::abs(self), std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
-at::Tensor& torchvulkan::isposinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
+at::Tensor& isposinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
     if (!self.is_floating_point()) { out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
-at::Tensor& torchvulkan::isneginf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
+at::Tensor& isneginf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
     if (!self.is_floating_point()) { out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, -std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
-at::Tensor& torchvulkan::eq_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::EQ); }
-at::Tensor& torchvulkan::eq_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::EQ); }
-at::Tensor& torchvulkan::ne_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::NE); }
-at::Tensor& torchvulkan::ne_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::NE); }
-at::Tensor& torchvulkan::lt_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LT); }
-at::Tensor& torchvulkan::lt_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::LT); }
-at::Tensor& torchvulkan::le_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LE); }
-at::Tensor& torchvulkan::le_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::LE); }
-at::Tensor& torchvulkan::gt_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::GT); }
-at::Tensor& torchvulkan::gt_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::GT); }
-at::Tensor& torchvulkan::ge_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::GE); }
-at::Tensor& torchvulkan::ge_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::GE); }
+at::Tensor& eq_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::EQ); }
 
-at::Tensor& torchvulkan::logical_and_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LAND); }
-at::Tensor& torchvulkan::logical_or_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LOR); }
-at::Tensor& torchvulkan::logical_xor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LXOR); }
-at::Tensor& torchvulkan::logical_not_out_vulkan(const at::Tensor& self, at::Tensor& out) { return compare_scalar_out_vulkan(self, at::Scalar(0), out, CompareOp::EQ); }
+at::Tensor& eq_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::EQ); }
+
+at::Tensor& ne_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::NE); }
+
+at::Tensor& ne_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::NE); }
+
+at::Tensor& lt_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LT); }
+
+at::Tensor& lt_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::LT); }
+
+at::Tensor& le_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LE); }
+
+at::Tensor& le_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::LE); }
+
+at::Tensor& gt_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::GT); }
+
+at::Tensor& gt_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::GT); }
+
+at::Tensor& ge_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::GE); }
+
+at::Tensor& ge_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out) { return compare_scalar_out_vulkan(self, other, out, CompareOp::GE); }
+
+at::Tensor& logical_and_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LAND); }
+
+at::Tensor& logical_or_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LOR); }
+
+at::Tensor& logical_xor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LXOR); }
+
+at::Tensor& logical_not_out_vulkan(const at::Tensor& self, at::Tensor& out) { return compare_scalar_out_vulkan(self, at::Scalar(0), out, CompareOp::EQ); }
+
+} // namespace
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("eq.Tensor_out", &eq_tensor_out_vulkan);
+    m.impl("eq.Scalar_out", &eq_scalar_out_vulkan);
+    m.impl("ne.Tensor_out", &ne_tensor_out_vulkan);
+    m.impl("ne.Scalar_out", &ne_scalar_out_vulkan);
+    m.impl("lt.Tensor_out", &lt_tensor_out_vulkan);
+    m.impl("lt.Scalar_out", &lt_scalar_out_vulkan);
+    m.impl("le.Tensor_out", &le_tensor_out_vulkan);
+    m.impl("le.Scalar_out", &le_scalar_out_vulkan);
+    m.impl("gt.Tensor_out", &gt_tensor_out_vulkan);
+    m.impl("gt.Scalar_out", &gt_scalar_out_vulkan);
+    m.impl("ge.Tensor_out", &ge_tensor_out_vulkan);
+    m.impl("ge.Scalar_out", &ge_scalar_out_vulkan);
+    m.impl("logical_and.out", &logical_and_out_vulkan);
+    m.impl("logical_or.out", &logical_or_out_vulkan);
+    m.impl("logical_xor.out", &logical_xor_out_vulkan);
+    m.impl("logical_not.out", &logical_not_out_vulkan);
+    m.impl("isinf.out", &isinf_out_vulkan);
+    m.impl("isposinf.out", &isposinf_out_vulkan);
+    m.impl("isneginf.out", &isneginf_out_vulkan);
+    m.impl("where.self", &where_vulkan);
+    m.impl("where.ScalarOther", &where_scalar_other_vulkan);
+    m.impl("where.ScalarSelf", &where_scalar_self_vulkan);
+    m.impl("where.Scalar", &where_scalar_vulkan);
+}

@@ -2,12 +2,15 @@
 #include <volk.h>
 #include <ATen/ATen.h>
 
-#include "shaders/shader_registry.h"
+#include "shaders/shader_kernels.h"
 #include "builders.h"
 #include "dispatch.h"
 
 #include <array>
+#include <functional>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,17 +18,20 @@
 class DeviceContext;
 class VulkanBuffer;
 
+struct ShaderKey {
+    torchvulkan::Kernel kernel;
+    c10::ScalarType dtype;
+    c10::ScalarType dtype2 = c10::ScalarType::Undefined;
+};
+
 struct ShaderSubmitInfo {
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 };
 
-struct SpecializationArgs {
-    const void* data = nullptr;
-    const size_t* offsets = nullptr;
-    const size_t* sizes = nullptr;
-    const uint32_t numConstants = 0;
-    const uint64_t packedArgs = 0;
+struct SpecializationKeyHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view key) const { return std::hash<std::string_view>{}(key); }
 };
 
 struct MemoryRange {
@@ -71,7 +77,7 @@ public:
     );
 
     void dispatchShader(
-        torchvulkan::ShaderID shaderid, 
+        ShaderKey key,
         SpecializationArgs specConstants,
         PushConstants pushConstants,
         at::TensorList readTensors,
@@ -87,7 +93,7 @@ public:
 
     void flush();
 
-    ~VulkanShaderManager() { clearCache(); delete metadata_buffer; delete dispatcher; };
+    ~VulkanShaderManager();
 
 private:
     std::mutex mutex_;
@@ -110,11 +116,15 @@ private:
     void flushIfPending();
 
     void clearCache();
-    ShaderSubmitInfo* allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec);
-    VkShaderModule allocateShaderModule(const torchvulkan::Shader shader);
+    uint32_t resolveBinary(ShaderKey key) const;
+    ShaderSubmitInfo* allocateShader(uint32_t binary, const SpecializationArgs spec);
+    VkShaderModule allocateShaderModule(uint32_t binary);
     VkPipelineLayout allocatePipelineLayout();
-    ShaderSubmitInfo* allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec);
-    std::array<std::unordered_map<uint64_t, ShaderSubmitInfo*>, static_cast<std::size_t>(torchvulkan::ShaderID::SHADER_COUNT)> shaderCache{};
+    ShaderSubmitInfo* allocatePipeline(uint32_t binary, const SpecializationArgs spec);
+    void displayPipelineStatistics(VkPipeline pipeline);
+
+    std::vector<int32_t> binaryIndex;
+    std::vector<std::unordered_map<std::string, ShaderSubmitInfo*, SpecializationKeyHash, std::equal_to<>>> shaderCache;
+    std::vector<VkShaderModule> shaderModuleCache;
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayoutCache;
-    std::unordered_map<uint64_t, VkShaderModule> shaderModuleCache;
 };

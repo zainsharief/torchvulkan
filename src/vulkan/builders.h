@@ -4,6 +4,8 @@
 #include <c10/util/Exception.h>
 #include <array>
 #include <cstring>
+#include <string_view>
+#include <type_traits>
 
 #define MAX_PUSH_CONSTANT_BYTES 128
 #define MAX_SPEC_CONSTANTS 32
@@ -11,11 +13,21 @@
 #define MAX_DIMS 64
 #define MAX_METADATA_SECTIONS 8
 
+struct SpecializationArgs {
+    const void* data = nullptr;
+    const size_t* offsets = nullptr;
+    const size_t* sizes = nullptr;
+    const uint32_t numConstants = 0;
+    const std::string_view key{};
+};
+
 class SpecializationBuilder {
 public:
     // pushes any value and automatically tracks its size and byte offset
     template <typename T>
     SpecializationBuilder& push(const T& value) {
+        // arithmetic types only: struct padding would leak into the key, and bool is 1 byte where VkBool32 is 4
+        static_assert(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>, "specialization constants must be non-bool arithmetic types");
         TORCH_CHECK(numConstants_ < MAX_SPEC_CONSTANTS, "torchvulkan [ERROR]: Too many specialization constants!");
         TORCH_CHECK(data_size_ + sizeof(T) <= MAX_SPEC_DATA_BYTES, "torchvulkan [ERROR]: Specialization constant data exceeded buffer!");
 
@@ -26,6 +38,10 @@ public:
         std::memcpy(data_buffer.data() + data_size_, &value, sizeof(T));
         data_size_ += sizeof(T);
 
+        key_buffer[key_size_] = static_cast<uint8_t>(sizeof(T));
+        std::memcpy(key_buffer.data() + key_size_ + 1, &value, sizeof(T));
+        key_size_ += 1 + sizeof(T);
+
         return *this;
     }
 
@@ -34,12 +50,17 @@ public:
     const size_t* sizes() const { return sizes_array.data(); }
     uint32_t numConstants() const { return numConstants_; }
 
+    std::string_view key() const { return std::string_view(reinterpret_cast<const char*>(key_buffer.data()), key_size_); }
+    SpecializationArgs build() const { return {data(), offsets(), sizes(), numConstants(), key()}; }
+
 private:
     std::array<uint8_t, MAX_SPEC_DATA_BYTES> data_buffer{};
     std::array<size_t, MAX_SPEC_CONSTANTS> offsets_array{};
     std::array<size_t, MAX_SPEC_CONSTANTS> sizes_array{};
+    std::array<uint8_t, MAX_SPEC_CONSTANTS + MAX_SPEC_DATA_BYTES> key_buffer{};
     uint32_t numConstants_ = 0;
     size_t data_size_ = 0;
+    size_t key_size_ = 0;
 };
 
 struct PushConstants {
@@ -83,6 +104,7 @@ public:
             case at::kLong: push(value.to<int64_t>()); break;
             case at::kBool: push(value.to<bool>()); break;
             case at::kHalf: push(value.to<c10::Half>()); break;
+            case at::kBFloat16: push(value.to<c10::BFloat16>()); break;
             case at::ScalarType::UInt16: push(value.to<uint16_t>()); break;
             case at::ScalarType::UInt32: push(value.to<uint32_t>()); break;
             case at::ScalarType::UInt64: push(value.to<uint64_t>()); break;

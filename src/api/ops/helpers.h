@@ -2,6 +2,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/builders.h"
 #include <c10/core/Device.h>
+#include <c10/core/DefaultDtype.h>
 #include <c10/core/MemoryFormat.h>
 #include <c10/util/strides.h>
 #include <vector>
@@ -31,7 +32,7 @@ inline bool is_dtype_supported(at::ScalarType dtype)
         case at::kUInt32: return device->support_int32;
         
         case at::kHalf: return device->support_float16;
-        case at::kBFloat16: return false; // we cannot support it yet
+        case at::kBFloat16: return device->support_bfloat16;
         case at::kShort: return device->support_int16;
         case at::kUInt16: return device->support_int16;
         
@@ -80,4 +81,34 @@ inline std::vector<int64_t> compute_strides(
     }
 
     TORCH_CHECK(false, "torchvulkan [ERROR]: Unsupported memory format for sizes.");
+}
+
+inline at::Tensor promote_to_float(const at::Tensor& self)
+{
+    if (self.is_floating_point() || self.is_complex()) return self;
+    return self.to(c10::typeMetaToScalarType(at::get_default_dtype()));
+}
+
+// copies an op result into an out= tensor, resizing it first when the shapes differ
+inline at::Tensor& fill_out(at::Tensor& out, const at::Tensor& res)
+{
+    if (out.sizes() != res.sizes()) out.resize_(res.sizes());
+    out.copy_(res);
+    return out;
+}
+
+// integer reductions accumulate in int64 to avoid overflow
+inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optional<at::ScalarType> dtype)
+{
+    if (dtype.has_value()) return *dtype;
+    if (at::isIntegralType(self.scalar_type(), /*includeBool=*/true) && self.scalar_type() != at::kLong) {
+        return at::kLong;
+    }
+    return self.scalar_type();
+}
+
+// the dtype a reduction accumulates in is not always the dtype it returns
+inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
+{
+    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
 }

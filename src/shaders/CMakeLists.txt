@@ -1,43 +1,57 @@
-file(GLOB SHADER_SCRIPTS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build_shaders.py")
+set(SHADER_GENERATOR "${CMAKE_SOURCE_DIR}/scripts/build_shaders.py")
+set(SHADER_PACKER "${CMAKE_SOURCE_DIR}/scripts/pack_shaders.py")
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${SHADER_GENERATOR}"
+    "${CMAKE_SOURCE_DIR}/scripts/config.py")
 
 set(SHADER_OUT_DIR "${CMAKE_SOURCE_DIR}/build/shaders")
 file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 
-foreach (SCRIPT ${SHADER_SCRIPTS})
-    message(STATUS "Running shader generator: ${SCRIPT}")
-    execute_process(
-        COMMAND ${Python3_EXECUTABLE} ${SCRIPT}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    )
-endforeach()
+message(STATUS "Running shader generator: ${SHADER_GENERATOR}")
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} ${SHADER_GENERATOR}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    RESULT_VARIABLE SHADER_GENERATOR_RESULT
+)
 
-file(GLOB GENERATED_SLANG_FILES CONFIGURE_DEPENDS "${SHADER_OUT_DIR}/*.slang")
-file(GLOB BASE_SLANG_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/shaders/*.slang")
+if (NOT SHADER_GENERATOR_RESULT EQUAL 0)
+    message(FATAL_ERROR "Shader generator failed (exit ${SHADER_GENERATOR_RESULT})")
+endif()
+
+file(GLOB_RECURSE SHADER_MODULES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/src/shaders/core/*.slang"
+     "${CMAKE_SOURCE_DIR}/src/shaders/ops/*.slang")
 
 set(SPV_FILES "")
 
-foreach(SLANG_FILE ${GENERATED_SLANG_FILES})
-    get_filename_component(SLANG_NAME ${SLANG_FILE} NAME_WE)
-    
-    set(SPV_OUT "${SHADER_OUT_DIR}/${SLANG_NAME}.spv")
+function(torchvulkan_add_shader NAME SOURCE ENTRY)
+    set(SPECIALIZE_ARGS "")
+    foreach(ARG ${ARGN})
+        list(APPEND SPECIALIZE_ARGS -specialize ${ARG})
+    endforeach()
+
+    set(SPV_OUT "${SHADER_OUT_DIR}/${NAME}.spv")
 
     add_custom_command(
         OUTPUT ${SPV_OUT}
-        COMMAND ${SLANGC_EXE} ${SLANG_FILE} -target spirv -capability SPV_KHR_cooperative_matrix -fvk-use-entrypoint-name -I ${CMAKE_SOURCE_DIR}/src/shaders -g0 -Wno-39001 -o ${SPV_OUT}
-        DEPENDS ${SLANG_FILE} ${BASE_SLANG_FILES}
-        COMMENT "Compiling generated shader: ${SLANG_NAME}.slang"
+        COMMAND ${SLANGC_EXE} ${SOURCE} -entry ${ENTRY} ${SPECIALIZE_ARGS} -target spirv -capability SPV_KHR_cooperative_matrix+SPV_EXT_physical_storage_buffer -I ${CMAKE_SOURCE_DIR}/src/shaders -g0 -Wno-39001 -o ${SPV_OUT}
+        DEPENDS ${SOURCE} ${SHADER_MODULES}
+        COMMENT "Compiling shader ${NAME}"
     )
 
-    list(APPEND SPV_FILES ${SPV_OUT})
-endforeach()
+    set(SPV_FILES ${SPV_FILES} ${SPV_OUT} PARENT_SCOPE)
+endfunction()
+
+include("${SHADER_OUT_DIR}/variants.cmake")
 
 set(SHADER_REGISTRY_H "${CMAKE_SOURCE_DIR}/src/shaders/shader_registry.h")
 
 add_custom_command(
     OUTPUT ${SHADER_REGISTRY_H}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/pack_shaders.py
+    COMMAND ${Python3_EXECUTABLE} ${SHADER_PACKER}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    DEPENDS ${SPV_FILES} ${CMAKE_SOURCE_DIR}/scripts/pack_shaders.py
+    DEPENDS ${SPV_FILES} ${SHADER_PACKER} "${SHADER_OUT_DIR}/variants.json"
     COMMENT "Packing shaders into ${SHADER_REGISTRY_H}"
 )
 

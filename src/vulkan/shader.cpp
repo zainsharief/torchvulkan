@@ -1,14 +1,47 @@
 #include "shader.h"
+#include "shaders/shader_registry.h"
 #include "cache.h"
 #include "allocator.h"
 #include "vulkan_context.h"
 #include <algorithm>
+#include <iterator>
 #include <cstring>
+#include <iostream>
+
+namespace {
+
+constexpr size_t NUM_SCALAR_TYPES = static_cast<size_t>(c10::ScalarType::NumOptions);
+constexpr size_t NUM_BINARIES = std::size(torchvulkan::SHADER_BINARIES);
+
+size_t keySlot(torchvulkan::Kernel kernel, c10::ScalarType dtype, c10::ScalarType dtype2)
+{
+    size_t k = static_cast<size_t>(kernel);
+    size_t d = static_cast<size_t>(dtype);
+    size_t d2 = static_cast<size_t>(dtype2);
+    return (k * NUM_SCALAR_TYPES + d) * NUM_SCALAR_TYPES + d2;
+}
+
+} // namespace
+
+VulkanShaderManager::~VulkanShaderManager()
+{
+    clearCache();
+    delete metadata_buffer;
+    delete dispatcher;
+}
 
 VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
     : device(device)
 {
     dispatcher = new DAGDispatcher(device);
+
+    binaryIndex.assign(static_cast<size_t>(torchvulkan::Kernel::COUNT) * NUM_SCALAR_TYPES * NUM_SCALAR_TYPES, -1);
+    for (const torchvulkan::ShaderIndexEntry& entry : torchvulkan::SHADER_INDEX) {
+        binaryIndex[keySlot(entry.kernel, entry.dtype, entry.dtype2)] = static_cast<int32_t>(entry.binary);
+    }
+
+    shaderCache.resize(NUM_BINARIES);
+    shaderModuleCache.assign(NUM_BINARIES, VK_NULL_HANDLE);
 
     metadata_buffer = new VulkanBuffer(device->allocator, device->device);
     VkResult result = metadata_buffer->createBuffer(METADATA_BUFFER_SIZE, MemoryUsage::HOST_TO_DEVICE);
@@ -58,7 +91,7 @@ void VulkanShaderManager::flush()
 }
 
 void VulkanShaderManager::dispatchShader(
-    torchvulkan::ShaderID shaderid, 
+    ShaderKey key,
     SpecializationArgs specConstants,
     PushConstants pushConstants,
     at::TensorList readTensors,
@@ -89,7 +122,7 @@ void VulkanShaderManager::dispatchShader(
         outputs.push_back(range);
     }
 
-    ShaderSubmitInfo* submit = allocateShader(shaderid, specConstants);
+    ShaderSubmitInfo* submit = allocateShader(resolveBinary(key), specConstants);
 
     OpInfo* info = new OpInfo{};
     info->type = OpType::COMPUTE;
@@ -151,40 +184,48 @@ void VulkanShaderManager::dispatchCopy(
     flushIfPending();
 }
 
-ShaderSubmitInfo* VulkanShaderManager::allocateShader(const torchvulkan::ShaderID shaderID, const SpecializationArgs spec)
+uint32_t VulkanShaderManager::resolveBinary(ShaderKey key) const
 {
-    size_t id = static_cast<std::size_t>(shaderID);
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto& shaderMap = shaderCache[id];
+    int32_t binary = binaryIndex[keySlot(key.kernel, key.dtype, key.dtype2)];
+    if (binary >= 0) return static_cast<uint32_t>(binary);
 
-    auto it = shaderMap.find(spec.packedArgs);
+    const char* kernel = torchvulkan::KERNEL_NAMES[static_cast<size_t>(key.kernel)];
+    if (key.dtype2 == c10::ScalarType::Undefined) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, ".");
+    }
+    TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, " -> ", key.dtype2, ".");
+}
+
+ShaderSubmitInfo* VulkanShaderManager::allocateShader(uint32_t binary, const SpecializationArgs spec)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& shaderMap = shaderCache[binary];
+
+    auto it = shaderMap.find(spec.key);
     if (it != shaderMap.end()) return it->second;
 
-    torchvulkan::Shader shader = torchvulkan::getShader(shaderID);
-    ShaderSubmitInfo* shaderSubmitInfo = allocatePipeline(shader, spec);
-    shaderMap[spec.packedArgs] = shaderSubmitInfo;
+    ShaderSubmitInfo* shaderSubmitInfo = allocatePipeline(binary, spec);
+    shaderMap.emplace(std::string(spec.key), shaderSubmitInfo);
     return shaderSubmitInfo;
 }
 
-VkShaderModule VulkanShaderManager::allocateShaderModule(const torchvulkan::Shader shader)
+VkShaderModule VulkanShaderManager::allocateShaderModule(uint32_t binary)
 {
     // assume active mutex
-    auto it = shaderModuleCache.find(static_cast<uint32_t>(shader.shaderId));
-    if (it != shaderModuleCache.end()) return it->second;
+    if (shaderModuleCache[binary] != VK_NULL_HANDLE) return shaderModuleCache[binary];
 
-    const uint32_t* spvCode = shader.binaryCode;
-    size_t spvSize = shader.binarySize;
-    
+    const torchvulkan::ShaderBinary& shader = torchvulkan::SHADER_BINARIES[binary];
+
     VkShaderModuleCreateInfo shaderInfo{};
     shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shaderInfo.codeSize = spvSize;
-    shaderInfo.pCode = spvCode;
+    shaderInfo.codeSize = shader.size;
+    shaderInfo.pCode = shader.code;
 
     VkShaderModule shaderModule;
     if (device->device_table.vkCreateShaderModule(device->device, &shaderInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to create shader module.");
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to create shader module for ", shader.name, ".");
     }
-    shaderModuleCache[static_cast<uint32_t>(shader.shaderId)] = shaderModule;
+    shaderModuleCache[binary] = shaderModule;
     return shaderModule;
 }
 
@@ -215,12 +256,12 @@ VkPipelineLayout VulkanShaderManager::allocatePipelineLayout()
     return pipelineLayout;
 }
 
-ShaderSubmitInfo* VulkanShaderManager::allocatePipeline(const torchvulkan::Shader shader, const SpecializationArgs spec)
+ShaderSubmitInfo* VulkanShaderManager::allocatePipeline(uint32_t binary, const SpecializationArgs spec)
 {
     // assume active mutex
     VkPipeline pipeline;
     VkPipelineLayout pipelineLayout = allocatePipelineLayout();
-    VkShaderModule shaderModule = allocateShaderModule(shader);
+    VkShaderModule shaderModule = allocateShaderModule(binary);
 
     std::vector<VkSpecializationMapEntry> mapEntries(spec.numConstants);
     size_t totalSize = 0;
@@ -245,23 +286,92 @@ ShaderSubmitInfo* VulkanShaderManager::allocatePipeline(const torchvulkan::Shade
     stageInfo.pName = "main";
     stageInfo.pSpecializationInfo = &specInfo;
 
+    VkPipelineCreateFlags flags = 0;
+    const bool capturePipelineStatistics = device->support_pipeline_statistics && VulkanContext::Instance().profilingEnabled();
+    if (capturePipelineStatistics) {
+        flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    }
+
     VkComputePipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.stage = stageInfo;
     pipelineInfo.layout = pipelineLayout;
+    pipelineInfo.flags = flags;
     
     if (device->device_table.vkCreateComputePipelines(device->device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
         TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to create compute pipeline.");
+    }
+
+    if (capturePipelineStatistics) {
+        displayPipelineStatistics(pipeline);
     }
 
     ShaderSubmitInfo* info = new ShaderSubmitInfo{ pipeline, pipelineLayout };
     return info;
 }
 
+void VulkanShaderManager::displayPipelineStatistics(VkPipeline pipeline)
+{
+    VkPipelineExecutableInfoKHR pipelineExecInfo{};
+    pipelineExecInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
+    pipelineExecInfo.pipeline = pipeline;
+    pipelineExecInfo.executableIndex = 0; 
+
+    uint32_t pStatisticCount = 0;
+
+    if (device->device_table.vkGetPipelineExecutableStatisticsKHR( device->device, &pipelineExecInfo, &pStatisticCount, nullptr) != VK_SUCCESS) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to fetch pipeline statistics count.");
+    }
+
+    if (pStatisticCount <= 0) {
+        std::cout << "No statistics available." << std::endl;
+        return;
+    }
+    
+    std::vector<VkPipelineExecutableStatisticKHR> statistics(pStatisticCount);
+    
+    for (auto& stat : statistics) {
+        stat.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
+        stat.pNext = nullptr;
+    }
+
+    if (device->device_table.vkGetPipelineExecutableStatisticsKHR(device->device, &pipelineExecInfo, &pStatisticCount, statistics.data()) != VK_SUCCESS) {
+        TORCH_CHECK(false, "torchvulkan [ERROR]: Failed to fetch pipeline statistics.");
+    }
+
+    for (const auto& stat : statistics) 
+    {
+        std::cout << "Metric: " << stat.name << " (" << stat.description << ") = ";
+        
+        switch (stat.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                std::cout << (stat.value.b32 ? "true" : "false");
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                std::cout << stat.value.i64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                std::cout << stat.value.u64;
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                std::cout << stat.value.f64;
+                break;
+            default:
+                std::cout << "Unknown format";
+                break;
+        }
+        std::cout << " | ";
+    }
+    
+    std::cout << "\n";
+}
+
 void VulkanShaderManager::clearCache()
 {
-    for (auto& pair : shaderModuleCache) device->device_table.vkDestroyShaderModule(device->device, pair.second, nullptr);
-    shaderModuleCache.clear();
+    for (VkShaderModule shaderModule : shaderModuleCache) {
+        if (shaderModule != VK_NULL_HANDLE) device->device_table.vkDestroyShaderModule(device->device, shaderModule, nullptr);
+    }
+    shaderModuleCache.assign(shaderModuleCache.size(), VK_NULL_HANDLE);
 
     for (auto& pair : pipelineLayoutCache) device->device_table.vkDestroyPipelineLayout(device->device, pair.second, nullptr);
     pipelineLayoutCache.clear();

@@ -139,6 +139,7 @@ void VulkanCache::addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR 
             case VK_COMPONENT_TYPE_FLOAT16_KHR: return static_cast<uint8_t>(at::ScalarType::Half);
             case VK_COMPONENT_TYPE_FLOAT32_KHR: return static_cast<uint8_t>(at::ScalarType::Float);
             case VK_COMPONENT_TYPE_FLOAT64_KHR: return static_cast<uint8_t>(at::ScalarType::Double);
+            case COMPONENT_TYPE_BFLOAT16:       return static_cast<uint8_t>(at::ScalarType::BFloat16);
             case VK_COMPONENT_TYPE_SINT8_KHR:   return static_cast<uint8_t>(at::ScalarType::Char);
             case VK_COMPONENT_TYPE_SINT16_KHR:  return static_cast<uint8_t>(at::ScalarType::Short);
             case VK_COMPONENT_TYPE_SINT32_KHR:  return static_cast<uint8_t>(at::ScalarType::Int);
@@ -225,13 +226,17 @@ CoopMatParams* VulkanCache::getCoopMatParams(c10::ScalarType dtype, const std::v
 
     if (coopmat_params.block_size == 0) return &coopmat_params;
 
+    #if __APPLE__
+    coopmat_params.use_shared_memory = false;
+    #else
+    coopmat_params.use_shared_memory = true;
+    #endif
+
+    // mirrors the Shared<T> sizes in src/shaders/ops/matmul_coop.slang
     auto shared_bytes = [&](uint64_t rows_a, uint64_t cols_b, uint32_t bk) -> uint64_t
     {
-        #if __APPLE__
+        if (coopmat_params.use_shared_memory) return 2 * (rows_a * (bk + pad) + (uint64_t)bk * (cols_b + pad)) * element_size;
         return (rows_a * bk + (uint64_t)bk * cols_b) * element_size;
-        #else
-        return 2 * (rows_a * (bk + pad) + (uint64_t)bk * (cols_b + pad)) * element_size;
-        #endif
     };
 
     static constexpr uint32_t frag_preferences[4][2] = {{4, 2}, {2, 4}, {4, 4}, {2, 2}};

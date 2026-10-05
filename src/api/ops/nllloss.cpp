@@ -1,7 +1,10 @@
 #include <torch/extension.h>
-#include "api/ops/nllloss.h"
-#include "api/ops/binary.h"
-#include "api/ops/reduce.h"
+#include <tuple>
+#include "vulkan/memory.h"
+#include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
+#include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
 
@@ -23,13 +26,12 @@ void dispatch_nllloss_shader(
 {
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(in.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_nllloss(in.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::NLLLOSS, in.scalar_type()};
 
     SpecializationBuilder spd{};
     spd.push(static_cast<uint32_t>(mode))
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 2) | static_cast<uint32_t>(mode);
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(in))
@@ -43,7 +45,7 @@ void dispatch_nllloss_shader(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {in, target},
@@ -71,9 +73,7 @@ at::Tensor gather_weight(
     return gathered;
 }
 
-} // namespace
-
-std::tuple<at::Tensor, at::Tensor> torchvulkan::nll_loss_forward_vulkan(
+std::tuple<at::Tensor, at::Tensor> nll_loss_forward_vulkan(
     const at::Tensor& self,
     const at::Tensor& target,
     const c10::optional<at::Tensor>& weight,
@@ -101,18 +101,18 @@ std::tuple<at::Tensor, at::Tensor> torchvulkan::nll_loss_forward_vulkan(
     if (N > 0) dispatch_nllloss_shader(input, target_c, losses, NllLossMode::FORWARD_GATHER, N, C, ignore_index32, N);
 
     at::Tensor gathered_weight = gather_weight(weight, target_c, input, N, C, ignore_index32);
-    at::Tensor weighted_losses = multiply_vulkan(losses, gathered_weight);
-    at::Tensor total_weight = sum_vulkan(gathered_weight, c10::nullopt);
+    at::Tensor weighted_losses = torchvulkan::multiply_vulkan(losses, gathered_weight);
+    at::Tensor total_weight = torchvulkan::sum_vulkan(gathered_weight, c10::nullopt);
 
     at::Tensor output;
     if (reduction == 0) output = unbatched ? weighted_losses.squeeze(0) : weighted_losses;
-    else if (reduction == 1) output = divide_vulkan(sum_vulkan(weighted_losses, c10::nullopt), total_weight);
-    else output = sum_vulkan(weighted_losses, c10::nullopt);
+    else if (reduction == 1) output = torchvulkan::divide_vulkan(torchvulkan::sum_vulkan(weighted_losses, c10::nullopt), total_weight);
+    else output = torchvulkan::sum_vulkan(weighted_losses, c10::nullopt);
 
     return {output, total_weight};
 }
 
-at::Tensor torchvulkan::nll_loss_backward_vulkan(
+at::Tensor nll_loss_backward_vulkan(
     const at::Tensor& grad_output,
     const at::Tensor& self,
     const at::Tensor& target,
@@ -145,13 +145,20 @@ at::Tensor torchvulkan::nll_loss_backward_vulkan(
     // so the shader only has to scatter it back into grad_input.
     at::Tensor grad_out_c = grad_output.to(input.scalar_type());
     at::Tensor per_sample_grad = reduction == 1
-        ? divide_vulkan(grad_out_c, total_weight.to(input.scalar_type()))
+        ? torchvulkan::divide_vulkan(grad_out_c, total_weight.to(input.scalar_type()))
         : grad_out_c;
-    per_sample_grad = multiply_vulkan(per_sample_grad.expand({(int64_t)N}), gathered_weight);
+    per_sample_grad = torchvulkan::multiply_vulkan(per_sample_grad.expand({(int64_t)N}), gathered_weight);
     per_sample_grad = per_sample_grad.contiguous();
 
     at::Tensor grad_input = at::empty({(int64_t)N, (int64_t)C}, input.options());
     if (N > 0) dispatch_nllloss_shader(per_sample_grad, target_c, grad_input, NllLossMode::BACKWARD_SCATTER, N, C, ignore_index32, N * C);
 
     return unbatched ? grad_input.squeeze(0) : grad_input;
+}
+
+} // namespace
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("nll_loss_forward", &nll_loss_forward_vulkan);
+    m.impl("nll_loss_backward", &nll_loss_backward_vulkan);
 }

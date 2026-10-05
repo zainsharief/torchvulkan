@@ -1,8 +1,20 @@
 #include <torch/extension.h>
-#include "api/ops/matmul.h"
-#include "api/ops/binary.h"
+#include <c10/core/MemoryFormat.h>
+#include <functional>
+#include "vulkan/memory.h"
+#include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
+#include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
+
+enum class MatmulActivation : uint32_t
+{
+    NONE = 0,
+    RELU = 1,
+    GELU = 2,
+};
 
 struct MatmulOperands {
     at::Tensor self_b;
@@ -64,23 +76,194 @@ MatmulOperands prepare_matmul_operands(
     return result;
 }
 
-} // namespace
-
-at::Tensor torchvulkan::dispatch_matmul_shader(
-    const at::Tensor& self, 
-    const at::Tensor& other,
-    const at::Tensor& bias,
-    const at::Scalar& alpha,
-    const at::Scalar& beta,
-    std::function<at::Tensor()> cpu_fallback)
+at::Tensor apply_matmul_activation(
+    const at::Tensor& out,
+    MatmulActivation activation)
 {
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-
-    if (device->support_coopmat) return dispatch_matmul_coop_shader(self, other, bias, alpha, beta, cpu_fallback);
-    return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, cpu_fallback);
+    switch (activation)
+    {
+        case MatmulActivation::RELU: return at::relu(out);
+        case MatmulActivation::GELU: return at::gelu(out);
+        default: return out;
+    }
 }
 
-at::Tensor torchvulkan::dispatch_matmul_coop_shader(
+// returns the dtype a matmul accumulates in
+c10::ScalarType matmul_accumulate_dtype(c10::ScalarType dtype)
+{
+    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+}
+
+at::Tensor dispatch_matmul_simd_shader(
+    const at::Tensor& self_, 
+    const at::Tensor& other_,
+    const at::Tensor& bias_,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    MatmulActivation activation,
+    std::function<at::Tensor()> cpu_fallback)
+{
+    // must match the tile sizes defined in the shader - if you change one, change the other!
+    static const uint32_t TILE_N = 128;
+    static const uint32_t TILE_K = 16;
+
+    at::Tensor self = self_;
+    at::Tensor other = other_;
+    uint32_t has_bias = (bias_.defined() && beta.toDouble() != 0.0) ? 1 : 0;
+    
+    bool self_unsqueezed = false;
+    bool other_unsqueezed = false;
+
+    if (self.dim() < 2) {
+        self = self.unsqueeze(0);
+        self_unsqueezed = true;
+    }
+    if (other.dim() < 2) {
+        other = other.unsqueeze(1);
+        other_unsqueezed = true;
+    }
+
+    TORCH_CHECK(self.size(-1) == other.size(-2), "torchvulkan: inner dimensions must match");
+
+    uint32_t M = self.size(-2);
+    uint32_t K = self.size(-1);
+    uint32_t N = other.size(-1);
+
+    at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
+    at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);
+    std::vector<int64_t> batch_shape = at::infer_size(self_batch, other_batch);
+
+    int64_t B = 1;
+    for (int64_t s : batch_shape) {
+        B *= s;
+    }
+
+    std::vector<int64_t> out_shape_vec = batch_shape;
+    out_shape_vec.push_back(M);
+    out_shape_vec.push_back(N);
+    at::IntArrayRef out_shape(out_shape_vec);
+
+    c10::ScalarType result_dtype = at::result_type(self, other);
+    if (!is_dtype_supported(result_dtype)) {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", result_dtype, ". Falling back to CPU.");
+        return cpu_fallback();
+    }
+
+    c10::ScalarType compute_type = matmul_accumulate_dtype(result_dtype);
+
+    TORCH_CHECK(
+        activation != MatmulActivation::GELU || at::isFloatingType(result_dtype),
+        "torchvulkan [ERROR]: gelu is only defined for floating point matmuls, not ", result_dtype
+    );
+
+    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
+    uint32_t max_shared_memory = device->properties.limits.maxComputeSharedMemorySize;
+    auto shared_bytes = [&](uint32_t tile_m) {
+        return c10::elementSize(compute_type) * ((tile_m * (TILE_K + 1)) + (TILE_K * TILE_N));
+    };
+
+    uint32_t tile_m = c10::elementSize(result_dtype) < 8 ? 128 : 64;
+    if (tile_m == 128 && shared_bytes(128) > max_shared_memory) tile_m = 64;
+    if (shared_bytes(tile_m) > max_shared_memory) {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: a ", result_dtype, " matmul tile needs ", shared_bytes(tile_m),
+            " bytes of shared memory but the device provides ", max_shared_memory, ". Falling back to CPU.");
+        return cpu_fallback();
+    }
+
+    MatmulOperands ops = prepare_matmul_operands(self, other, bias_, has_bias, result_dtype, M, K, N, B, batch_shape);
+    at::Tensor self_b = ops.self_b;
+    at::Tensor other_b = ops.other_b;
+    at::Tensor bias_b = ops.bias_b;
+
+    at::Tensor out = at::empty({B, M, N}, self_b.options());
+    if (beta.toFloat() == 0) out.zero_();
+
+    if (M == 0 || N == 0 || B == 0) return out.reshape(out_shape);
+    if (K == 0) {
+        at::Tensor result = has_bias ? (bias_b * beta) : out.zero_();
+        return apply_matmul_activation(result, activation).reshape(out_shape);
+    }
+
+    torchvulkan::Kernel kernel = tile_m == 128 ? torchvulkan::Kernel::MATMUL_SIMD_128 : torchvulkan::Kernel::MATMUL_SIMD_64;
+    ShaderKey shader_key{kernel, result_dtype};
+    uint32_t vecSize = get_dtype_vec_size(result_dtype);
+
+    uint32_t workgroupSizeX = 16; 
+    uint32_t workgroupSizeY = 16; 
+    uint32_t isBiasAligned = has_bias ? bias_b.is_contiguous() : 1;
+    uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
+                         self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
+
+    SpecializationBuilder spd{};
+    spd.push(workgroupSizeX)
+       .push(workgroupSizeY)
+       .push(isAligned)
+       .push(has_bias)
+       .push(static_cast<uint32_t>(activation));
+    SpecializationArgs specialization = spd.build();
+
+    uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
+    uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
+    uint32_t strides_c[4] = {static_cast<uint32_t>(out.stride(0)), static_cast<uint32_t>(out.stride(1)), static_cast<uint32_t>(out.stride(2)), 0};
+    uint32_t strides_bias[4] = {0, 0, 0, 0};
+    if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
+
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(self_b));
+    pcs.push(get_tensor_address(other_b));
+    pcs.push(get_tensor_address(out));
+    pcs.push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0); // the shader only reads the bias when it exists
+    pcs.push_array(strides_a);
+    pcs.push_array(strides_b);
+    pcs.push_array(strides_c);
+    pcs.push_array(strides_bias);
+    pcs.push(M);
+    pcs.push(N);
+    pcs.push(K);
+    pcs.push((uint32_t)0);
+    pcs.push_scalar(alpha, compute_type);
+    pcs.push_scalar(beta, compute_type);
+    
+    uint32_t groupX = (N + TILE_N - 1) / TILE_N;
+    uint32_t groupY = (M + tile_m - 1) / tile_m;
+    uint32_t groupZ = static_cast<uint32_t>(B);
+
+    std::vector<at::Tensor> readTensors = {self_b, other_b};
+    if (has_bias) readTensors.push_back(bias_b);
+
+    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
+    device->shader_manager->dispatchShader(
+        shader_key,
+        specialization,
+        pushConstants,
+        /* read = */ readTensors,
+        /* write = */ {out},
+        groupX, groupY, groupZ
+    );
+
+    out = out.reshape(out_shape);
+    if (self_unsqueezed || other_unsqueezed) {
+        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1); 
+        else if (self_unsqueezed) out = out.squeeze(-2); 
+        else out = out.squeeze(-1); 
+    }
+
+    return out;
+}
+
+torchvulkan::Kernel coop_kernel_for_block_size(uint32_t block_size)
+{
+    switch (block_size)
+    {
+        case 8: return torchvulkan::Kernel::MATMUL_COOP_8;
+        case 16: return torchvulkan::Kernel::MATMUL_COOP_16;
+        case 32: return torchvulkan::Kernel::MATMUL_COOP_32;
+        case 64: return torchvulkan::Kernel::MATMUL_COOP_64;
+        default: TORCH_CHECK(false, "torchvulkan [ERROR]: no cooperative-matrix matmul for block size ", block_size, ".");
+    }
+}
+
+at::Tensor dispatch_matmul_coop_shader(
     const at::Tensor& self_, 
     const at::Tensor& other_,
     const at::Tensor& bias_,
@@ -98,8 +281,9 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     }
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    std::vector<CoopMatConfig> config = device->cache.getCoopMatConfig(promoted_type, promoted_type, promoted_type, promoted_type);
-    if (config.empty()) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+    c10::ScalarType accumulate_type = matmul_accumulate_dtype(promoted_type);
+    std::vector<CoopMatConfig> config = device->cache.getCoopMatConfig(promoted_type, promoted_type, accumulate_type, accumulate_type);
+    if (config.empty()) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, MatmulActivation::NONE, cpu_fallback);
     std::vector<uint32_t> available_block_sizes;
     available_block_sizes.reserve(config.size());
 
@@ -128,19 +312,19 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     uint32_t N = other.size(-1);
 
     CoopMatParams* params = device->cache.getCoopMatParams(promoted_type, available_block_sizes, M, N);
-    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+    if (!params->is_valid) return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, MatmulActivation::NONE, cpu_fallback);
 
     if (bias_.defined()) {
         at::Tensor out = dispatch_matmul_coop_shader(self_, other_, {}, alpha, 0, cpu_fallback);
         if (beta.toDouble() == 0.0) return out;
-        return add_vulkan(out, bias_.to(out.scalar_type()), beta);
+        return torchvulkan::add_vulkan(out, bias_.to(out.scalar_type()), beta);
     }
 
     uint32_t has_alpha = (alpha.toDouble() != 1.0) ? 1 : 0;
     uint32_t has_bias = (bias_.defined()) ? 1 : 0;
     uint32_t has_beta = (!has_bias && beta.toDouble() != 0.0) ? 1 : 0;
     
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_coop(promoted_type, params->block_size);
+    ShaderKey shader_key{coop_kernel_for_block_size(params->block_size), promoted_type};
 
     at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
     at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);
@@ -197,7 +381,7 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
 
         at::Tensor partial = dispatch_matmul_coop_shader(a_chunks, b_chunks, {}, alpha, 0, cpu_fallback);
         for (int64_t s = split / 2; s >= 1; s /= 2) {
-            partial = add_vulkan(partial.narrow(0, 0, s), partial.narrow(0, s, s), 1);
+            partial = torchvulkan::add_vulkan(partial.narrow(0, 0, s), partial.narrow(0, s, s), 1);
         }
 
         at::Tensor out = partial.reshape(out_shape);
@@ -232,7 +416,7 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
     if (!coop_loadable(self_b) || !coop_loadable(other_b) || !coop_loadable(out) ||
         (has_bias && !coop_loadable(bias_b))) {
-        return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, cpu_fallback);
+        return dispatch_matmul_simd_shader(self_, other_, bias_, alpha, beta, MatmulActivation::NONE, cpu_fallback);
     }
     
     PushConstantBuilder pcs{};
@@ -248,8 +432,8 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
        .push(N)
        .push(K)
        .push((uint32_t)0) // padding
-       .push_scalar(alpha, promoted_type)
-       .push_scalar(beta, promoted_type);
+       .push_scalar(alpha, accumulate_type)
+       .push_scalar(beta, accumulate_type);
 
     const uint32_t vecSize = get_dtype_vec_size(promoted_type);
     uint32_t a_vec_aligned = (!self_transposed &&
@@ -278,17 +462,10 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
        .push(m_aligned)
        .push(n_aligned)
        .push(a_vec_aligned)
-       .push(b_vec_aligned);
-    uint64_t key = ((uint64_t)a_vec_aligned << 53) | ((uint64_t)b_vec_aligned << 52) |
-                   ((uint64_t)m_aligned << 51) | ((uint64_t)n_aligned << 50) |
-                   ((uint64_t)self_transposed << 49) | ((uint64_t)other_transposed << 48) |
-                   ((uint64_t)out_transposed << 47) | ((uint64_t)bias_transposed << 46) |
-                   ((uint64_t)has_bias << 45) | ((uint64_t)has_beta << 44) |
-                   ((uint64_t)has_alpha << 43) | ((uint64_t)params->bk << 36) |
-                   ((uint64_t)params->warp_frags_n << 32) | ((uint64_t)params->warp_frags_m << 28) |
-                   ((uint64_t)params->warps_n << 24) | ((uint64_t)params->warps_m << 20) |
-                   ((uint64_t)params->subgroup_size << 12) | ((uint64_t)params->workgroup_size);
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+       .push(b_vec_aligned)
+       .push(params->block_size)
+       .push(static_cast<uint32_t>(params->use_shared_memory));
+    SpecializationArgs specialization = spd.build();
 
     uint32_t groupX = N_padded / tile_n;
     uint32_t groupY = M_padded / tile_m;
@@ -299,7 +476,7 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ readTensors,
@@ -318,179 +495,55 @@ at::Tensor torchvulkan::dispatch_matmul_coop_shader(
     return out;
 }
 
-at::Tensor torchvulkan::dispatch_matmul_simd_shader(
-    const at::Tensor& self_, 
-    const at::Tensor& other_,
-    const at::Tensor& bias_,
+at::Tensor dispatch_matmul_shader(
+    const at::Tensor& self, 
+    const at::Tensor& other,
+    const at::Tensor& bias,
     const at::Scalar& alpha,
     const at::Scalar& beta,
+    MatmulActivation activation,
     std::function<at::Tensor()> cpu_fallback)
 {
-    // must match the tile sizes defined in the shader - if you change one, change the other!
-    static const uint32_t TILE_M = 128;
-    static const uint32_t TILE_N = 128;
-    static const uint32_t TILE_K = 16;
-
-    at::Tensor self = self_;
-    at::Tensor other = other_;
-    uint32_t has_bias = (bias_.defined() && beta.toDouble() != 0.0) ? 1 : 0;
-    
-    bool self_unsqueezed = false;
-    bool other_unsqueezed = false;
-
-    if (self.dim() < 2) {
-        self = self.unsqueeze(0);
-        self_unsqueezed = true;
-    }
-    if (other.dim() < 2) {
-        other = other.unsqueeze(1);
-        other_unsqueezed = true;
-    }
-
-    TORCH_CHECK(self.size(-1) == other.size(-2), "torchvulkan: inner dimensions must match");
-
-    uint32_t M = self.size(-2);
-    uint32_t K = self.size(-1);
-    uint32_t N = other.size(-1);
-
-    at::IntArrayRef self_batch = self.sizes().slice(0, self.dim() - 2);
-    at::IntArrayRef other_batch = other.sizes().slice(0, other.dim() - 2);
-    std::vector<int64_t> batch_shape = at::infer_size(self_batch, other_batch);
-
-    int64_t B = 1;
-    for (int64_t s : batch_shape) {
-        B *= s;
-    }
-
-    std::vector<int64_t> out_shape_vec = batch_shape;
-    out_shape_vec.push_back(M);
-    out_shape_vec.push_back(N);
-    at::IntArrayRef out_shape(out_shape_vec);
-
-    c10::ScalarType promoted_type = at::result_type(self, other);
-    if (!is_dtype_supported(promoted_type)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
-        return cpu_fallback();
-    }
-
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    uint32_t required_bytes = c10::elementSize(promoted_type) * ((TILE_M * (TILE_K + 1)) + (TILE_K * TILE_N));
-    uint32_t device_tile_m = TILE_M;
-    if (required_bytes > device->properties.limits.maxComputeSharedMemorySize) {
-        device_tile_m /= 2;
+
+    if (device->support_coopmat) {
+        at::Tensor out = dispatch_matmul_coop_shader(self, other, bias, alpha, beta, cpu_fallback);
+        return apply_matmul_activation(out, activation);
     }
-        
-    MatmulOperands ops = prepare_matmul_operands(self, other, bias_, has_bias, promoted_type, M, K, N, B, batch_shape);
-    at::Tensor self_b = ops.self_b;
-    at::Tensor other_b = ops.other_b;
-    at::Tensor bias_b = ops.bias_b;
-
-    at::Tensor out = at::empty({B, M, N}, self_b.options());
-    if (beta.toFloat() == 0) out.zero_();
-
-    if (M == 0 || N == 0 || B == 0) return out.reshape(out_shape);
-    if (K == 0) {
-        at::Tensor result = has_bias ? (bias_b * beta) : out.zero_();
-        return result.reshape(out_shape);
-    }
-
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_matmul_simd(promoted_type);
-    uint32_t vecSize = get_dtype_vec_size(promoted_type);
-
-    uint32_t workgroupSizeX = 16; 
-    uint32_t workgroupSizeY = 16; 
-    uint32_t isBiasAligned = has_bias ? bias_b.is_contiguous() : 1;
-    uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
-                         self_b.is_contiguous() && other_b.is_contiguous() && isBiasAligned;
-
-    SpecializationBuilder spd{};
-    spd.push(workgroupSizeX)
-       .push(workgroupSizeY)
-       .push(isAligned)
-       .push(has_bias);
-    uint32_t key = (has_bias << 21) | (isAligned << 20) | (workgroupSizeX << 10) | workgroupSizeY;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
-
-    uint32_t strides_a[4] = {static_cast<uint32_t>(self_b.stride(0)), static_cast<uint32_t>(self_b.stride(1)), static_cast<uint32_t>(self_b.stride(2)), 0};
-    uint32_t strides_b[4] = {static_cast<uint32_t>(other_b.stride(0)), static_cast<uint32_t>(other_b.stride(1)), static_cast<uint32_t>(other_b.stride(2)), 0};
-    uint32_t strides_c[4] = {static_cast<uint32_t>(out.stride(0)), static_cast<uint32_t>(out.stride(1)), static_cast<uint32_t>(out.stride(2)), 0};
-    uint32_t strides_bias[4] = {0, 0, 0, 0};
-    if (has_bias) {strides_bias[0] = static_cast<uint32_t>(bias_b.stride(0)); strides_bias[1] = static_cast<uint32_t>(bias_b.stride(1)); strides_bias[2] = static_cast<uint32_t>(bias_b.stride(2));}
-
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(self_b));
-    pcs.push(get_tensor_address(other_b));
-    pcs.push(get_tensor_address(out));
-    pcs.push(has_bias ? get_tensor_address(bias_b) : (uint64_t)0); // the shader only reads the bias when it exists
-    pcs.push_array(strides_a);
-    pcs.push_array(strides_b);
-    pcs.push_array(strides_c);
-    pcs.push_array(strides_bias);
-    pcs.push(M);
-    pcs.push(N);
-    pcs.push(K);
-    pcs.push((uint32_t)0);
-    pcs.push_scalar(alpha, promoted_type);
-    pcs.push_scalar(beta, promoted_type);
-    
-    uint32_t groupX = (N + TILE_N - 1) / TILE_N;
-    uint32_t groupY = (M + device_tile_m - 1) / device_tile_m;
-    uint32_t groupZ = static_cast<uint32_t>(B);
-
-    std::vector<at::Tensor> readTensors = {self_b, other_b};
-    if (has_bias) readTensors.push_back(bias_b);
-
-    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
-    device->shader_manager->dispatchShader(
-        shader_id,
-        specialization,
-        pushConstants,
-        /* read = */ readTensors,
-        /* write = */ {out},
-        groupX, groupY, groupZ
-    );
-
-    out = out.reshape(out_shape);
-    if (self_unsqueezed || other_unsqueezed) {
-        if (self_unsqueezed && other_unsqueezed) out = out.squeeze(-1).squeeze(-1); 
-        else if (self_unsqueezed) out = out.squeeze(-2); 
-        else out = out.squeeze(-1); 
-    }
-
-    return out;
+    return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, activation, cpu_fallback);
 }
 
-at::Tensor torchvulkan::mm_vulkan(
+at::Tensor mm_vulkan(
     const at::Tensor& self,
     const at::Tensor& other)
 {
     return dispatch_matmul_shader(
-        self, other, {}, 1, 0,
-        [&]() { return at::mm(self.to(at::kCPU), other.to(at::kCPU)); }
+        self, other, {}, 1, 0, MatmulActivation::NONE,
+        [&]() { return at::mm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
     );
 }
 
-at::Tensor torchvulkan::bmm_vulkan(
+at::Tensor bmm_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
     return dispatch_matmul_shader(
-        self, other, {}, 1, 0,
-        [&]() { return at::bmm(self.to(at::kCPU), other.to(at::kCPU)); }
+        self, other, {}, 1, 0, MatmulActivation::NONE,
+        [&]() { return at::bmm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
     );
 }
 
-at::Tensor torchvulkan::matmul_vulkan(
+at::Tensor matmul_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
     return dispatch_matmul_shader(
-        self, other, {}, 1, 0,
-        [&]() { return at::matmul(self.to(at::kCPU), other.to(at::kCPU)); }
+        self, other, {}, 1, 0, MatmulActivation::NONE,
+        [&]() { return at::matmul(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
     );
 }
 
-at::Tensor torchvulkan::addmm_vulkan(
+at::Tensor addmm_vulkan(
     const at::Tensor& input, 
     const at::Tensor& mat1, 
     const at::Tensor& mat2, 
@@ -498,12 +551,12 @@ at::Tensor torchvulkan::addmm_vulkan(
     const at::Scalar& alpha) 
 {
     return dispatch_matmul_shader(
-        mat1, mat2, input, alpha, beta,
-        [&]() { return at::addmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha); }
+        mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
+        [&]() { return at::addmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
     );
 }
 
-at::Tensor torchvulkan::baddbmm_vulkan(
+at::Tensor baddbmm_vulkan(
     const at::Tensor& input, 
     const at::Tensor& mat1, 
     const at::Tensor& mat2, 
@@ -511,7 +564,33 @@ at::Tensor torchvulkan::baddbmm_vulkan(
     const at::Scalar& alpha)
 {
     return dispatch_matmul_shader(
-        mat1, mat2, input, alpha, beta,
-        [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha); }
+        mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
+        [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
     );
+}
+
+at::Tensor addmm_activation_vulkan(
+    const at::Tensor& input,
+    const at::Tensor& mat1,
+    const at::Tensor& mat2,
+    const at::Scalar& beta,
+    const at::Scalar& alpha,
+    bool use_gelu)
+{
+    MatmulActivation activation = use_gelu ? MatmulActivation::GELU : MatmulActivation::RELU;
+    return dispatch_matmul_shader(
+        mat1, mat2, input, alpha, beta, activation,
+        [&]() { return at::_addmm_activation(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha, use_gelu).to(mat1.device()); }
+    );
+}
+
+} // namespace
+
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("mm", &mm_vulkan);
+    m.impl("bmm", &bmm_vulkan);
+    m.impl("matmul", &matmul_vulkan);
+    m.impl("addmm", &addmm_vulkan);
+    m.impl("baddbmm", &baddbmm_vulkan);
+    m.impl("_addmm_activation", &addmm_activation_vulkan);
 }

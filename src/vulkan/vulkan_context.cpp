@@ -1,6 +1,21 @@
 #define VOLK_IMPLEMENTATION
 #include "vulkan_context.h"
 
+// VK_KHR_shader_bfloat16 is newer than some Vulkan SDKs still in use (1.4.309 lacks
+// it). These are its definitions from vulkan_core.h, so whether bfloat16 runs on
+// the GPU depends on the device, not on which headers the build happened to find.
+#ifndef VK_KHR_shader_bfloat16
+#define VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME "VK_KHR_shader_bfloat16"
+static constexpr VkStructureType VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR = static_cast<VkStructureType>(1000141000);
+typedef struct VkPhysicalDeviceShaderBfloat16FeaturesKHR {
+    VkStructureType    sType;
+    void*              pNext;
+    VkBool32           shaderBFloat16Type;
+    VkBool32           shaderBFloat16DotProduct;
+    VkBool32           shaderBFloat16CooperativeMatrix;
+} VkPhysicalDeviceShaderBfloat16FeaturesKHR;
+#endif
+
 thread_local c10::DeviceIndex VulkanContext::currentDeviceIndex;
 
 VulkanContext& VulkanContext::Instance() 
@@ -90,8 +105,12 @@ void VulkanContext::initVulkan()
 
     volkLoadInstance(instance);
 
-    const char* env = std::getenv("TORCHVULKAN_STRICT");
-    isStrict_ = env != nullptr && env[0] != '\0' && env[0] != '0';
+    auto validateEnv = [&](const char* name) {
+        return name != nullptr && name[0] != '\0' && name[0] != '0';
+    };
+
+    isStrict_ = validateEnv(std::getenv("TORCHVULKAN_STRICT"));
+    enableProfiling_ = validateEnv(std::getenv("TORCHVULKAN_PROFILE"));
 }
 
 void VulkanContext::createDeviceContexts()
@@ -190,6 +209,8 @@ void VulkanContext::createDeviceWithExtensions()
         
         // chain of feature structs to query what the device supports
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT supportedSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR supportedPipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+        supportedSubgroupControl.pNext = &supportedPipelineExec;
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR supportedCoopMat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
         supportedCoopMat.pNext = &supportedSubgroupControl;
         VkPhysicalDeviceVulkan12Features supported12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -198,6 +219,12 @@ void VulkanContext::createDeviceWithExtensions()
         supported11.pNext = &supported12;
         VkPhysicalDeviceFeatures2 supportedFeatures2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
         supportedFeatures2.pNext = &supported11;
+
+        VkPhysicalDeviceShaderBfloat16FeaturesKHR supportedBfloat16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR};
+        if (hasExt(VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME)) {
+            supportedBfloat16.pNext = supportedFeatures2.pNext;
+            supportedFeatures2.pNext = &supportedBfloat16;
+        }
 
         // query which ones are supported
         vkGetPhysicalDeviceFeatures2(device->physicalDevice, &supportedFeatures2);
@@ -224,19 +251,36 @@ void VulkanContext::createDeviceWithExtensions()
         device->support_float64 = supportedFeatures2.features.shaderFloat64;
         device->support_int64 = supportedFeatures2.features.shaderInt64;
         device->support_float16 = supported12.shaderFloat16 && enable11.storageBuffer16BitAccess;
-        device->support_bfloat16 = false; // adding support when it comes out!
+        device->support_bfloat16 = false;
         device->support_int16 = supportedFeatures2.features.shaderInt16 && enable11.storageBuffer16BitAccess;
         device->support_int8 = supported12.shaderInt8 && supported12.storageBuffer8BitAccess;
         device->support_subgroup_extended_types = supported12.shaderSubgroupExtendedTypes;
 
+        VkPhysicalDeviceShaderBfloat16FeaturesKHR enableBfloat16{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR};
         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT enableSubgroupControl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
         VkPhysicalDeviceCooperativeMatrixFeaturesKHR enableCoopMatrices{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR enablePipelineExec{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
 
         // synchronization2 lets the dispatcher scope its barriers to the stages and accesses it actually uses
         VkPhysicalDeviceSynchronization2FeaturesKHR enableSync2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR};
         enableSync2.synchronization2 = VK_TRUE;
         enableSync2.pNext = enable12.pNext;
         enable12.pNext = &enableSync2;
+
+        if (supportedBfloat16.shaderBFloat16Type && enable11.storageBuffer16BitAccess)
+        {
+            device->support_bfloat16 = true;
+            enableBfloat16.shaderBFloat16Type = VK_TRUE;
+
+            if (supportedBfloat16.shaderBFloat16CooperativeMatrix && hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix)
+            {
+                device->support_bfloat16_coopmat = true;
+                enableBfloat16.shaderBFloat16CooperativeMatrix = VK_TRUE;
+            }
+            enableBfloat16.pNext = enable12.pNext;
+            enable12.pNext = &enableBfloat16;
+            deviceExtensions.push_back(VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME);
+        }
 
         if (hasExt(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME) && supportedSubgroupControl.subgroupSizeControl)
         {
@@ -265,12 +309,30 @@ void VulkanContext::createDeviceWithExtensions()
             for (int i = 0; i < propertyCount; ++i)
             {
                 VkCooperativeMatrixPropertiesKHR property = coopMatProperties[i];
+
+                bool uses_bfloat16 = property.AType == COMPONENT_TYPE_BFLOAT16 || property.BType == COMPONENT_TYPE_BFLOAT16 ||
+                                     property.CType == COMPONENT_TYPE_BFLOAT16 || property.ResultType == COMPONENT_TYPE_BFLOAT16;
+                if (uses_bfloat16 && !device->support_bfloat16_coopmat) continue;
+
                 CoopMatConfig config{property.MSize, property.NSize, property.KSize};
                 device->cache.addCoopMatConfig(property.AType, property.BType, property.CType, property.ResultType, config);
             }
         }
 
-        // creating the device 
+        if (hasExt(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME) && supportedPipelineExec.pipelineExecutableInfo)
+        {
+            device->support_pipeline_statistics = true;
+            enablePipelineExec.pipelineExecutableInfo = VK_TRUE;
+            enablePipelineExec.pNext = enable12.pNext;
+            enable12.pNext = &enablePipelineExec;
+            deviceExtensions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+        }
+        else if (enableProfiling_)
+        {
+            TORCH_WARN("torchvulkan [WARNING]: Vulkan device '", device->properties.deviceName, "' does not support ", VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, "; pipeline statistics will not be reported.");
+        }
+
+        // creating the device
         VkDeviceQueueCreateInfo queueInfo{};
         queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queueInfo.queueFamilyIndex = device->computeQueueFamily;

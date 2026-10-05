@@ -1,10 +1,24 @@
 #include <torch/extension.h>
 #include <ATen/WrapDimUtils.h>
+#include <c10/core/MemoryFormat.h>
 #include <limits>
-#include "api/ops/reduce.h"
-#include "api/ops/binary.h"
+#include <tuple>
+#include "vulkan/memory.h"
+#include "vulkan/vulkan_context.h"
+#include "vulkan/allocator.h"
+#include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
-at::Tensor torchvulkan::dispatch_reduce_shader(
+namespace {
+
+enum class ReduceOp {
+    SUM = 0,
+    AMAX = 1,
+    AMIN = 2,
+    PROD = 3
+};
+
+at::Tensor dispatch_reduce_shader(
     const at::Tensor& self,
     int64_t dim,
     bool keepdim,
@@ -42,7 +56,8 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
     at::ScalarType stype = self.scalar_type();
     bool dtype_needs_extended = c10::elementSize(stype) != 4;
     bool dtype_supported_subgroup =
-        at::isFloatingType(stype) && c10::elementSize(stype) <= 4 &&
+        at::isFloatingType(stype) && stype != at::kBFloat16 &&
+        c10::elementSize(stype) <= 4 &&
         (!dtype_needs_extended || device->support_subgroup_extended_types);
 
     bool use_subgroup =
@@ -56,16 +71,14 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
     uint32_t workgroupSizeX = use_subgroup
         ? device->subgroup_size
         : get_dtype_workgroup_size(self.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = use_subgroup
-        ? torchvulkan::get_shader_id_reduce_subgroup(self.scalar_type())
-        : torchvulkan::get_shader_id_reduce(self.scalar_type());
+    torchvulkan::Kernel kernel = use_subgroup ? torchvulkan::Kernel::REDUCE_SUBGROUP : torchvulkan::Kernel::REDUCE;
+    ShaderKey shader_key{kernel, self.scalar_type()};
 
     SpecializationBuilder spd{};
     spd.push(op)
        .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 8) | (ndim32 << 4) | op;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
 
     IntDivider sizes;
     uint32_t strides_in[MAX_DIMS] = {0};
@@ -94,7 +107,7 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
         /* read = */ {self},
@@ -104,8 +117,6 @@ at::Tensor torchvulkan::dispatch_reduce_shader(
 
     return keepdim ? out : out.squeeze(dim);
 }
-
-namespace {
 
 at::Tensor cpu_reduce_fallback(
     const at::Tensor& cpu_self,
@@ -131,19 +142,7 @@ at::Tensor cpu_reduce_fallback(
     return at::sum(cpu_self, dims, keepdim);
 }
 
-// integer reductions accumulate in int64 to avoid overflow
-c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optional<at::ScalarType> dtype)
-{
-    if (dtype.has_value()) return *dtype;
-    if (at::isIntegralType(self.scalar_type(), /*includeBool=*/true) && self.scalar_type() != at::kLong) {
-        return at::kLong;
-    }
-    return self.scalar_type();
-}
-
-} // namespace
-
-at::Tensor torchvulkan::reduce_dims_vulkan(
+at::Tensor reduce_dims_vulkan(
     const at::Tensor& self,
     at::OptionalIntArrayRef dims,
     bool keepdim,
@@ -180,15 +179,20 @@ at::Tensor torchvulkan::reduce_dims_vulkan(
     return result;
 }
 
-at::Tensor torchvulkan::sum_dim_vulkan(
+at::Tensor sum_dim_vulkan(
     const at::Tensor& self,
     at::OptionalIntArrayRef dim,
     bool keepdim,
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, dim, keepdim, ReduceOp::SUM, 0.0, true);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, dim, keepdim, ReduceOp::SUM, 0.0, true).to(out_dtype);
 }
+
+} // namespace
 
 at::Tensor torchvulkan::sum_vulkan(
     const at::Tensor& self,
@@ -197,7 +201,9 @@ at::Tensor torchvulkan::sum_vulkan(
     return sum_dim_vulkan(self, at::OptionalIntArrayRef(), false, dtype);
 }
 
-at::Tensor torchvulkan::amax_vulkan(
+namespace {
+
+at::Tensor amax_vulkan(
     const at::Tensor& self,
     at::IntArrayRef dim,
     bool keepdim)
@@ -205,7 +211,7 @@ at::Tensor torchvulkan::amax_vulkan(
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMAX, -std::numeric_limits<double>::infinity(), true);
 }
 
-at::Tensor torchvulkan::amin_vulkan(
+at::Tensor amin_vulkan(
     const at::Tensor& self,
     at::IntArrayRef dim,
     bool keepdim)
@@ -213,25 +219,31 @@ at::Tensor torchvulkan::amin_vulkan(
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMIN, std::numeric_limits<double>::infinity(), true);
 }
 
-at::Tensor torchvulkan::prod_dim_vulkan(
+at::Tensor prod_dim_vulkan(
     const at::Tensor& self,
     int64_t dim,
     bool keepdim,
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, at::IntArrayRef{dim}, keepdim, ReduceOp::PROD, 1.0, false);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, at::IntArrayRef{dim}, keepdim, ReduceOp::PROD, 1.0, false).to(out_dtype);
 }
 
-at::Tensor torchvulkan::prod_vulkan(
+at::Tensor prod_vulkan(
     const at::Tensor& self,
     c10::optional<at::ScalarType> dtype)
 {
     at::Tensor self_typed = self.to(reduce_compute_dtype(self, dtype));
-    return reduce_dims_vulkan(self_typed, at::OptionalIntArrayRef(), false, ReduceOp::PROD, 1.0, false);
+    at::ScalarType out_dtype = self_typed.scalar_type();
+    at::Tensor acc = self_typed.to(reduce_accumulate_dtype(out_dtype));
+
+    return reduce_dims_vulkan(acc, at::OptionalIntArrayRef(), false, ReduceOp::PROD, 1.0, false).to(out_dtype);
 }
 
-at::Tensor torchvulkan::mean_dim_vulkan(
+at::Tensor mean_dim_vulkan(
     const at::Tensor& self,
     at::OptionalIntArrayRef dim,
     bool keepdim,
@@ -248,194 +260,15 @@ at::Tensor torchvulkan::mean_dim_vulkan(
         count = self.numel();
     }
 
-    return divide_scalar_vulkan(summed, (double)count);
+    return torchvulkan::divide_scalar_vulkan(summed, (double)count);
 }
 
-at::Tensor torchvulkan::mean_vulkan(
+at::Tensor mean_vulkan(
     const at::Tensor& self,
     c10::optional<at::ScalarType> dtype)
 {
     return mean_dim_vulkan(self, at::OptionalIntArrayRef(), false, dtype);
 }
-
-at::Tensor torchvulkan::logsumexp_vulkan(
-    const at::Tensor& self_in,
-    at::IntArrayRef dim,
-    bool keepdim)
-{
-    at::Tensor self = self_in.is_floating_point()
-        ? self_in
-        : self_in.to(c10::typeMetaToScalarType(at::get_default_dtype()));
-
-    if (self.numel() == 0) return at::sum(at::exp(self), dim, keepdim).log_();
-
-    at::Tensor m = at::amax(self, dim, /*keepdim=*/true);
-    at::Tensor s = at::sum(at::exp(at::sub(self, m)), dim, /*keepdim=*/true);
-    at::Tensor res = at::add(at::log(s), m);
-    res = at::where(at::isinf(m), m, res);
-
-    if (!keepdim) {
-        std::vector<int64_t> dl(dim.begin(), dim.end());
-        for (auto& d : dl) d = c10::maybe_wrap_dim(d, self.dim());
-        std::sort(dl.begin(), dl.end(), std::greater<int64_t>());
-        for (int64_t d : dl) res = res.squeeze(d);
-    }
-    return res;
-}
-
-namespace {
-
-std::tuple<at::Tensor, at::Tensor> compute_var_mean(
-    const at::Tensor& self,
-    at::OptionalIntArrayRef dim,
-    double correction,
-    bool keepdim)
-{
-    at::Tensor mean_keep = at::mean(self, dim, /*keepdim=*/true);
-    at::Tensor diff = at::sub(self, mean_keep);
-    at::Tensor ssum = at::sum(at::mul(diff, diff), dim, keepdim);
-
-    int64_t N = 1;
-    if (dim.has_value() && dim->size() > 0) {
-        for (int64_t d : *dim) N *= self.size(c10::maybe_wrap_dim(d, self.dim()));
-    } else {
-        N = self.numel();
-    }
-
-    double denom = static_cast<double>(N) - correction;
-    at::Tensor var = denom > 0.0
-        ? at::div(ssum, denom)
-        : at::full_like(ssum, std::numeric_limits<double>::quiet_NaN());
-    at::Tensor mean = keepdim ? mean_keep : at::mean(self, dim, /*keepdim=*/false);
-    return std::make_tuple(var, mean);
-}
-
-double correction_or_default(const c10::optional<at::Scalar>& correction)
-{
-    return correction.has_value() ? correction->toDouble() : 1.0;
-}
-
-} // namespace
-
-at::Tensor torchvulkan::var_correction_vulkan(
-    const at::Tensor& self,
-    at::OptionalIntArrayRef dim,
-    const c10::optional<at::Scalar>& correction,
-    bool keepdim)
-{
-    return std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim));
-}
-
-at::Tensor torchvulkan::std_correction_vulkan(
-    const at::Tensor& self,
-    at::OptionalIntArrayRef dim,
-    const c10::optional<at::Scalar>& correction,
-    bool keepdim)
-{
-    return at::sqrt(var_correction_vulkan(self, dim, correction, keepdim));
-}
-
-std::tuple<at::Tensor, at::Tensor> torchvulkan::var_mean_correction_vulkan(
-    const at::Tensor& self,
-    at::OptionalIntArrayRef dim,
-    const c10::optional<at::Scalar>& correction,
-    bool keepdim)
-{
-    return compute_var_mean(self, dim, correction_or_default(correction), keepdim);
-}
-
-std::tuple<at::Tensor, at::Tensor> torchvulkan::std_mean_correction_vulkan(
-    const at::Tensor& self,
-    at::OptionalIntArrayRef dim,
-    const c10::optional<at::Scalar>& correction,
-    bool keepdim)
-{
-    at::Tensor var, mean;
-    std::tie(var, mean) = compute_var_mean(self, dim, correction_or_default(correction), keepdim);
-    return std::make_tuple(at::sqrt(var), mean);
-}
-
-namespace {
-
-enum class ScanOp { SUM = 0, PROD = 1 };
-
-at::Tensor cumscan(
-    const at::Tensor& self,
-    int64_t dim,
-    c10::optional<at::ScalarType> dtype,
-    ScanOp op)
-{
-    c10::ScalarType compute = reduce_compute_dtype(self, dtype);
-    at::Tensor x = self.to(compute);
-    if (x.dim() == 0 || x.numel() == 0) return x.clone();
-
-    int64_t d = c10::maybe_wrap_dim(dim, x.dim());
-    if (!is_dtype_supported(compute) || x.dim() > MAX_DIMS) {
-        at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), dim) : at::cumprod(x.cpu(), dim);
-        return cpu.to(self.device());
-    }
-
-    at::Tensor xt = x.transpose(d, -1).contiguous();
-    int64_t scan_size = xt.size(-1);
-    int64_t num_lines = scan_size > 0 ? xt.numel() / scan_size : 0;
-    at::Tensor out_t = at::empty_like(xt);
-    if (num_lines == 0) return out_t.transpose(d, -1).contiguous();
-
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(compute, 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan(compute);
-    uint32_t opv = static_cast<uint32_t>(op);
-
-    SpecializationBuilder spd{};
-    spd.push(opv)
-       .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
-
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
-       .push(get_tensor_address(out_t))
-       .push(static_cast<uint64_t>(num_lines))
-       .push(static_cast<uint32_t>(scan_size));
-
-    uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
-
-    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
-    device->shader_manager->dispatchShader(
-        shader_id,
-        specialization,
-        pushConstants,
-        /* read = */ {xt},
-        /* write = */ {out_t},
-        groupX, 1, 1
-    );
-
-    return out_t.transpose(d, -1).contiguous();
-}
-
-} // namespace
-
-at::Tensor& torchvulkan::cumsum_out_vulkan(
-    const at::Tensor& self,
-    int64_t dim,
-    c10::optional<at::ScalarType> dtype,
-    at::Tensor& out)
-{
-    out.copy_(cumscan(self, dim, dtype, ScanOp::SUM));
-    return out;
-}
-
-at::Tensor& torchvulkan::cumprod_out_vulkan(
-    const at::Tensor& self,
-    int64_t dim,
-    c10::optional<at::ScalarType> dtype,
-    at::Tensor& out)
-{
-    out.copy_(cumscan(self, dim, dtype, ScanOp::PROD));
-    return out;
-}
-
-namespace {
 
 enum class ArgOp 
 { 
@@ -464,53 +297,65 @@ at::Tensor argreduce(
         return cpu.to(self.device());
     }
 
-    std::vector<int64_t> perm;
-    for (int64_t i = 0; i < x.dim(); i++) if (i != d) perm.push_back(i);
-    perm.push_back(d);
-    at::Tensor xt = x.permute(perm).contiguous();
-
-    int64_t reduce_size = xt.size(-1);
-    int64_t num_lines = reduce_size > 0 ? xt.numel() / reduce_size : 0;
-    at::Tensor idx = at::empty({num_lines}, self.options().dtype(at::kLong));
+    int64_t ndim = x.dim();
+    std::vector<int64_t> out_sizes(x.sizes().begin(), x.sizes().end());
+    int64_t reduce_size = out_sizes[d];
+    out_sizes[d] = 1;
+    int64_t num_lines = reduce_size > 0 ? x.numel() / reduce_size : 0;
+    at::Tensor idx = at::empty(out_sizes, x.options().dtype(at::kLong));
+    if (num_lines == 0) return keepdim ? idx : idx.squeeze(d);
 
     DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
     uint32_t workgroupSizeX = get_dtype_workgroup_size(x.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_arg_reduce(x.scalar_type());
+    ShaderKey shader_key{torchvulkan::Kernel::ARG_REDUCE, x.scalar_type()};
     uint32_t opv = static_cast<uint32_t>(op);
+    int32_t ndim32 = static_cast<int32_t>(ndim);
 
     SpecializationBuilder spd{};
     spd.push(opv)
+       .push(ndim32)
        .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
+    SpecializationArgs specialization = spd.build();
+
+    std::vector<int64_t> x_strides(x.strides().begin(), x.strides().end());
+
+    IntDivider sizes;
+    uint32_t strides_in[MAX_DIMS] = {0};
+    for (int64_t i = 0; i < ndim; i++) {
+        int64_t actual_dim = ndim - 1 - i;
+        sizes.set(i, static_cast<uint32_t>(out_sizes[actual_dim]));
+        strides_in[i] = static_cast<uint32_t>(x_strides[actual_dim]);
+    }
+
+    MetadataBuilder metadataBuilder{};
+    metadataBuilder.push(sizes, ndim32)
+                   .push_array(strides_in, ndim32);
+    Metadata metadata = metadataBuilder.build();
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
+    pcs.push(get_tensor_address(x))
        .push(get_tensor_address(idx))
+       .push(device->shader_manager->registerMetadata(metadata))
        .push(static_cast<uint64_t>(num_lines))
+       .push(static_cast<uint32_t>(x_strides[d]))
        .push(static_cast<uint32_t>(reduce_size));
 
     uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
 
     PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
     device->shader_manager->dispatchShader(
-        shader_id,
+        shader_key,
         specialization,
         pushConstants,
-        /* read = */ {xt},
+        /* read = */ {x},
         /* write = */ {idx},
         groupX, 1, 1
     );
 
-    std::vector<int64_t> oshape(xt.sizes().begin(), xt.sizes().end() - 1);
-    at::Tensor result = idx.reshape(oshape);
-    if (keepdim) result = result.unsqueeze(d);
-    return result;
+    return keepdim ? idx : idx.squeeze(d);
 }
 
-} // namespace
-
-at::Tensor& torchvulkan::argmax_out_vulkan(
+at::Tensor& argmax_out_vulkan(
     const at::Tensor& self,
     c10::optional<int64_t> dim,
     bool keepdim,
@@ -520,7 +365,7 @@ at::Tensor& torchvulkan::argmax_out_vulkan(
     return out;
 }
 
-at::Tensor& torchvulkan::argmin_out_vulkan(
+at::Tensor& argmin_out_vulkan(
     const at::Tensor& self,
     c10::optional<int64_t> dim,
     bool keepdim,
@@ -530,87 +375,17 @@ at::Tensor& torchvulkan::argmin_out_vulkan(
     return out;
 }
 
-namespace {
-
-enum class CumArgOp { MAX = 0, MIN = 1 };
-
-void cumscanarg(
-    const at::Tensor& self,
-    at::Tensor& values,
-    at::Tensor& indices,
-    int64_t dim,
-    CumArgOp op)
-{
-    if (self.dim() == 0 || self.numel() == 0) {
-        values.copy_(self);
-        if (indices.numel() > 0) indices.zero_();
-        return;
-    }
-    int64_t d = c10::maybe_wrap_dim(dim, self.dim());
-    if (!is_dtype_supported(self.scalar_type()) || self.dim() > MAX_DIMS) {
-        auto r = op == CumArgOp::MAX ? at::cummax(self.cpu(), dim) : at::cummin(self.cpu(), dim);
-        values.copy_(std::get<0>(r));
-        indices.copy_(std::get<1>(r));
-        return;
-    }
-
-    at::Tensor xt = self.transpose(d, -1).contiguous();
-    int64_t scan_size = xt.size(-1);
-    int64_t num_lines = scan_size > 0 ? xt.numel() / scan_size : 0;
-    at::Tensor val_t = at::empty_like(xt);
-    at::Tensor idx_t = at::empty(xt.sizes(), self.options().dtype(at::kLong));
-    if (num_lines == 0) return;
-
-    DeviceContext* device = VulkanContext::Instance().CurrentDeviceContext();
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(self.scalar_type(), 1);
-    torchvulkan::ShaderID shader_id = torchvulkan::get_shader_id_scan_arg(self.scalar_type());
-
-    uint32_t opv = static_cast<uint32_t>(op);
-    SpecializationBuilder spd{};
-    spd.push(opv)
-       .push(workgroupSizeX);
-    uint32_t key = (workgroupSizeX << 4) | opv;
-    SpecializationArgs specialization = {spd.data(), spd.offsets(), spd.sizes(), spd.numConstants(), key};
-
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(xt))
-       .push(get_tensor_address(val_t))
-       .push(get_tensor_address(idx_t))
-       .push(static_cast<uint64_t>(num_lines))
-       .push(static_cast<uint32_t>(scan_size));
-
-    uint32_t groupX = (static_cast<uint32_t>(num_lines) + (workgroupSizeX - 1)) / workgroupSizeX;
-
-    PushConstants pushConstants = { const_cast<void*>(pcs.data()), pcs.size() };
-    device->shader_manager->dispatchShader(
-        shader_id,
-        specialization,
-        pushConstants,
-        /* read = */ {xt},
-        /* write = */ {val_t, idx_t},
-        groupX, 1, 1
-    );
-
-    values.copy_(val_t.transpose(d, -1));
-    indices.copy_(idx_t.transpose(d, -1));
-}
-
 } // namespace
 
-void torchvulkan::cummax_helper_vulkan(
-    const at::Tensor& self,
-    at::Tensor& values,
-    at::Tensor& indices,
-    int64_t dim)
-{
-    cumscanarg(self, values, indices, dim, CumArgOp::MAX);
-}
-
-void torchvulkan::cummin_helper_vulkan(
-    const at::Tensor& self,
-    at::Tensor& values,
-    at::Tensor& indices,
-    int64_t dim)
-{
-    cumscanarg(self, values, indices, dim, CumArgOp::MIN);
+TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("sum.dim_IntList", &sum_dim_vulkan);
+    m.impl("sum", &torchvulkan::sum_vulkan);
+    m.impl("amax", &amax_vulkan);
+    m.impl("amin", &amin_vulkan);
+    m.impl("prod", &prod_vulkan);
+    m.impl("prod.dim_int", &prod_dim_vulkan);
+    m.impl("mean.dim", &mean_dim_vulkan);
+    m.impl("mean", &mean_vulkan);
+    m.impl("argmax.out", &argmax_out_vulkan);
+    m.impl("argmin.out", &argmin_out_vulkan);
 }
