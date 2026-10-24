@@ -6,6 +6,7 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -125,7 +126,7 @@ void copy_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
     if (src.scalar_type() != dst.scalar_type())
     {
         if (!is_dtype_supported(src, src.scalar_type()) || !is_dtype_supported(src, dst.scalar_type())) {
-            TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
+            TORCHVULKAN_CPU_FALLBACK("Vulkan device does not support source or destination dtype. Falling back to CPU for copy.");
             dst.copy_(src.cpu());
             return;
         }

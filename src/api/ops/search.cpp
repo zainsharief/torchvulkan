@@ -5,6 +5,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -90,7 +91,7 @@ at::Tensor searchsorted_impl(
     if (sorted.size(-1) == 0) return out.zero_();
 
     if (!is_dtype_supported(sorted, dtype) || values.numel() >= std::numeric_limits<uint32_t>::max()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: This searchsorted can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("This searchsorted can't run on the Vulkan device. Falling back to CPU.");
         return at::searchsorted(sorted.cpu(), values.cpu(), out_int32, right, c10::nullopt, has_sorter ? c10::optional<at::Tensor>(sorter->cpu()) : c10::nullopt).to(self.device());
     }
     at::Tensor order = has_sorter ? sorter->contiguous() : at::Tensor();

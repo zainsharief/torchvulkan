@@ -3,6 +3,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -116,7 +117,7 @@ at::Tensor& integer_binary_out(
         ? dispatch_integer_binary_shader(self, at::Tensor(), other.item(), result, operation)
         : dispatch_integer_binary_shader(self, other, at::Scalar(0), result, operation);
     if (!ran) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: ", name, " on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("", name, " on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
         result.copy_(cpu_integer_binary(self.cpu(), other.cpu(), operation));
     }
     if (!result.is_same(out)) fill_out(out, result);

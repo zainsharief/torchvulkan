@@ -5,6 +5,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -132,7 +133,7 @@ at::Tensor where_vulkan(
     DeviceContext* context = get_device_context(out);
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (!is_dtype_supported(context, promoted) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: This where can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("This where can't run on the Vulkan device. Falling back to CPU.");
         return at::where(c.cpu(), a.cpu(), b.cpu()).to(device);
     }
 
@@ -172,7 +173,7 @@ at::Tensor& compare_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& 
     if (!out.sizes().equals(self.sizes())) out.resize_(self.sizes());
     c10::ScalarType promoted = at::result_type(self, other);
     if (!dispatch_compare_shader(self, nullptr, other, out, op, promoted)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: This comparison can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("This comparison can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare_scalar(self.cpu(), other, op));
     }
     return out;
@@ -195,7 +196,7 @@ at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, 
     at::Tensor lhs = self.to(out.device());
     at::Tensor rhs = other.to(out.device());
     if (!dispatch_compare_shader(lhs, &rhs, at::Scalar(0), out, op, promoted)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: This comparison can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("This comparison can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare(self.cpu(), other.cpu(), op));
     }
     return out;

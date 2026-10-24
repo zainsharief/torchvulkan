@@ -165,9 +165,9 @@ Importing `torchvulkan` registers the backend, after which the device is address
 
 ## CPU fallback
 
-By default, any operation, dtype, or tensor shape the backend doesn't implement natively runs on the **CPU**, so models keep working despite partial coverage. The warning is printed once, for the first operation that falls back; call `torch.set_warn_always(True)` to see every one.
+By default, any operation, dtype, or tensor shape the backend doesn't implement natively runs on the **CPU**, so models keep working despite partial coverage. Every such fallback prints a `torchvulkan [WARNING]` naming the operation and the reason (an unimplemented operator, an unsupported dtype such as `bfloat16` on devices without `VK_KHR_shader_bfloat16`, or a shape the kernels can't handle). Each warning is printed once per kind of fallback; call `torch.set_warn_always(True)` to see every occurrence.
 
-Set `TORCHVULKAN_STRICT=1` to turn those silent fallbacks into errors. This is useful for finding which operators a workload actually needs:
+Set `TORCHVULKAN_STRICT=1` to turn all of these fallbacks into errors. This is useful for finding which operators a workload actually needs:
 
 ```bash
 TORCHVULKAN_STRICT=1 python your_script.py
@@ -177,7 +177,7 @@ TORCHVULKAN_STRICT=1 python your_script.py
 
 | Variable | Effect |
 | --- | --- |
-| `TORCHVULKAN_STRICT=1` | Raise an error instead of falling back to the CPU. |
+| `TORCHVULKAN_STRICT=1` | Raise an error instead of falling back to the CPU (unimplemented operators, unsupported dtypes or shapes). |
 | `TORCHVULKAN_SYSTEM_VULKAN=1` | macOS: use the system Vulkan loader instead of the bundled MoltenVK. |
 | `TORCHVULKAN_VALIDATION=1` | Enable the Khronos validation layer, if it's installed. `=sync` also enables synchronization validation. On macOS this needs `TORCHVULKAN_SYSTEM_VULKAN=1`. |
 | `TORCHVULKAN_PROFILE=1` | Print each compute pipeline's driver statistics (such as register use) when it's compiled, on drivers that support `VK_KHR_pipeline_executable_properties`. |

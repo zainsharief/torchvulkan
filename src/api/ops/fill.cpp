@@ -3,6 +3,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -17,7 +18,7 @@ at::Tensor& fill_scalar_vulkan(
     
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (!is_dtype_supported(self, iter.dtype()) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Can't fill a ", iter.dtype(), " tensor of this shape on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("Can't fill a ", iter.dtype(), " tensor of this shape on the Vulkan device. Falling back to CPU.");
         self.copy_(at::empty(self.sizes(), self.options().device(at::kCPU)).fill_(value));
         return self;
     }

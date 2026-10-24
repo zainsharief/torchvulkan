@@ -531,5 +531,37 @@ def run_script(source, env=None):
                           env={**os.environ, **(env or {})}, timeout=300)
 
 
+class TestVulkanFallback(TestCase):
+    """CPU fallbacks for unsupported shapes/dtypes warn by default and fail under TORCHVULKAN_STRICT=1.
+    argmax of a 0-dim tensor always takes the CPU path, so this runs the same on every device."""
+
+    SCRIPT = """
+        import warnings, torch, torchvulkan
+        x = torch.tensor(3.0, device="vulkan")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            {setup}
+            for _ in range(2):
+                assert torch.argmax(x, dim=0).item() == 0
+        print(sum("argmax" in str(w.message) and "Falling back to CPU" in str(w.message) for w in caught))
+    """
+
+    def test_fallback_warns_once_by_default(self):
+        r = run_script(self.SCRIPT.format(setup="pass"), env={"TORCHVULKAN_STRICT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "1")
+
+    def test_fallback_warns_every_time_with_warn_always(self):
+        r = run_script(self.SCRIPT.format(setup="torch.set_warn_always(True)"), env={"TORCHVULKAN_STRICT": "0"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "2")
+
+    def test_fallback_raises_in_strict_mode(self):
+        r = run_script(self.SCRIPT.format(setup="pass"), env={"TORCHVULKAN_STRICT": "1"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("torchvulkan [NOT IMPLEMENTED]", r.stderr)
+        self.assertIn("argmax", r.stderr)
+
+
 if __name__ == '__main__':
     run_tests()

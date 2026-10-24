@@ -6,6 +6,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -89,7 +90,7 @@ std::tuple<at::Tensor, at::Tensor> sort_along(const at::Tensor& self, int64_t di
 
     auto sorted = dispatch_sort_shader(lines, descending);
     if (!sorted.has_value()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A ", self.scalar_type(), " sort of this size can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A ", self.scalar_type(), " sort of this size can't run on the Vulkan device. Falling back to CPU.");
         auto [values, indices] = at::sort(self.cpu(), /*stable=*/true, dim, descending);
         return std::make_tuple(values.to(self.device()), indices.to(self.device()));
     }
