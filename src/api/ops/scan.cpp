@@ -6,6 +6,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -25,6 +26,7 @@ at::Tensor cumscan(
 
     int64_t d = c10::maybe_wrap_dim(dim, x.dim());
     if (!is_dtype_supported(x, compute) || x.dim() > MAX_DIMS || !fits_32bit_indexing({x})) {
+        TORCHVULKAN_CPU_FALLBACK("A ", compute, " cumulative op of this shape can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), d) : op == ScanOp::PROD ? at::cumprod(x.cpu(), d) : at::logcumsumexp(x.cpu(), d);
         return cpu.to(out_dtype).to(self.device());
     }
@@ -124,6 +126,7 @@ void cumscanarg(
     }
     int64_t d = c10::maybe_wrap_dim(dim, self.dim());
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
+        TORCHVULKAN_CPU_FALLBACK("A ", self.scalar_type(), op == CumArgOp::MAX ? " cummax" : " cummin", " of this shape can't run on the Vulkan device. Falling back to CPU.");
         auto r = op == CumArgOp::MAX ? at::cummax(self.cpu(), dim) : at::cummin(self.cpu(), dim);
         values.copy_(std::get<0>(r));
         indices.copy_(std::get<1>(r));

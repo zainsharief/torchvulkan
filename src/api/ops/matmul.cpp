@@ -6,6 +6,7 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -171,7 +172,7 @@ at::Tensor dispatch_matmul_simd_shader(
     DeviceContext* device = get_device_context(self_);
     c10::ScalarType result_dtype = at::result_type(shape.self, shape.other);
     if (!is_dtype_supported(device, result_dtype) || WG * WG > device->properties.limits.maxComputeWorkGroupInvocations) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A ", result_dtype, " matmul can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A ", result_dtype, " matmul can't run on the Vulkan device. Falling back to CPU.");
         return cpu_fallback();
     }
 
@@ -190,7 +191,7 @@ at::Tensor dispatch_matmul_simd_shader(
     uint32_t tile_m = c10::elementSize(result_dtype) < 8 ? 128 : 64;
     if (tile_m == 128 && shared_bytes(128) > max_shared_memory) tile_m = 64;
     if (shared_bytes(tile_m) > max_shared_memory) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: a ", result_dtype, " matmul tile needs ", shared_bytes(tile_m),
+        TORCHVULKAN_CPU_FALLBACK("a ", result_dtype, " matmul tile needs ", shared_bytes(tile_m),
             " bytes of shared memory but the device provides ", max_shared_memory, ". Falling back to CPU.");
         return cpu_fallback();
     }
@@ -204,7 +205,7 @@ at::Tensor dispatch_matmul_simd_shader(
         return finish_matmul_output(apply_matmul_activation(result, activation), shape);
     }
     if (!fits_matmul_indexing(ops, out)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A matmul is too large for 32-bit indexing. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A matmul is too large for 32-bit indexing. Falling back to CPU.");
         return cpu_fallback();
     }
 
@@ -299,7 +300,7 @@ at::Tensor dispatch_matmul_coop_shader(
     DeviceContext* device = get_device_context(self_);
     c10::ScalarType promoted_type = at::result_type(self_, other_);
     if (!is_dtype_supported(device, promoted_type)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
         return cpu_fallback();
     }
 

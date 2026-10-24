@@ -4,6 +4,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -133,7 +134,7 @@ at::Tensor& special_out(
         ? dispatch_special_shader(lhs, at::Tensor(), other.item().toDouble(), result, operation)
         : dispatch_special_shader(lhs, other, 0.0, result, operation);
     if (!ran) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A special function on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A special function on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
         result.copy_(fallback(self.cpu(), other.defined() ? other.cpu() : other));
     }
     if (!result.is_same(out)) fill_out(out, result);

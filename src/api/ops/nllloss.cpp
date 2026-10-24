@@ -6,6 +6,7 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -84,7 +85,7 @@ std::tuple<at::Tensor, at::Tensor> nll_loss_forward_vulkan(
     TORCH_CHECK(self.dim() == 1 || self.dim() == 2, "torchvulkan [ERROR]: nll_loss only supports 1D (unbatched) or 2D input.");
 
     if (!is_dtype_supported(self, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
         c10::optional<at::Tensor> cpu_weight = weight.has_value() && weight->defined() ? c10::optional<at::Tensor>(weight->cpu()) : c10::nullopt;
         auto [cpu_output, cpu_total_weight] = at::nll_loss_forward(self.cpu(), target.cpu(), cpu_weight, reduction, ignore_index);
         return {cpu_output.to(self.device()), cpu_total_weight.to(self.device())};
@@ -124,7 +125,7 @@ at::Tensor nll_loss_backward_vulkan(
     TORCH_CHECK(self.dim() == 1 || self.dim() == 2, "torchvulkan [ERROR]: nll_loss only supports 1D (unbatched) or 2D input.");
 
     if (!is_dtype_supported(self, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
         c10::optional<at::Tensor> cpu_weight = weight.has_value() && weight->defined() ? c10::optional<at::Tensor>(weight->cpu()) : c10::nullopt;
         at::Tensor cpu_grad_input = at::nll_loss_backward(
             grad_output.cpu(), self.cpu(), target.cpu(), cpu_weight, reduction, ignore_index, total_weight.cpu());

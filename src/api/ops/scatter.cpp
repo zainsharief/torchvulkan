@@ -7,6 +7,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -181,7 +182,7 @@ at::Tensor scatter_along_dim(const at::Tensor& self, int64_t dim, const at::Tens
     }
 
     if (!can_scatter(s, idx.numel())) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: This scatter can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("This scatter can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = s.cpu().clone();
         if (mode == ScatterMode::LAST) cpu.scatter_(dim, idx.cpu(), values.cpu());
         else cpu.scatter_reduce_(dim, idx.cpu(), values.cpu(), mode == ScatterMode::SUM ? "sum" : mode == ScatterMode::PROD ? "prod" : mode == ScatterMode::MEAN ? "mean" : mode == ScatterMode::AMAX ? "amax" : "amin", include_self);

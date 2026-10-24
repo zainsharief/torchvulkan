@@ -5,6 +5,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -79,7 +80,7 @@ at::Tensor unary_op_vulkan(
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (!supported || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A unary op on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A unary op on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
         return fallback(src.cpu()).to(src.device());
     }
 
@@ -278,7 +279,7 @@ at::Tensor frac_vulkan(const at::Tensor& self)
 // complex values run on the CPU: the shaders have no complex dtype yet
 at::Tensor complex_on_cpu(const at::Tensor& self, const std::function<at::Tensor(const at::Tensor&)>& op)
 {
-    TORCH_WARN_ONCE("torchvulkan [WARNING]: A unary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
+    TORCHVULKAN_CPU_FALLBACK("A unary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
     return op(self.cpu()).to(self.device());
 }
 

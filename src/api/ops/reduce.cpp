@@ -9,6 +9,7 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -148,7 +149,7 @@ at::Tensor reduce_dims_vulkan(
     bool has_subgroup)
 {
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());
     }
 
@@ -297,6 +298,7 @@ at::Tensor argreduce(
     }
 
     if (!is_dtype_supported(x, x.scalar_type()) || x.dim() == 0 || x.dim() > MAX_DIMS || x.numel() == 0 || !fits_32bit_indexing({x})) {
+        TORCHVULKAN_CPU_FALLBACK("This ", op == ArgOp::ARGMAX ? "argmax" : "argmin", " on ", x.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ArgOp::ARGMAX ? at::argmax(self.cpu(), dim, keepdim) : at::argmin(self.cpu(), dim, keepdim);
         return cpu.to(self.device());
     }

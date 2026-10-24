@@ -9,6 +9,7 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -120,7 +121,7 @@ at::Tensor binary_op_vulkan(
     std::optional<at::Tensor> out = dispatch_binary_shader(self, at::Tensor(), other, alpha, operation, at::result_type(self, other));
     if (out.has_value()) return *out;
 
-    TORCH_WARN_ONCE("torchvulkan [WARNING]: A binary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
+    TORCHVULKAN_CPU_FALLBACK("A binary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
     return fallback(self.cpu(), other).to(self.device());
 }
 
@@ -145,7 +146,7 @@ at::Tensor binary_op_vulkan(
     std::optional<at::Tensor> out = dispatch_binary_shader(lhs, rhs, at::Scalar(0), alpha, operation, at::result_type(self, other));
     if (out.has_value()) return *out;
 
-    TORCH_WARN_ONCE("torchvulkan [WARNING]: A binary op on ", at::result_type(self, other), " can't run on the Vulkan device. Falling back to CPU.");
+    TORCHVULKAN_CPU_FALLBACK("A binary op on ", at::result_type(self, other), " can't run on the Vulkan device. Falling back to CPU.");
     return fallback(lhs.cpu(), rhs.cpu()).to(lhs.device());
 }
 

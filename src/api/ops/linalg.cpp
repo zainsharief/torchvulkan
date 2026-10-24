@@ -12,6 +12,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/fallback.h"
 
 namespace {
 
@@ -318,7 +319,7 @@ at::Tensor solve_triangular_left(const at::Tensor& A, const at::Tensor& B, bool 
     auto [a, b] = broadcast_batches(A, B);
     if (b.numel() == 0 || a.size(-1) == 0) return b.clone();
     if (a.is_complex() || b.is_complex()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A complex triangular solve can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A complex triangular solve can't run on the Vulkan device. Falling back to CPU.");
         at::ScalarType type = at::promote_types(a.scalar_type(), b.scalar_type());
         return at::linalg_solve_triangular(a.cpu().to(type), b.cpu().to(type), upper, /*left=*/true, unit).to(B.device());
     }
@@ -354,7 +355,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> lu_factor_impl(const at::Tensor& 
 {
     TORCH_CHECK(A.dim() >= 2, name, ": Expected tensor with 2 or more dimensions. Got size: ", A.sizes(), " instead");
     if (A.is_complex()) {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: A complex LU factorization can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_CPU_FALLBACK("A complex LU factorization can't run on the Vulkan device. Falling back to CPU.");
         auto [lu, pivots, info] = at::linalg_lu_factor_ex(A.cpu());
         return std::make_tuple(lu.to(A.device()), pivots.to(A.device()), info.to(A.device()));
     }
