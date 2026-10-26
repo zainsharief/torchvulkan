@@ -12,7 +12,8 @@ size_t DeviceContext::memoryBudget()
 {
     VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(allocator, budgets);
-    return static_cast<size_t>(budgets[vram_heap_index].budget * VRAM_USAGE_LIMIT);
+    double limit = support_memory_budget ? VRAM_USAGE_LIMIT : 1.0;
+    return static_cast<size_t>(budgets[vram_heap_index].budget * limit);
 }
 
 size_t DeviceContext::memoryUsage()
