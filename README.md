@@ -178,6 +178,7 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | Variable | Effect |
 | --- | --- |
 | `TORCHVULKAN_STRICT=1` | Raise an error instead of falling back to the CPU. |
+| `TORCHVULKAN_STRICT_ALLOCATION=1` | Raise an out-of-memory error instead of allocating past the VRAM budget. By default torchvulkan allocates anyway (with a one-time warning), and the driver may put the memory in system RAM, which is much slower. |
 | `TORCHVULKAN_SYSTEM_VULKAN=1` | macOS: use the system Vulkan loader instead of the bundled MoltenVK. |
 | `TORCHVULKAN_VALIDATION=1` | Enable the Khronos validation layer, if it's installed. `=sync` also enables synchronization validation. On macOS this needs `TORCHVULKAN_SYSTEM_VULKAN=1`. |
 | `TORCHVULKAN_PROFILE=1` | Print each compute pipeline's driver statistics (such as register use) when it's compiled, on drivers that support `VK_KHR_pipeline_executable_properties`. |

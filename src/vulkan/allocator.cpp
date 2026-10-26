@@ -129,10 +129,13 @@ VulkanBuffer* VulkanAllocator::allocateBuffer(DeviceContext* device, size_t size
         if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
     }
 
-    if (VulkanBuffer* buffer = createBuffer(device, size, usage))
+    if (!VulkanContext::Instance().strictAllocationEnabled()) 
     {
-        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan memory may be allocated using host memory, which may cause performance degradation.");
-        return buffer;
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage))
+        {
+            TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan memory may be allocated using host memory, which may cause performance degradation. Set TORCHVULKAN_STRICT_ALLOCATION=1 to raise an out-of-memory error instead.");
+            return buffer;
+        }
     }
 
     TORCH_CHECK_WITH(OutOfMemoryError, false, "torchvulkan [ERROR]: Out of memory on ", device->properties.deviceName, ". Tried to allocate ",

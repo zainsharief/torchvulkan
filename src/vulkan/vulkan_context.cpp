@@ -221,6 +221,7 @@ void VulkanContext::initVulkan()
 
     isStrict_ = isEnvSet("TORCHVULKAN_STRICT");
     enableProfiling_ = isEnvSet("TORCHVULKAN_PROFILE");
+    strictAllocation_ = isEnvSet("TORCHVULKAN_STRICT_ALLOCATION");
 }
 
 void VulkanContext::createDeviceContexts()
