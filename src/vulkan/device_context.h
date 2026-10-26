@@ -61,4 +61,8 @@ struct DeviceContext {
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();
+
+private:
+    std::atomic<size_t> held_budget{0};
+    size_t driverBudget();
 };
