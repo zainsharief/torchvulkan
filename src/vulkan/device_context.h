@@ -57,6 +57,7 @@ struct DeviceContext {
     size_t memoryUsage();
     size_t memoryTotal();
     size_t memoryFree();
+    bool releaseCachedBuffers(size_t size, MemoryUsage usage);
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();

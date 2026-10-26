@@ -80,7 +80,7 @@ size_t VulkanCache::roundBufferSize(size_t size)
     return ((size + step - 1) / step) * step;
 }
 
-std::unordered_map<size_t, std::vector<VulkanBuffer*>>& VulkanCache::poolFor(MemoryUsage usage)
+VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
 {
     return usage == MemoryUsage::DEVICE_ONLY ? deviceBufferPool : stagingBufferPool;
 }
@@ -90,29 +90,52 @@ VulkanBuffer* VulkanCache::allocateBuffer(size_t size, MemoryUsage usage)
     size_t rounded = roundBufferSize(size);
 
     std::lock_guard<std::mutex> lock(mutex_);
-    auto& pool = poolFor(usage);
-    auto it = pool.find(rounded);
-    if (it == pool.end() || it->second.empty()) return nullptr;
+    BufferPool& pool = poolFor(usage);
+    auto it = pool.by_size.find(rounded);
+    if (it == pool.by_size.end()) return nullptr;
 
-    VulkanBuffer* buffer = it->second.back();
+    // the newest buffer of this size, so the oldest ones stay at the front of the LRU to be freed first
+    auto entry = it->second.back();
     it->second.pop_back();
+    if (it->second.empty()) pool.by_size.erase(it);
+
+    VulkanBuffer* buffer = *entry;
+    pool.lru.erase(entry);
     return buffer;
 }
 
 void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    poolFor(buffer->usage())[buffer->size()].push_back(buffer);
+    BufferPool& pool = poolFor(buffer->usage());
+    pool.lru.push_back(buffer);
+    pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
+}
+
+bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    BufferPool& pool = poolFor(usage);
+    if (pool.lru.empty()) return false;
+
+    VulkanBuffer* buffer = pool.lru.front();
+    auto it = pool.by_size.find(buffer->size());
+    if (it == pool.by_size.end() || *it->second.front() != buffer) return false;
+    it->second.pop_front();
+    if (it->second.empty()) pool.by_size.erase(it);
+
+    pool.lru.pop_front();
+    delete buffer;
+    return true;
 }
 
 void VulkanCache::releaseBuffers()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto* pool : {&deviceBufferPool, &stagingBufferPool}) {
-        for (auto& [size, buffers] : *pool) {
-            for (VulkanBuffer* buffer : buffers) delete buffer;
-        }
-        pool->clear();
+    for (BufferPool* pool : {&deviceBufferPool, &stagingBufferPool}) {
+        for (VulkanBuffer* buffer : pool->lru) delete buffer;
+        pool->lru.clear();
+        pool->by_size.clear();
     }
 }
 

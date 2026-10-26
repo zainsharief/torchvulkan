@@ -106,30 +106,36 @@ void VulkanAllocator::copy_device_to_device(void* dest, uint64_t dest_offset, co
 
 VulkanBuffer* VulkanAllocator::createBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
 {
-    size_t rounded = VulkanCache::roundBufferSize(size);
-    if (usage == MemoryUsage::DEVICE_ONLY && device->memoryUsage() + rounded > device->memoryBudget()) return nullptr;
-    return unsafeCreateBuffer(device, size, usage);
-}
-
-VulkanBuffer* VulkanAllocator::unsafeCreateBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
-{
-    size_t rounded = VulkanCache::roundBufferSize(size);
     auto buffer = std::make_unique<VulkanBuffer>(device);
-    if (buffer->createBuffer(rounded, usage) != VK_SUCCESS) return nullptr;
+    if (buffer->createBuffer(size, usage) != VK_SUCCESS) return nullptr;
     return buffer.release();
 }
 
 VulkanBuffer* VulkanAllocator::allocateBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
 {
+    size = VulkanCache::roundBufferSize(size);
     if (VulkanBuffer* buffer = device->cache.allocateBuffer(size, usage)) return buffer;
-    if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
-
-    device->shader_manager->flushAndReleaseBuffers();
-    if (VulkanBuffer* buffer = unsafeCreateBuffer(device, size, usage)) return buffer;
 
     size_t budget = device->memoryBudget();
     size_t used = device->memoryUsage();
+
+    if (usage != MemoryUsage::DEVICE_ONLY || used + size <= budget)
+    {
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+    }
+
+    if (device->releaseCachedBuffers(size, usage))
+    {
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+    }
+
+    if (VulkanBuffer* buffer = createBuffer(device, size, usage))
+    {
+        TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan memory may be allocated using host memory, which may cause performance degradation.");
+        return buffer;
+    }
+
     TORCH_CHECK_WITH(OutOfMemoryError, false, "torchvulkan [ERROR]: Out of memory on ", device->properties.deviceName, ". Tried to allocate ",
-        VulkanCache::roundBufferSize(size), " bytes with ", used, " of ", budget, " bytes in use."
+        size, " bytes with ", device->memoryUsage(), " of ", device->memoryBudget(), " bytes in use."
     );
 }

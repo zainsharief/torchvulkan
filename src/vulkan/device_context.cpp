@@ -16,6 +16,22 @@ size_t DeviceContext::memoryBudget()
     return static_cast<size_t>(budgets[vram_heap_index].budget * limit);
 }
 
+bool DeviceContext::releaseCachedBuffers(size_t size, MemoryUsage usage)
+{
+    // no cached buffer is in use once pending work has run
+    shader_manager->flush();
+    vmaSetCurrentFrameIndex(allocator, 0);
+    size_t budget = memoryBudget();
+
+    // on unified memory staging buffers share the heap, so once the requested pool is empty free the other one too
+    MemoryUsage other = usage == MemoryUsage::DEVICE_ONLY ? MemoryUsage::HOST_TO_DEVICE : MemoryUsage::DEVICE_ONLY;
+    while (size > budget || memoryUsage() > budget - size) {
+        if (!cache.releaseOldestBuffer(usage) && !cache.releaseOldestBuffer(other)) break; // cache empty
+    }
+
+    return size <= budget && memoryUsage() <= budget - size;
+}
+
 size_t DeviceContext::memoryUsage()
 {
     VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
