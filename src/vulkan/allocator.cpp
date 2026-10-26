@@ -73,11 +73,35 @@ void VulkanAllocator::copy_device_to_device(void* dest, uint64_t dest_offset, co
     if (count == 0) return;
     TORCH_CHECK(src != nullptr, "torchvulkan [ERROR]: Source tensor cannot be null.");
     TORCH_CHECK(dest != nullptr, "torchvulkan [ERROR]: Destination tensor cannot be null.");
-    VulkanBuffer* dstBuffer = static_cast<VulkanBuffer*>(dest);
     VulkanBuffer* srcBuffer = static_cast<VulkanBuffer*>(const_cast<void*>(src));
-    TORCH_CHECK(srcBuffer->owner() == dstBuffer->owner(), "torchvulkan [ERROR]: copy_device_to_device needs both buffers on the same device.");
+    VulkanBuffer* dstBuffer = static_cast<VulkanBuffer*>(dest);
+    DeviceContext* srcDevice = srcBuffer->owner();
+    DeviceContext* dstDevice = dstBuffer->owner();
 
-    dstBuffer->owner()->shader_manager->dispatchCopy(srcBuffer, src_offset, dstBuffer, dest_offset, count);
+    if (srcDevice == dstDevice)
+    {
+        dstBuffer->owner()->shader_manager->dispatchCopy(srcBuffer, src_offset, dstBuffer, dest_offset, count);
+        return;
+    }
+
+    // TODO: upgrade this to VK_EXT_external_memory_host if supported by the device
+    VulkanBuffer* download = allocateBuffer(srcDevice, count, MemoryUsage::DEVICE_TO_HOST);
+    VulkanBuffer* upload = nullptr;
+    try {
+        srcDevice->shader_manager->dispatchCopy(srcBuffer, src_offset, download, /* dstOffset = */ 0, count);
+        srcDevice->flush();
+        download->invalidate();
+
+        upload = allocateBuffer(dstDevice, count, MemoryUsage::HOST_TO_DEVICE);
+        std::memcpy(upload->data(), download->data(), count);
+        upload->flush();
+    } catch (...) {
+        srcDevice->cache.deleteBuffer(download);
+        throw;
+    }
+    srcDevice->cache.deleteBuffer(download);
+
+    dstDevice->shader_manager->dispatchCopy(upload, /* srcOffset = */ 0, dstBuffer, dest_offset, count, /* release_after = */ upload);
 }
 
 VulkanBuffer* VulkanAllocator::createBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
