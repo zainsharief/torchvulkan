@@ -91,7 +91,6 @@ public:
     );
 
     void flush();
-    void flushAndReleaseBuffers();
     void savePipelineCache();
 
 private:
