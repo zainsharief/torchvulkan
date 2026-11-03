@@ -88,13 +88,6 @@ void VulkanShaderManager::flush()
     submit();
 }
 
-void VulkanShaderManager::flushAndReleaseBuffers()
-{
-    std::lock_guard<std::mutex> lock(record_mutex_);
-    submit();
-    device->cache.releaseBuffers();
-}
-
 void VulkanShaderManager::submit()
 {
     // assume active mutex
