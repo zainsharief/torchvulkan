@@ -56,7 +56,7 @@ int64_t outputs_of(const GridSampleProblem& p) { return p.out[0] * p.out[1] * p.
 int64_t tap_count(int64_t interpolation, int64_t dims)
 {
     if (interpolation == 1) return 1;
-    if (interpolation == 2) return 16;
+    if (interpolation == 2) return dims == 3 ? 64 : 16;
     return dims == 3 ? 8 : 4;
 }
 
@@ -138,7 +138,6 @@ std::vector<int64_t> output_shape(const GridSampleProblem& p)
 
 at::Tensor grid_sampler_forward(const at::Tensor& input, const at::Tensor& grid, int64_t dims, int64_t interpolation, int64_t padding, bool align_corners)
 {
-    TORCH_CHECK(dims == 2 || interpolation != 2, "grid_sampler(): bicubic interpolation only supports 4D input");
     GridSampleProblem p = make_problem(input, grid, dims);
     at::Tensor output = at::empty(output_shape(p), p.input.options());
     if (p.channels > 0) dispatch_grid_sample_shader(p, output, at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor(), GridSampleMode::FORWARD, interpolation, padding, align_corners);
