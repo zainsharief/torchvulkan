@@ -57,7 +57,12 @@ struct DeviceContext {
     size_t memoryUsage();
     size_t memoryTotal();
     size_t memoryFree();
+    bool releaseCachedBuffers(size_t size, MemoryUsage usage);
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();
+
+private:
+    std::atomic<size_t> held_budget{0};
+    size_t driverBudget();
 };

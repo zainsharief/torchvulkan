@@ -1,6 +1,8 @@
 #pragma once
 #include <c10/core/ScalarType.h>
 #include <c10/util/Exception.h>
+#include <deque>
+#include <list>
 #include <vector>
 #include <mutex>
 #include <unordered_map>
@@ -48,6 +50,7 @@ public:
     static size_t roundBufferSize(size_t size);
     VulkanBuffer* allocateBuffer(size_t size, MemoryUsage usage);
     void deleteBuffer(VulkanBuffer* buffer);
+    bool releaseOldestBuffer(MemoryUsage usage);
     void releaseBuffers();
 
     void clear();
@@ -62,13 +65,16 @@ private:
     std::vector<VkCommandBuffer> commandBufferPool;
     std::vector<VkFence> fencePool;
 
-    // keyed by the rounded buffer size
-    std::unordered_map<size_t, std::vector<VulkanBuffer*>> deviceBufferPool;
-    std::unordered_map<size_t, std::vector<VulkanBuffer*>> stagingBufferPool;
+    struct BufferPool 
+    {
+        std::list<VulkanBuffer*> lru; // oldest first
+        std::unordered_map<size_t, std::deque<std::list<VulkanBuffer*>::iterator>> by_size; // keyed by the rounded buffer size, oldest first
+    };
+    BufferPool deviceBufferPool;
+    BufferPool stagingBufferPool;
+    BufferPool& poolFor(MemoryUsage usage);
 
     std::unordered_map<uint64_t, std::vector<CoopMatConfig>> coopMatCache;
     std::unordered_map<uint64_t, CoopMatParams> coopMatParamCache;
-
-    std::unordered_map<size_t, std::vector<VulkanBuffer*>>& poolFor(MemoryUsage usage);
     CoopMatParams searchCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes, uint32_t M, uint32_t N) const;
 };

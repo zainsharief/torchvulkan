@@ -26,6 +26,7 @@ public:
 
     bool isStrict() { return isStrict_; }
     bool profilingEnabled() { return enableProfiling_; }
+    bool strictAllocationEnabled() { return strictAllocation_; }
     static uint64_t ValidationErrorCount();
     static bool IsInBadFork();
     static bool IsInitialized();
@@ -46,6 +47,7 @@ private:
     static constexpr uint32_t apiVersion = VK_API_VERSION_1_3;
     bool isStrict_ = false;
     bool enableProfiling_ = false;
+    bool strictAllocation_ = false;
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 
     // each device creates a new currentDeviceIndex
