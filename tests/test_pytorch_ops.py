@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import re
 import subprocess
@@ -204,13 +205,6 @@ class TestVulkanOps(TestCase):
             cpu_args = to_cpu(vk_args)
             cpu_kwargs = to_cpu(vk_kwargs)
 
-            # torch 2.10's group_norm errors on an empty-batch input when it
-            # round-trips through the Vulkan CPU fallback
-            if (op.name == "nn.functional.group_norm"
-                    and isinstance(cpu_input, torch.Tensor)
-                    and cpu_input.numel() == 0):
-                continue
-
             # Low-precision multi-head attention over OpInfo's large random
             # projection weights is dominated by catastrophic cancellation
             if (op.name == "nn.functional.multi_head_attention_forward"
@@ -222,6 +216,11 @@ class TestVulkanOps(TestCase):
             # fp16 reference is not comparable
             if (op.name == "nn.functional.soft_margin_loss" and dtype == torch.float16):
                 continue
+
+            # linear_cross_entropy's acc_policy="auto" accumulates low precision in float32 only on the CPU
+            options = cpu_kwargs.get("options")
+            if getattr(options, "acc_policy", None) == "auto" and dtype in (torch.float16, torch.bfloat16):
+                cpu_kwargs = {**cpu_kwargs, "options": dataclasses.replace(options, acc_policy="compact")}
 
             if op.name in FLOAT32_REFERENCE_OPS and dtype in (torch.float16, torch.bfloat16):
                 upcast = lambda x: x.float() if isinstance(x, torch.Tensor) and x.is_floating_point() else x
