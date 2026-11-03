@@ -338,7 +338,12 @@ at::Tensor mish_vulkan(const at::Tensor& self)
 at::Tensor logit_vulkan(const at::Tensor& self, c10::optional<double> eps)
 {
     at::Tensor x = promote_to_float(self);
-    if (eps.has_value()) x = at::clamp(x, *eps, 1.0 - *eps);
+    // lo is checked first, matching the CPU when eps > 0.5 makes lo > hi
+    if (eps.has_value()) {
+        at::Tensor lo = at::full({}, *eps, x.options());
+        at::Tensor hi = at::full({}, 1.0 - *eps, x.options());
+        x = at::where(at::lt(x, lo), lo, at::where(at::gt(x, hi), hi, x));
+    }
     return at::log(at::div(x, at::rsub(x, 1)));
 }
 
