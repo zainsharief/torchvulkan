@@ -13,7 +13,7 @@ public struct EigPushConstants
     public uint n;
 }
 
-T ld<T : __BuiltinFloatingPointType>(T* p, int64_t i) { return p[i]; }
+T ld<T : __BuiltinFloatingPointType>(T* p, int64_t i) { return p[max(i, int64_t(0))]; }
 
 void st<T : __BuiltinFloatingPointType>(T* p, int64_t i, T x)
 {

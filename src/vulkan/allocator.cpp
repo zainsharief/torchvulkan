@@ -73,39 +73,72 @@ void VulkanAllocator::copy_device_to_device(void* dest, uint64_t dest_offset, co
     if (count == 0) return;
     TORCH_CHECK(src != nullptr, "torchvulkan [ERROR]: Source tensor cannot be null.");
     TORCH_CHECK(dest != nullptr, "torchvulkan [ERROR]: Destination tensor cannot be null.");
-    VulkanBuffer* dstBuffer = static_cast<VulkanBuffer*>(dest);
     VulkanBuffer* srcBuffer = static_cast<VulkanBuffer*>(const_cast<void*>(src));
-    TORCH_CHECK(srcBuffer->owner() == dstBuffer->owner(), "torchvulkan [ERROR]: copy_device_to_device needs both buffers on the same device.");
+    VulkanBuffer* dstBuffer = static_cast<VulkanBuffer*>(dest);
+    DeviceContext* srcDevice = srcBuffer->owner();
+    DeviceContext* dstDevice = dstBuffer->owner();
 
-    dstBuffer->owner()->shader_manager->dispatchCopy(srcBuffer, src_offset, dstBuffer, dest_offset, count);
+    if (srcDevice == dstDevice)
+    {
+        dstBuffer->owner()->shader_manager->dispatchCopy(srcBuffer, src_offset, dstBuffer, dest_offset, count);
+        return;
+    }
+
+    // TODO: upgrade this to VK_EXT_external_memory_host if supported by the device
+    VulkanBuffer* download = allocateBuffer(srcDevice, count, MemoryUsage::DEVICE_TO_HOST);
+    VulkanBuffer* upload = nullptr;
+    try {
+        srcDevice->shader_manager->dispatchCopy(srcBuffer, src_offset, download, /* dstOffset = */ 0, count);
+        srcDevice->flush();
+        download->invalidate();
+
+        upload = allocateBuffer(dstDevice, count, MemoryUsage::HOST_TO_DEVICE);
+        std::memcpy(upload->data(), download->data(), count);
+        upload->flush();
+    } catch (...) {
+        srcDevice->cache.deleteBuffer(download);
+        throw;
+    }
+    srcDevice->cache.deleteBuffer(download);
+
+    dstDevice->shader_manager->dispatchCopy(upload, /* srcOffset = */ 0, dstBuffer, dest_offset, count, /* release_after = */ upload);
 }
 
 VulkanBuffer* VulkanAllocator::createBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
 {
-    size_t rounded = VulkanCache::roundBufferSize(size);
-    if (usage == MemoryUsage::DEVICE_ONLY && device->memoryUsage() + rounded > device->memoryBudget()) return nullptr;
-    return unsafeCreateBuffer(device, size, usage);
-}
-
-VulkanBuffer* VulkanAllocator::unsafeCreateBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
-{
-    size_t rounded = VulkanCache::roundBufferSize(size);
     auto buffer = std::make_unique<VulkanBuffer>(device);
-    if (buffer->createBuffer(rounded, usage) != VK_SUCCESS) return nullptr;
+    if (buffer->createBuffer(size, usage) != VK_SUCCESS) return nullptr;
     return buffer.release();
 }
 
 VulkanBuffer* VulkanAllocator::allocateBuffer(DeviceContext* device, size_t size, MemoryUsage usage)
 {
+    size = VulkanCache::roundBufferSize(size);
     if (VulkanBuffer* buffer = device->cache.allocateBuffer(size, usage)) return buffer;
-    if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
-
-    device->shader_manager->flushAndReleaseBuffers();
-    if (VulkanBuffer* buffer = unsafeCreateBuffer(device, size, usage)) return buffer;
 
     size_t budget = device->memoryBudget();
     size_t used = device->memoryUsage();
+
+    if (usage != MemoryUsage::DEVICE_ONLY || used + size <= budget)
+    {
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+    }
+
+    if (device->releaseCachedBuffers(size, usage))
+    {
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+    }
+
+    if (!VulkanContext::Instance().strictAllocationEnabled()) 
+    {
+        if (VulkanBuffer* buffer = createBuffer(device, size, usage))
+        {
+            TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan memory may be allocated using host memory, which may cause performance degradation. Set TORCHVULKAN_STRICT_ALLOCATION=1 to raise an out-of-memory error instead.");
+            return buffer;
+        }
+    }
+
     TORCH_CHECK_WITH(OutOfMemoryError, false, "torchvulkan [ERROR]: Out of memory on ", device->properties.deviceName, ". Tried to allocate ",
-        VulkanCache::roundBufferSize(size), " bytes with ", used, " of ", budget, " bytes in use."
+        size, " bytes with ", device->memoryUsage(), " of ", device->memoryBudget(), " bytes in use."
     );
 }

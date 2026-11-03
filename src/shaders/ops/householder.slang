@@ -89,7 +89,8 @@ void orgqr<T : __BuiltinFloatingPointType>(uint b, uint lane, HouseholderPushCon
 
     for (int j = k - 1; j >= 0; j--)
     {
-        T t = tau[j];
+        // lavapipe loads tau[-1] after the last iteration
+        T t = tau[max(j, 0)];
         if (j < n - 1)
         {
             if (lane == 0) a[j * n + j] = T(1);
