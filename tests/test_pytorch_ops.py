@@ -217,6 +217,10 @@ class TestVulkanOps(TestCase):
             if (op.name == "nn.functional.soft_margin_loss" and dtype == torch.float16):
                 continue
 
+            # frexp's exponent for inf is unspecified: Windows' C runtime returns -1, everything else 0
+            if op.name == "frexp" and sys.platform == "win32" and cpu_input.isinf().any():
+                continue
+
             # linear_cross_entropy's acc_policy="auto" accumulates low precision in float32 only on the CPU
             options = cpu_kwargs.get("options")
             if getattr(options, "acc_policy", None) == "auto" and dtype in (torch.float16, torch.bfloat16):
@@ -440,6 +444,8 @@ class TestVulkanOps(TestCase):
         for sample in samples:
             vk_leaves = [t for t in tensors_of((sample.input, sample.args, sample.kwargs)) if t.requires_grad]
             if not vk_leaves:
+                continue
+            if op.name == "frexp" and sys.platform == "win32" and sample.input.detach().cpu().isinf().any():
                 continue
 
             # CPU leaves standing in for the Vulkan ones, so each side's graph is its own
