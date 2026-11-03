@@ -6,7 +6,7 @@
 <p align="center">
   <a href="https://github.com/zainsharief/torchvulkan/actions/workflows/test_torchvulkan.yml"><img alt="CI" src="https://github.com/zainsharief/torchvulkan/actions/workflows/test_torchvulkan.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
   <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
 
@@ -191,7 +191,6 @@ TORCHVULKAN_STRICT=1 python your_script.py
 - `float64` runs on the GPU only on devices with `shaderFloat64`; elsewhere it falls back to the CPU. Transcendental functions such as `exp`, `sin` and `tanh` are computed in `float32` precision for `float64` tensors.
 - `bfloat16` runs on the GPU only on devices with `VK_KHR_shader_bfloat16`; elsewhere it falls back to the CPU.
 - Complex tensors can live on the device and FFTs run on the GPU, but most complex arithmetic falls back to the CPU.
-- `torch>=2.10.0` only. The extension is compiled against 2.13.0 but has testing support for >=2.10.0.
 - APIs and coverage may change before `1.0.0`.
 
 ## How it works

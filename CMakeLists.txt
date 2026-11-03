@@ -30,6 +30,9 @@ target_compile_features(torchvulkan_lib PRIVATE cxx_std_20)
 
 install(TARGETS torchvulkan_lib DESTINATION torchvulkan)
 
+file(WRITE "${TORCHVULKAN_GENERATED_DIR}/_build_info.py" "torch_version = \"${Torch_VERSION}\"\n")
+install(FILES "${TORCHVULKAN_GENERATED_DIR}/_build_info.py" DESTINATION torchvulkan)
+
 if(APPLE)
     find_library(TORCHVULKAN_MOLTENVK NAMES libMoltenVK.dylib)
     if(TORCHVULKAN_MOLTENVK)
