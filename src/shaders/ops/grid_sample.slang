@@ -157,8 +157,122 @@ Geometry loadGeometry(uint64_t address)
 int tapCount()
 {
     if (INTERPOLATION == 1) return 1;
-    if (INTERPOLATION == 2) return 16;
+    if (INTERPOLATION == 2) return DIMS == 3 ? 64 : 16;
     return DIMS == 3 ? 8 : 4;
+}
+
+// one axis of a 3-D bicubic sample, as resolve_cubic_taps: taps sit around the unclipped index, and one the padding drops is -1
+void cubicAxis<T : __BuiltinFloatingPointType>(T coord, int size, out T multiplier, out int index[4], out T coeff[4], out T coeff_grad[4])
+{
+    T ix = unnormalize<T>(coord, size, multiplier);
+    T base = floor(ix);
+    cubicCoefficients<T>(ix - base, coeff);
+    cubicCoefficientsGrad<T>(ix - base, coeff_grad);
+    [ForceUnroll] for (int i = 0; i < 4; i++)
+    {
+        T grad;
+        T tap = applyPadding<T>(base + T(i - 1), size, grad);
+        index[i] = (tap >= T(0) && tap < T(size)) ? toInt<T>(tap) : -1;
+    }
+}
+
+void tricubicKernel<T : __BuiltinFloatingPointType>(int64_t idx, int64_t n, int64_t o, T coord[3], Geometry g, GridSamplePushConstants pcs)
+{
+    int64_t outputs = int64_t(g.out[0]) * g.out[1] * g.out[2];
+    int64_t inputs = int64_t(g.in[0]) * g.in[1] * g.in[2];
+    T mx;
+    T my;
+    T mz;
+    int xi[4];
+    int yi[4];
+    int zi[4];
+    T xc[4];
+    T yc[4];
+    T zc[4];
+    T xg[4];
+    T yg[4];
+    T zg[4];
+    cubicAxis<T>(coord[2], g.in[2], mx, xi, xc, xg);
+    cubicAxis<T>(coord[1], g.in[1], my, yi, yc, yg);
+    cubicAxis<T>(coord[0], g.in[0], mz, zi, zc, zg);
+
+    if (MODE == 1)
+    {
+        int64_t* tap_out = (int64_t*)pcs.taps;
+        T* weight_out = (T*)pcs.weights;
+        for (int k = 0; k < 4; k++)
+        {
+            for (int j = 0; j < 4; j++)
+            {
+                bool plane_reads = zi[k] >= 0 && yi[j] >= 0;
+                int64_t row = (int64_t(zi[k]) * g.in[1] + yi[j]) * g.in[2];
+                for (int i = 0; i < 4; i++)
+                {
+                    int64_t e = idx * 64 + int64_t((k * 4 + j) * 4 + i);
+                    tap_out[e] = (plane_reads && xi[i] >= 0) ? row + int64_t(xi[i]) : int64_t(-1);
+                    weight_out[e] = xc[i] * yc[j] * zc[k];
+                }
+            }
+        }
+        return;
+    }
+
+    T* input = (T*)pcs.input;
+    if (MODE == 0)
+    {
+        T* output = (T*)pcs.output;
+        for (int c = 0; c < g.c; c++)
+        {
+            T* plane = input + (n * g.c + c) * inputs;
+            T value = T(0);
+            for (int k = 0; k < 4; k++)
+            {
+                for (int j = 0; j < 4; j++)
+                {
+                    T weight_zy = zc[k] * yc[j];
+                    bool plane_reads = zi[k] >= 0 && yi[j] >= 0;
+                    int64_t row = (int64_t(zi[k]) * g.in[1] + yi[j]) * g.in[2];
+                    for (int i = 0; i < 4; i++)
+                    {
+                        T sample = (plane_reads && xi[i] >= 0) ? plane[row + xi[i]] : T(0);
+                        value += sample * weight_zy * xc[i];
+                    }
+                }
+            }
+            output[(n * g.c + c) * outputs + o] = value;
+        }
+        return;
+    }
+
+    T* grad_output = (T*)pcs.grad_output;
+    T* grad_grid = (T*)pcs.output;
+    T gx = T(0);
+    T gy = T(0);
+    T gz = T(0);
+    for (int c = 0; c < g.c; c++)
+    {
+        T* plane = input + (n * g.c + c) * inputs;
+        T go = grad_output[(n * g.c + c) * outputs + o];
+        for (int k = 0; k < 4; k++)
+        {
+            for (int j = 0; j < 4; j++)
+            {
+                bool plane_reads = zi[k] >= 0 && yi[j] >= 0;
+                int64_t row = (int64_t(zi[k]) * g.in[1] + yi[j]) * g.in[2];
+                for (int i = 0; i < 4; i++)
+                {
+                    T v = (plane_reads && xi[i] >= 0) ? plane[row + xi[i]] : T(0);
+                    gx -= v * xg[i] * yc[j] * zc[k] * go;
+                    gy -= v * xc[i] * yg[j] * zc[k] * go;
+                    gz -= v * xc[i] * yc[j] * zg[k] * go;
+                }
+            }
+        }
+    }
+    int64_t base = (n * outputs + o) * 3;
+    grad_grid[base] = mx * gx;
+    grad_grid[base + 1] = my * gy;
+    grad_grid[base + 2] = mz * gz;
 }
 
 // in the CPU's corner order
@@ -281,6 +395,11 @@ void gridSampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, GridSamplePushCo
     [ForceUnroll] for (int a = 0; a < 3; a++)
     {
         if (a >= 3 - int(dims)) coord[a] = grid[(n * outputs + o) * dims + int64_t(2 - a)];
+    }
+    if (DIMS == 3 && INTERPOLATION == 2)
+    {
+        tricubicKernel<T>(int64_t(idx), n, o, coord, g, pcs);
+        return;
     }
 
     int position[16];

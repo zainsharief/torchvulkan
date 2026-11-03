@@ -7,15 +7,25 @@ try:
 except ImportError as e:
     raise ImportError("PyTorch is required to use torchvulkan. Please install PyTorch and try again.") from e
 
-from torch.torch_version import TorchVersion
-
-if TorchVersion(torch.__version__) < TorchVersion("2.10.0"):
-    raise RuntimeError(f"torchvulkan [ERROR]: torchvulkan requires PyTorch 2.10.0 or higher, but found {torch.__version__}.")
-
 try:
     from ._version import __version__
 except ImportError:
     __version__ = "unknown"
+
+try:
+    from ._build_info import torch_version as _built_torch_version  # pyright: ignore[reportMissingImports]
+except ImportError:
+    _built_torch_version = None
+
+def _torch_minor(version: str) -> tuple:
+    return tuple(version.split("+")[0].split(".")[:2])
+
+if _built_torch_version and _torch_minor(torch.__version__) != _torch_minor(_built_torch_version):
+    _built = ".".join(_torch_minor(_built_torch_version))
+    raise RuntimeError(
+        f"torchvulkan [ERROR]: torchvulkan {__version__} was built for PyTorch {_built}.x, but found {torch.__version__}. "
+        f"Install torch=={_built}.* or a torchvulkan release built for your PyTorch version."
+    )
 
 from . import _C
 

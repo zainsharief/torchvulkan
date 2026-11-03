@@ -721,7 +721,9 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         if (isnan(x) || isnan(y)) return x + y;
         T m = max(x, y);
         if (m == T(0)) return T(0);
-        T r = min(x, y) / m;
+        // scaled by 2^-32 near the top of the range: GPUs divide via 1 / m, which flushes to zero once it's subnormal
+        T scale = m > T(1.0e30) ? T(2.3283064365386963e-10) : T(1);
+        T r = (min(x, y) * scale) / (m * scale);
         return m * sqrt(T(1) + r * r);
     }
     public static T ext_xlogy(T a, T b) { if (isnan(a)) return a; if (a == T(0)) return T(0); return a * ext_log(b); }

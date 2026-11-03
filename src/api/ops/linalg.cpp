@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <torch/version.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/WrapDimUtils.h>
 #include <algorithm>
@@ -493,14 +492,8 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_solve_ex_o
     check_square(A, "torch.linalg.solve");
     bool vector_case = is_vector_rhs(A, B);
     at::Tensor b = vector_case ? B.unsqueeze(left ? -1 : -2) : B;
-    // torch 2.10's solve backward expects the LU of A^T when A is contiguous and real; 2.11 factors A itself
-#if TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR <= 10
-    bool use_A_T = A.is_contiguous() && !A.is_complex();
-#else
-    bool use_A_T = false;
-#endif
-    auto [lu, piv, inf] = lu_factor_impl(use_A_T ? A.mT() : A, "torch.linalg.solve");
-    at::Tensor x = lu_solve_impl(lu, piv, b, left, /*adjoint=*/use_A_T);
+    auto [lu, piv, inf] = lu_factor_impl(A, "torch.linalg.solve");
+    at::Tensor x = lu_solve_impl(lu, piv, b, left, /*adjoint=*/false);
     if (vector_case) x = x.squeeze(left ? -1 : -2);
     fill_out(result, x);
     fill_out(LU, lu);
