@@ -86,7 +86,7 @@ def memory_stats(device=None) -> dict:
         "reserved_bytes.all.current": _C._memory_usage(index),
     }
 
-DeviceProperties = namedtuple("DeviceProperties", ["name", "total_memory", "vendor_id", "device_id", "api_version", "driver_version", "subgroup_size"])
+DeviceProperties = namedtuple("DeviceProperties", ["name", "total_memory", "vendor_id", "device_id", "api_version", "driver_version", "subgroup_size", "has_fp64", "has_int64", "has_fp16", "has_bf16", "has_int16", "has_int8"])
 
 def get_device_properties(device=None) -> DeviceProperties:
     return DeviceProperties(**_C._device_properties(_device_index(device)))
