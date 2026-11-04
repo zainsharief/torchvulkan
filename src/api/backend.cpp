@@ -106,6 +106,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         info["api_version"] = std::to_string(VK_API_VERSION_MAJOR(props.apiVersion)) + "." + std::to_string(VK_API_VERSION_MINOR(props.apiVersion)) + "." + std::to_string(VK_API_VERSION_PATCH(props.apiVersion));
         info["driver_version"] = props.driverVersion;
         info["subgroup_size"] = device->subgroup_size;
+        info["has_fp64"] = device->support_float64;
+        info["has_int64"] = device->support_int64;
+        info["has_fp16"] = device->support_float16;
+        info["has_bf16"] = device->support_bfloat16;
+        info["has_int16"] = device->support_int16;
+        info["has_int8"] = device->support_int8;
         return info;
     });
 
