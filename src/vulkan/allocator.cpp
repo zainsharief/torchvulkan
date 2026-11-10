@@ -22,7 +22,10 @@ void VulkanAllocator::deleter(void* ptr)
     if (ptr == nullptr || VulkanContext::IsInBadFork()) return;
     VulkanBuffer* buffer = static_cast<VulkanBuffer*>(ptr);
     buffer->owner()->recordFree(buffer->size());
-    buffer->owner()->cache.deleteBuffer(buffer);
+
+    // a buffer that spilled into system RAM is freed, not cached
+    if (buffer->deviceLocal()) buffer->owner()->cache.deleteBuffer(buffer);
+    else buffer->owner()->shader_manager->destroyAfterFlush(buffer);
 }
 
 void VulkanAllocator::copy_data(void* dest, const void* src, std::size_t count) const

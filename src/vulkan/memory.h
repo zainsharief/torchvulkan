@@ -28,6 +28,7 @@ public:
     MemoryUsage usage() const { return usage_; }
     VkBuffer buffer() const { return buffer_; }
     uint64_t bufferAddress() const { return bufferAddress_; }
+    bool deviceLocal() const { return deviceLocal_; }
     DeviceContext* owner() const { return owner_; }
 
     void invalidate();
@@ -42,6 +43,7 @@ private:
     MemoryUsage usage_ = MemoryUsage::DEVICE_ONLY;
     void* mappedData_ = nullptr;
     uint64_t bufferAddress_ = 0;
+    bool deviceLocal_ = true;
 };
 
 inline VulkanBuffer* extract_buffer(const c10::Storage& storage)
