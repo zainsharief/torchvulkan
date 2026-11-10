@@ -4,7 +4,6 @@
 #include <volk.h>
 
 #include <atomic>
-#include <vector>
 
 #include "vk_mem_alloc.h"
 #include "cache.h"
@@ -44,9 +43,9 @@ struct DeviceContext {
     bool support_subgroup_arithmetic = false;
     bool support_pipeline_statistics = false;
     bool support_memory_budget = false;
-    
-    uint32_t default_subgroup_size;
-    std::vector<uint32_t> subgroup_sizes;
+    uint32_t min_subgroup_size = 0;
+    uint32_t max_subgroup_size = 0;
+    uint32_t default_subgroup_size = 0;
     uint32_t max_workgroup_subgroups = 0;
 
     std::atomic<size_t> allocated_bytes{0};

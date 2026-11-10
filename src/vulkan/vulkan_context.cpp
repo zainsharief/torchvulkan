@@ -301,13 +301,14 @@ void VulkanContext::createDeviceContexts()
         // we launch (lavapipe: 4 * 32) are left unpinned
         bool pinned_fits = props13.maxSubgroupSize * props13.maxComputeWorkgroupSubgroups >= props2.properties.limits.maxComputeWorkGroupInvocations;
         context->support_subgroup_control = features13.subgroupSizeControl && (props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) && pinned_fits;
-        context->default_subgroup_size = context->support_subgroup_control ? props13.maxSubgroupSize : subgroupProps.subgroupSize;
-        context->max_workgroup_subgroups = props13.maxComputeWorkgroupSubgroups;
         if (context->support_subgroup_control) {
-            for (uint32_t size = props13.minSubgroupSize; size <= props13.maxSubgroupSize; size *= 2) context->subgroup_sizes.push_back(size);
+            context->min_subgroup_size = props13.minSubgroupSize;
+            context->max_subgroup_size = props13.maxSubgroupSize;
         } else {
-            context->subgroup_sizes = {context->default_subgroup_size};
+            context->min_subgroup_size = context->max_subgroup_size = subgroupProps.subgroupSize;
         }
+        context->default_subgroup_size = context->max_subgroup_size;
+        context->max_workgroup_subgroups = props13.maxComputeWorkgroupSubgroups;
 
         // subgroup reductions need arithmetic + shuffle ops available in compute shaders
         const VkSubgroupFeatureFlags requiredSubgroupOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
