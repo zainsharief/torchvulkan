@@ -91,6 +91,17 @@ public:
         VulkanBuffer* release_after = nullptr
     );
 
+    double getTimestamp(
+        ShaderKey key,
+        uint32_t subgroupSize,
+        const SpecializationArgs& specConstants,
+        const PushConstants& pushConstants,
+        at::TensorList readTensors,
+        at::TensorList writeTensors,
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+    );
+
+    bool supportsTimestamps() const { return timestampValidBits > 0; }
     void flush();
     void savePipelineCache();
 
@@ -111,6 +122,19 @@ private:
     std::unordered_set<uint64_t> pending_buffers;
     size_t pending_bytes = 0;
 
+    static constexpr uint32_t TIMESTAMP_RUNS = 3;
+    VkQueryPool timestampPool = VK_NULL_HANDLE;
+    uint32_t timestampValidBits = 0;
+
+    OpInfo* buildComputeOp(
+        ShaderKey key,
+        uint32_t subgroupSize,
+        const SpecializationArgs& specConstants,
+        const PushConstants& pushConstants,
+        at::TensorList readTensors,
+        at::TensorList writeTensors,
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+    );
     void submit();
     uint64_t registerMetadata(const Metadata& metadata);
     void trackPending(const MemoryRange& range);

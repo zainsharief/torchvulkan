@@ -52,6 +52,12 @@ VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
     pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
     VK_CHECK(device->device_table.vkCreatePipelineLayout(device->device, &pipelineLayoutInfo, nullptr, &pipelineLayout));
 
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device->physicalDevice, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(device->physicalDevice, &familyCount, families.data());
+    if (device->computeQueueFamily < familyCount) timestampValidBits = families[device->computeQueueFamily].timestampValidBits;
+
     createPipelineCache();
 }
 
@@ -108,7 +114,7 @@ void VulkanShaderManager::submit()
     for (VulkanBuffer* buffer : release) device->cache.deleteBuffer(buffer);
 }
 
-void VulkanShaderManager::dispatchShader(
+OpInfo* VulkanShaderManager::buildComputeOp(
     ShaderKey key,
     uint32_t subgroupSize,
     const SpecializationArgs& specConstants,
@@ -132,7 +138,7 @@ void VulkanShaderManager::dispatchShader(
     uint32_t binary = resolveBinary(key);
     ShaderSubmitInfo submit = allocateShader(binary, subgroupSize, specConstants);
 
-    auto info = std::make_unique<OpInfo>();
+    OpInfo* info = new OpInfo();
     info->type = OpType::COMPUTE;
     info->pipeline = submit.pipeline;
     info->pipelineLayout = submit.pipelineLayout;
@@ -155,6 +161,19 @@ void VulkanShaderManager::dispatchShader(
     for (const at::Tensor& in : readTensors) info->inputs.push_back(range_of(in));
     info->outputs.reserve(writeTensors.size());
     for (const at::Tensor& out : writeTensors) info->outputs.push_back(range_of(out));
+    return info;
+}
+
+void VulkanShaderManager::dispatchShader(
+    ShaderKey key,
+    uint32_t subgroupSize,
+    const SpecializationArgs& specConstants,
+    const PushConstants& pushConstants,
+    at::TensorList readTensors,
+    at::TensorList writeTensors,
+    uint32_t groupX, uint32_t groupY, uint32_t groupZ)
+{
+    OpInfo* info = buildComputeOp(key, subgroupSize, specConstants, pushConstants, readTensors, writeTensors, groupX, groupY, groupZ);
 
     std::lock_guard<std::mutex> lock(record_mutex_);
     if (pushConstants.metadata != nullptr) {
@@ -164,8 +183,115 @@ void VulkanShaderManager::dispatchShader(
 
     for (const MemoryRange& range : info->inputs) trackPending(range);
     for (const MemoryRange& range : info->outputs) trackPending(range);
-    operations.push_back(std::move(info));
+    operations.emplace_back(info);
     flushIfPending();
+}
+
+double VulkanShaderManager::getTimestamp(
+    ShaderKey key,
+    uint32_t subgroupSize,
+    const SpecializationArgs& specConstants,
+    const PushConstants& pushConstants,
+    at::TensorList readTensors,
+    at::TensorList writeTensors,
+    uint32_t groupX, uint32_t groupY, uint32_t groupZ)
+{
+    TORCH_CHECK(timestampValidBits > 0, "torchvulkan [ERROR]: the compute queue of '", device->properties.deviceName, "' does not support timestamps.");
+
+    OpInfo* built = buildComputeOp(key, subgroupSize, specConstants, pushConstants, readTensors, writeTensors, groupX, groupY, groupZ);
+    OpInfo op = *built;
+    delete built;
+
+    std::lock_guard<std::mutex> lock(record_mutex_);
+    submit();
+
+    if (pushConstants.metadata != nullptr) {
+        uint64_t address = registerMetadata(*pushConstants.metadata);
+        std::memcpy(op.pushConstantData.data() + pushConstants.metadata_offset, &address, sizeof(address));
+        metadata_buffer->flush();
+    }
+
+    if (timestampPool == VK_NULL_HANDLE)
+    {
+        VkQueryPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        poolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        poolInfo.queryCount = 2;
+        VK_CHECK(device->device_table.vkCreateQueryPool(device->device, &poolInfo, nullptr, &timestampPool));
+    }
+
+    VkCommandBuffer cmd = device->cache.allocateCommandBuffer();
+    device->device_table.vkCmdResetQueryPool(cmd, timestampPool, 0, 2);
+
+    VkMemoryBarrier2 before{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    before.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    before.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    before.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    before.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo beforeDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    beforeDep.memoryBarrierCount = 1;
+    beforeDep.pMemoryBarriers = &before;
+    device->device_table.vkCmdPipelineBarrier2(cmd, &beforeDep);
+
+    device->device_table.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, op.pipeline);
+    if (op.pushConstantSize > 0) {
+        device->device_table.vkCmdPushConstants(cmd, op.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, op.pushConstantSize, op.pushConstantData.data());
+    }
+
+    VkMemoryBarrier2 between{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    between.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    between.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    between.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    between.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo betweenDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    betweenDep.memoryBarrierCount = 1;
+    betweenDep.pMemoryBarriers = &between;
+
+    device->device_table.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampPool, 0);
+    for (uint32_t run = 0; run < TIMESTAMP_RUNS; run++)
+    {
+        if (run > 0) device->device_table.vkCmdPipelineBarrier2(cmd, &betweenDep);
+        device->device_table.vkCmdDispatch(cmd, op.groupX, op.groupY, op.groupZ);
+    }
+    device->device_table.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampPool, 1);
+
+    VkMemoryBarrier2 after{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    after.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    after.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    after.dstStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT;
+    after.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    VkDependencyInfo afterDep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    afterDep.memoryBarrierCount = 1;
+    afterDep.pMemoryBarriers = &after;
+    device->device_table.vkCmdPipelineBarrier2(cmd, &afterDep);
+
+    VK_CHECK(device->device_table.vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+
+    VkFence fence = device->cache.allocateFence();
+    VkResult submit_result = device->device_table.vkQueueSubmit(device->computeQueue, 1, &submitInfo, fence);
+    if (submit_result != VK_SUCCESS) {
+        device->cache.deleteCommandBuffer(cmd);
+        device->cache.deleteFence(fence);
+        TORCH_CHECK(false, "torchvulkan [ERROR]: vkQueueSubmit failed with VkResult ", submit_result, ".");
+    }
+
+    VkResult wait_result = device->device_table.vkWaitForFences(device->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    TORCH_CHECK(wait_result == VK_SUCCESS, "torchvulkan [ERROR]: Wait for fence failed with VkResult ", wait_result, ".");
+    device->cache.deleteCommandBuffer(cmd);
+    device->cache.deleteFence(fence);
+    metadata_offset = 0;
+
+    uint64_t ticks[2] = {0, 0};
+    VK_CHECK(device->device_table.vkGetQueryPoolResults(device->device, timestampPool, 0, 2, sizeof(ticks), ticks, sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)
+    );
+
+    const uint64_t mask = timestampValidBits >= 64 ? ~uint64_t(0) : (uint64_t(1) << timestampValidBits) - 1;
+    const uint64_t elapsed = (ticks[1] - ticks[0]) & mask;
+    return static_cast<double>(elapsed) / TIMESTAMP_RUNS * device->properties.limits.timestampPeriod;
 }
 
 void VulkanShaderManager::trackPending(const MemoryRange& range)
@@ -437,4 +563,6 @@ void VulkanShaderManager::clearCache()
     pipelineLayout = VK_NULL_HANDLE;
     if (pipelineCache != VK_NULL_HANDLE) device->device_table.vkDestroyPipelineCache(device->device, pipelineCache, nullptr);
     pipelineCache = VK_NULL_HANDLE;
+    if (timestampPool != VK_NULL_HANDLE) device->device_table.vkDestroyQueryPool(device->device, timestampPool, nullptr);
+    timestampPool = VK_NULL_HANDLE;
 }
