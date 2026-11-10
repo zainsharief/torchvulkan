@@ -46,6 +46,7 @@ void dispatch_multinomial_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::MULTINOMIAL, real},
+        device->default_subgroup_size,
         specialization,
         pushConstants,
         /* read = */ {cdf},

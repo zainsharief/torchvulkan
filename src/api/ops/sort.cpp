@@ -56,6 +56,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> dispatch_sort_shader(const at:
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::SORT, lines.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ reads,

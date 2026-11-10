@@ -76,6 +76,7 @@ public:
 
     void dispatchShader(
         ShaderKey key,
+        uint32_t subgroupSize,
         const SpecializationArgs& specConstants,
         const PushConstants& pushConstants,
         at::TensorList readTensors,
@@ -117,17 +118,17 @@ private:
 
     std::mutex cache_mutex_;
     std::vector<int32_t> binaryIndex;
-    std::vector<std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>> shaderCache;
+    std::vector<std::unordered_map<uint32_t, std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>>> shaderCache;
     std::vector<VkShaderModule> shaderModuleCache;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     bool pipelineCacheDirty = false;
 
     uint32_t resolveBinary(ShaderKey key) const;
-    ShaderSubmitInfo allocateShader(uint32_t binary, const SpecializationArgs& spec);
+    ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     VkShaderModule allocateShaderModule(uint32_t binary);
     
-    VkPipeline createPipeline(uint32_t binary, const SpecializationArgs& spec);
+    VkPipeline createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     void displayPipelineStatistics(VkPipeline pipeline);
     void createPipelineCache();
     std::string pipelineCachePath() const;

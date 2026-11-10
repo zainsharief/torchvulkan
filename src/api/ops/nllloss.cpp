@@ -48,6 +48,7 @@ void dispatch_nllloss_shader(
     PushConstants pushConstants = pcs.build();
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         specialization,
         pushConstants,
         /* read = */ {in, target},

@@ -101,6 +101,7 @@ std::optional<at::Tensor> dispatch_binary_shader(
     uint64_t threads = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::BINARY, promoted_type},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

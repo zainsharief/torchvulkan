@@ -58,6 +58,7 @@ void dispatch_fft_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::FFT, real},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

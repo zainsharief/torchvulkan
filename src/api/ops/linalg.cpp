@@ -93,6 +93,7 @@ void dispatch_cholesky_shader(const at::Tensor& a, const at::Tensor& info)
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::CHOLESKY, a.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ {a_part},
@@ -123,6 +124,7 @@ void dispatch_lu_shader(const at::Tensor& a, const at::Tensor& pivots)
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::LU, a.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ {a_part},
@@ -153,6 +155,7 @@ void dispatch_triangular_solve_shader(const at::Tensor& a, const at::Tensor& x, 
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::TRIANGULAR_SOLVE, x.scalar_type()},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {a},
@@ -194,6 +197,7 @@ void dispatch_householder_shader(HouseholderMode mode, const at::Tensor& a, cons
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::HOUSEHOLDER, a.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ reads,
@@ -229,6 +233,7 @@ void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tens
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::JACOBI, a.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ {a_part},
@@ -267,6 +272,7 @@ void dispatch_ldl_shader(LdlMode mode, const at::Tensor& a, const at::Tensor& pi
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::LDL, a.scalar_type()},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {a, pivots},
@@ -298,6 +304,7 @@ void dispatch_eig_shader(const at::Tensor& h, const at::Tensor& v, const at::Ten
 
         device->shader_manager->dispatchShader(
             ShaderKey{torchvulkan::Kernel::EIG, h.scalar_type()},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ {part(h)},

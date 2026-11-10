@@ -70,6 +70,7 @@ void dispatch_resample_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::RESAMPLE, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {input},
@@ -199,6 +200,7 @@ void dispatch_resample_u8_shader(const at::Tensor& input, const at::Tensor& outp
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::RESAMPLE_U8, at::kByte},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {input, index_min, index_size, weights},

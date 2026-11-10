@@ -110,6 +110,7 @@ void VulkanShaderManager::submit()
 
 void VulkanShaderManager::dispatchShader(
     ShaderKey key,
+    uint32_t subgroupSize,
     const SpecializationArgs& specConstants,
     const PushConstants& pushConstants,
     at::TensorList readTensors,
@@ -129,7 +130,7 @@ void VulkanShaderManager::dispatchShader(
     TORCH_CHECK(pushConstants.size <= MAX_PUSH_CONSTANT_BYTES, "torchvulkan [ERROR]: Push constants exceeded ", MAX_PUSH_CONSTANT_BYTES, " bytes!");
 
     uint32_t binary = resolveBinary(key);
-    ShaderSubmitInfo submit = allocateShader(binary, specConstants);
+    ShaderSubmitInfo submit = allocateShader(binary, subgroupSize, specConstants);
 
     auto info = std::make_unique<OpInfo>();
     info->type = OpType::COMPUTE;
@@ -219,15 +220,15 @@ uint32_t VulkanShaderManager::resolveBinary(ShaderKey key) const
     TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, " -> ", key.dtype2, ".");
 }
 
-ShaderSubmitInfo VulkanShaderManager::allocateShader(uint32_t binary, const SpecializationArgs& spec)
+ShaderSubmitInfo VulkanShaderManager::allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)
 {
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto& shaderMap = shaderCache[binary];
+    auto& shaderMap = shaderCache[binary][subgroupSize];
 
     auto it = shaderMap.find(spec.key);
     if (it != shaderMap.end()) return it->second;
 
-    ShaderSubmitInfo info{createPipeline(binary, spec), pipelineLayout};
+    ShaderSubmitInfo info{createPipeline(binary, subgroupSize, spec), pipelineLayout};
     shaderMap.emplace(std::string(spec.key), info);
     return info;
 }
@@ -251,7 +252,7 @@ VkShaderModule VulkanShaderManager::allocateShaderModule(uint32_t binary)
     return shaderModule;
 }
 
-VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, const SpecializationArgs& spec)
+VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)
 {
     // assume active mutex
     VkShaderModule shaderModule = allocateShaderModule(binary);
@@ -279,11 +280,11 @@ VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, const Specializa
     stageInfo.pName = "main";
     stageInfo.pSpecializationInfo = &specInfo;
 
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroupSize{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSize{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
     if (device->support_subgroup_control)
     {
-        subgroupSize.requiredSubgroupSize = device->subgroup_size;
-        stageInfo.pNext = &subgroupSize;
+        requiredSize.requiredSubgroupSize = subgroupSize;
+        stageInfo.pNext = &requiredSize;
     }
 
     VkPipelineCreateFlags flags = 0;
@@ -419,10 +420,12 @@ void VulkanShaderManager::displayPipelineStatistics(VkPipeline pipeline)
 
 void VulkanShaderManager::clearCache()
 {
-    for (auto& shaderMap : shaderCache)
+    for (auto& bySubgroup : shaderCache)
     {
-        for (auto& pair : shaderMap) device->device_table.vkDestroyPipeline(device->device, pair.second.pipeline, nullptr);
-        shaderMap.clear();
+        for (auto& [size, shaderMap] : bySubgroup) {
+            for (auto& [key, info] : shaderMap) device->device_table.vkDestroyPipeline(device->device, info.pipeline, nullptr);
+        }
+        bySubgroup.clear();
     }
 
     for (VkShaderModule shaderModule : shaderModuleCache) {

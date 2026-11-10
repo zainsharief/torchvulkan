@@ -97,6 +97,7 @@ bool dispatch_special_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::SPECIAL, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

@@ -57,12 +57,12 @@ at::Tensor dispatch_reduce_shader(
     bool use_subgroup =
         has_subgroup &&
         device->support_subgroup_arithmetic &&
-        device->subgroup_size > 0 &&
+        device->default_subgroup_size > 0 &&
         dtype_supported_subgroup &&
-        reduce_size >= static_cast<int64_t>(device->subgroup_size) &&
+        reduce_size >= static_cast<int64_t>(device->default_subgroup_size) &&
         numel_out <= static_cast<uint64_t>(device->properties.limits.maxComputeWorkGroupCount[0]);
 
-    uint32_t workgroupSizeX = use_subgroup ? device->subgroup_size : get_dtype_workgroup_size(stype, 1, device);
+    uint32_t workgroupSizeX = use_subgroup ? device->default_subgroup_size : get_dtype_workgroup_size(stype, 1, device);
 
     static constexpr uint64_t TARGET_ITEMS = 1u << 14;
     static constexpr uint64_t MIN_CHUNK = 1024;
@@ -102,6 +102,7 @@ at::Tensor dispatch_reduce_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{kernel, stype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {self},
@@ -334,6 +335,7 @@ at::Tensor argreduce(
 
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {x},

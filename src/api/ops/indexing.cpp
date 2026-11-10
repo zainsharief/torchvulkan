@@ -83,6 +83,7 @@ bool dispatch_index_gather_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::INDEX_GATHER, get_dtype_width_variant(out.scalar_type())},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,
@@ -305,6 +306,7 @@ at::Tensor embedding_dense_backward_vulkan(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::EMBEDDING_BACKWARD, grad_output.scalar_type()},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {flat_grad, sorted, permutation},

@@ -121,6 +121,7 @@ void dispatch_grid_sample_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::GRID_SAMPLE, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

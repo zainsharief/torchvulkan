@@ -69,6 +69,7 @@ at::Tensor cumscan(
 
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         specialization,
         pcs.build(),
         /* read = */ {x},
@@ -173,6 +174,7 @@ void cumscanarg(
 
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         specialization,
         pcs.build(),
         /* read = */ {self},

@@ -45,6 +45,7 @@ at::Tensor& fill_scalar_vulkan(
 
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {},

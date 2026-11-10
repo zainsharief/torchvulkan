@@ -218,7 +218,7 @@ CoopMatParams VulkanCache::searchCoopMatParams(c10::ScalarType dtype, const std:
     uint32_t element_size = c10::elementSize(dtype);
     uint32_t max_shared_memory = owner_->properties.limits.maxComputeSharedMemorySize;
     uint32_t max_workgroup_size = owner_->properties.limits.maxComputeWorkGroupInvocations;
-    params.subgroup_size = owner_->subgroup_size;
+    params.subgroup_size = owner_->default_subgroup_size;
     if (params.subgroup_size == 0) return params;
 
     uint32_t max_subgroups = std::min<uint32_t>(8, max_workgroup_size / params.subgroup_size);
