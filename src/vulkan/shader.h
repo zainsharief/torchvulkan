@@ -103,7 +103,6 @@ public:
 
     bool supportsTimestamps() const { return timestampValidBits > 0; }
     void flush();
-    void savePipelineCache();
 
 private:
     DeviceContext* device = nullptr;
@@ -145,8 +144,6 @@ private:
     std::vector<std::unordered_map<uint32_t, std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>>> shaderCache;
     std::vector<VkShaderModule> shaderModuleCache;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
-    bool pipelineCacheDirty = false;
 
     uint32_t resolveBinary(ShaderKey key) const;
     ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
@@ -154,7 +151,5 @@ private:
     
     VkPipeline createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     void displayPipelineStatistics(VkPipeline pipeline);
-    void createPipelineCache();
-    std::string pipelineCachePath() const;
     void clearCache();
 };

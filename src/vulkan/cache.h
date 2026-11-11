@@ -1,10 +1,12 @@
 #pragma once
 #include <c10/core/ScalarType.h>
 #include <c10/util/Exception.h>
+#include <atomic>
 #include <deque>
 #include <list>
 #include <vector>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "volk.h"
@@ -55,6 +57,12 @@ public:
 
     void clear();
 
+    std::string cachePath(const char* kind, const char* extension) const;
+    void createPipelineCache();
+    VkPipelineCache pipelineCache() const { return pipelineCache_; }
+    void markPipelineCacheDirty() { pipelineCacheDirty_ = true; }
+    void savePipelineCache();
+
     void addCoopMatConfig(VkComponentTypeKHR aType, VkComponentTypeKHR bType, VkComponentTypeKHR cType, VkComponentTypeKHR resultType, CoopMatConfig config);
     std::vector<CoopMatConfig> getCoopMatConfig(c10::ScalarType aType, c10::ScalarType bType, c10::ScalarType cType, c10::ScalarType resultType) const;
     const CoopMatParams& getCoopMatParams(c10::ScalarType dtype, const std::vector<uint32_t>& available_sizes, uint32_t M, uint32_t N);
@@ -64,6 +72,10 @@ private:
     std::mutex mutex_;
     std::vector<VkCommandBuffer> commandBufferPool;
     std::vector<VkFence> fencePool;
+
+    std::mutex pipeline_mutex_;
+    VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
+    std::atomic<bool> pipelineCacheDirty_{false};
 
     struct BufferPool 
     {

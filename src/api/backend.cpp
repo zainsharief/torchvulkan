@@ -54,7 +54,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("_save_pipeline_caches", []() {
         if (!VulkanContext::IsInitialized() || VulkanContext::IsInBadFork()) return;
-        for (DeviceContext* device : VulkanContext::Instance().devices) device->shader_manager->savePipelineCache();
+        for (DeviceContext* device : VulkanContext::Instance().devices) device->cache.savePipelineCache();
     });
 
     m.def("_amp_supported_dtypes", [](int64_t device_index) {

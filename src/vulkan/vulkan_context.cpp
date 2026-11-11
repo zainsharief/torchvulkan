@@ -552,6 +552,7 @@ void VulkanContext::createDeviceAllocator()
 
         if (vmaCreateAllocator(&allocatorInfo, &device->allocator) == VK_SUCCESS) 
         {
+            device->cache.createPipelineCache();
             // the shader manager allocates its metadata buffer up front, so it needs the allocator
             device->shader_manager = new VulkanShaderManager(device);
             continue;
