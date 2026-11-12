@@ -69,6 +69,7 @@ void dispatch_scatter_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::SCATTER, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

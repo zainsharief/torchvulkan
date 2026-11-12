@@ -58,6 +58,7 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::DROPOUT, src.scalar_type()},
+        device->default_subgroup_size,
         specialization,
         pushConstants,
         /* read = */ {src},

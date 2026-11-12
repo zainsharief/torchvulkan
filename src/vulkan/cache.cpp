@@ -6,6 +6,12 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 
 VkCommandBuffer VulkanCache::allocateCommandBuffer()
 {
@@ -152,6 +158,83 @@ void VulkanCache::clear()
         owner_->device_table.vkFreeCommandBuffers(owner_->device, owner_->commandPool, static_cast<uint32_t>(commandBufferPool.size()), commandBufferPool.data());
         commandBufferPool.clear();
     }
+
+    std::lock_guard<std::mutex> pipelineLock(pipeline_mutex_);
+    if (pipelineCache_ != VK_NULL_HANDLE) owner_->device_table.vkDestroyPipelineCache(owner_->device, pipelineCache_, nullptr);
+    pipelineCache_ = VK_NULL_HANDLE;
+}
+
+std::string VulkanCache::cachePath(const char* kind, const char* extension) const
+{
+    const char* setting = std::getenv("TORCHVULKAN_PIPELINE_CACHE");
+    if (setting != nullptr && std::strcmp(setting, "0") == 0) return {};
+
+    std::filesystem::path dir;
+    if (const char* custom = std::getenv("TORCHVULKAN_CACHE_DIR")) dir = custom;
+#ifdef _WIN32
+    else if (const char* local = std::getenv("LOCALAPPDATA")) dir = std::filesystem::path(local) / "torchvulkan";
+#else
+    else if (const char* xdg = std::getenv("XDG_CACHE_HOME")) dir = std::filesystem::path(xdg) / "torchvulkan";
+    else if (const char* home = std::getenv("HOME")) dir = std::filesystem::path(home) / ".cache" / "torchvulkan";
+#endif
+    else return {};
+
+    // the driver checks the cache header too; the name keeps one file per device and driver
+    char uuid[2 * VK_UUID_SIZE + 1] = {0};
+    for (int i = 0; i < VK_UUID_SIZE; i++) std::snprintf(uuid + 2 * i, 3, "%02x", owner_->properties.pipelineCacheUUID[i]);
+    char name[128];
+    std::snprintf(name, sizeof(name), "%s-%04x-%04x-%s.%s", kind, owner_->properties.vendorID, owner_->properties.deviceID, uuid, extension);
+    return (dir / name).string();
+}
+
+void VulkanCache::createPipelineCache()
+{
+    std::vector<char> initial;
+    std::string path = cachePath("pipelines", "bin");
+    if (!path.empty()) {
+        std::ifstream file(path, std::ios::binary);
+        if (file) initial.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheInfo.initialDataSize = initial.size();
+    cacheInfo.pInitialData = initial.empty() ? nullptr : initial.data();
+
+    // a driver may reject stale data, so retry with an empty cache before giving up on caching
+    if (owner_->device_table.vkCreatePipelineCache(owner_->device, &cacheInfo, nullptr, &pipelineCache_) == VK_SUCCESS) return;
+    cacheInfo.initialDataSize = 0;
+    cacheInfo.pInitialData = nullptr;
+    if (owner_->device_table.vkCreatePipelineCache(owner_->device, &cacheInfo, nullptr, &pipelineCache_) != VK_SUCCESS) pipelineCache_ = VK_NULL_HANDLE;
+}
+
+void VulkanCache::savePipelineCache()
+{
+    std::lock_guard<std::mutex> lock(pipeline_mutex_);
+    if (pipelineCache_ == VK_NULL_HANDLE || !pipelineCacheDirty_) return;
+    std::string path = cachePath("pipelines", "bin");
+    if (path.empty()) return;
+
+    size_t size = 0;
+    if (owner_->device_table.vkGetPipelineCacheData(owner_->device, pipelineCache_, &size, nullptr) != VK_SUCCESS || size == 0) return;
+    std::vector<char> data(size);
+    if (owner_->device_table.vkGetPipelineCacheData(owner_->device, pipelineCache_, &size, data.data()) != VK_SUCCESS) return;
+
+    // written to a temporary file and renamed, so a concurrent reader never sees half a cache
+    std::error_code ec;
+    std::filesystem::path target(path);
+    std::filesystem::create_directories(target.parent_path(), ec);
+    std::filesystem::path temp = target;
+    temp += ".tmp" + std::to_string(reinterpret_cast<uintptr_t>(this));
+    {
+        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        if (!file) return;
+        file.write(data.data(), static_cast<std::streamsize>(size));
+        if (!file) return;
+    }
+    std::filesystem::rename(temp, target, ec);
+    if (ec) std::filesystem::remove(temp, ec);
+    else pipelineCacheDirty_ = false;
 }
 
 static uint8_t coop_component_to_scalar(VkComponentTypeKHR dtype)
@@ -218,7 +301,7 @@ CoopMatParams VulkanCache::searchCoopMatParams(c10::ScalarType dtype, const std:
     uint32_t element_size = c10::elementSize(dtype);
     uint32_t max_shared_memory = owner_->properties.limits.maxComputeSharedMemorySize;
     uint32_t max_workgroup_size = owner_->properties.limits.maxComputeWorkGroupInvocations;
-    params.subgroup_size = owner_->subgroup_size;
+    params.subgroup_size = owner_->default_subgroup_size;
     if (params.subgroup_size == 0) return params;
 
     uint32_t max_subgroups = std::min<uint32_t>(8, max_workgroup_size / params.subgroup_size);

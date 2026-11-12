@@ -76,6 +76,7 @@ public:
 
     void dispatchShader(
         ShaderKey key,
+        uint32_t subgroupSize,
         const SpecializationArgs& specConstants,
         const PushConstants& pushConstants,
         at::TensorList readTensors,
@@ -90,9 +91,21 @@ public:
         VulkanBuffer* release_after = nullptr
     );
 
+    double getTimestamp(
+        ShaderKey key,
+        uint32_t subgroupSize,
+        const SpecializationArgs& specConstants,
+        const PushConstants& pushConstants,
+        at::TensorList readTensors,
+        at::TensorList writeTensors,
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+    );
+
+    bool supportsTimestamps() const { return timestampValidBits > 0; }
+    uint32_t resolveBinary(ShaderKey key) const;
+
     void flush();
     void destroyAfterFlush(VulkanBuffer* buffer);
-    void savePipelineCache();
 
 private:
     DeviceContext* device = nullptr;
@@ -112,6 +125,19 @@ private:
     std::unordered_set<uint64_t> pending_buffers;
     size_t pending_bytes = 0;
 
+    static constexpr uint32_t TIMESTAMP_RUNS = 3;
+    VkQueryPool timestampPool = VK_NULL_HANDLE;
+    uint32_t timestampValidBits = 0;
+
+    OpInfo* buildComputeOp(
+        ShaderKey key,
+        uint32_t subgroupSize,
+        const SpecializationArgs& specConstants,
+        const PushConstants& pushConstants,
+        at::TensorList readTensors,
+        at::TensorList writeTensors,
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+    );
     void submit();
     uint64_t registerMetadata(const Metadata& metadata);
     void trackPending(const MemoryRange& range);
@@ -119,19 +145,14 @@ private:
 
     std::mutex cache_mutex_;
     std::vector<int32_t> binaryIndex;
-    std::vector<std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>> shaderCache;
+    std::vector<std::unordered_map<uint32_t, std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>>> shaderCache;
     std::vector<VkShaderModule> shaderModuleCache;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
-    bool pipelineCacheDirty = false;
 
-    uint32_t resolveBinary(ShaderKey key) const;
-    ShaderSubmitInfo allocateShader(uint32_t binary, const SpecializationArgs& spec);
+    ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     VkShaderModule allocateShaderModule(uint32_t binary);
     
-    VkPipeline createPipeline(uint32_t binary, const SpecializationArgs& spec);
+    VkPipeline createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     void displayPipelineStatistics(VkPipeline pipeline);
-    void createPipelineCache();
-    std::string pipelineCachePath() const;
     void clearCache();
 };

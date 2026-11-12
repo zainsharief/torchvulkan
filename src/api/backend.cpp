@@ -54,7 +54,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("_save_pipeline_caches", []() {
         if (!VulkanContext::IsInitialized() || VulkanContext::IsInBadFork()) return;
-        for (DeviceContext* device : VulkanContext::Instance().devices) device->shader_manager->savePipelineCache();
+        for (DeviceContext* device : VulkanContext::Instance().devices) device->cache.savePipelineCache();
     });
 
     m.def("_amp_supported_dtypes", [](int64_t device_index) {
@@ -105,7 +105,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         info["device_id"] = props.deviceID;
         info["api_version"] = std::to_string(VK_API_VERSION_MAJOR(props.apiVersion)) + "." + std::to_string(VK_API_VERSION_MINOR(props.apiVersion)) + "." + std::to_string(VK_API_VERSION_PATCH(props.apiVersion));
         info["driver_version"] = props.driverVersion;
-        info["subgroup_size"] = device->subgroup_size;
+        info["subgroup_size"] = device->default_subgroup_size;
         info["has_fp64"] = device->support_float64;
         info["has_int64"] = device->support_int64;
         info["has_fp16"] = device->support_float16;

@@ -106,6 +106,7 @@ at::Tensor unary_op_vulkan(
     uint64_t threads = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::UNARY, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {src},

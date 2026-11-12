@@ -96,6 +96,7 @@ bool dispatch_compare_shader(
     uint64_t threads = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::COMPARE, promoted},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,
@@ -158,6 +159,7 @@ at::Tensor where_vulkan(
 
     context->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::WHERE, promoted},
+        context->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {c, a, b},

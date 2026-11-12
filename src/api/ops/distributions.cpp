@@ -64,6 +64,7 @@ at::Tensor dispatch_distribution_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::DISTRIBUTION, dtype},
+        device->default_subgroup_size,
         specialization,
         pushConstants,
         /* read = */ reads,

@@ -45,6 +45,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     uint64_t threads = isContig ? (numel + (vecSize - 1)) / vecSize : numel;
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {src},

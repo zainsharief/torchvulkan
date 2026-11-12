@@ -46,6 +46,7 @@ void dispatch_searchsorted_shader(
 
     device->shader_manager->dispatchShader(
         ShaderKey{torchvulkan::Kernel::SEARCHSORTED, dtype},
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ reads,

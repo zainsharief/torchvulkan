@@ -9,6 +9,7 @@
 #include "cache.h"
 
 class VulkanShaderManager;
+class Autotuner;
 
 struct DeviceContext {
     c10::DeviceIndex index = -1;
@@ -23,6 +24,7 @@ struct DeviceContext {
     VkPhysicalDeviceProperties properties{};
     VkDriverId driver_id = static_cast<VkDriverId>(0);
     VulkanShaderManager* shader_manager = nullptr;
+    Autotuner* tuner = nullptr;
     VulkanCache cache;
     at::Generator generator;
     bool valid = true;
@@ -43,7 +45,10 @@ struct DeviceContext {
     bool support_subgroup_arithmetic = false;
     bool support_pipeline_statistics = false;
     bool support_memory_budget = false;
-    uint32_t subgroup_size = 0;
+    uint32_t min_subgroup_size = 0;
+    uint32_t max_subgroup_size = 0;
+    uint32_t default_subgroup_size = 0;
+    uint32_t max_workgroup_subgroups = 0;
 
     std::atomic<size_t> allocated_bytes{0};
     std::atomic<size_t> peak_allocated_bytes{0};

@@ -266,6 +266,7 @@ at::Tensor dispatch_matmul_simd_shader(
 
         device->shader_manager->dispatchShader(
             ShaderKey{kernel, result_dtype},
+            device->default_subgroup_size,
             specialization,
             pcs.build(),
             /* read = */ readTensors,
@@ -438,6 +439,7 @@ at::Tensor dispatch_matmul_coop_shader(
 
         device->shader_manager->dispatchShader(
             ShaderKey{coop_kernel_for_block_size(params.block_size), promoted_type},
+            params.subgroup_size,
             specialization,
             pcs.build(),
             /* read = */ {ops.self_b, ops.other_b},

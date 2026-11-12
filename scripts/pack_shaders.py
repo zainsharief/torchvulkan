@@ -3,7 +3,7 @@ Embeds the compiled shaders in the binary: for each variant listed by
 scripts/build_shaders.py, writes its SPIR-V as a uint32_t array plus one index
 row per dtype it serves.
 
-Output, in the build directory, included only by src/vulkan/shader.cpp:
+Output, in the build directory, included by the shader manager and the autotuner:
 
     shader_registry.h     declares SHADER_BINARIES and SHADER_INDEX
     shader_registry.cpp   defines them:
@@ -11,7 +11,7 @@ Output, in the build directory, included only by src/vulkan/shader.cpp:
         static const uint32_t spv_binary_f32[] = { 0x07230203, ... };
 
         const ShaderBinary SHADER_BINARIES[] = {
-            { "binary_f32", spv_binary_f32, sizeof(spv_binary_f32) },
+            { "binary_f32", spv_binary_f32, sizeof(spv_binary_f32), 0x9f2c...ull },
         };
 
         const ShaderIndexEntry SHADER_INDEX[] = {
@@ -23,14 +23,15 @@ recompile tens of megabytes of SPIR-V.
 """
 
 import argparse
+import hashlib
 import itertools
 import json
 import struct
 from pathlib import Path
 
 
-def spv_to_c_array(spv_file: Path, array_name: str) -> str:
-    """Reads a .spv binary and formats it as a C++ uint32_t array definition."""
+def spv_to_c_array(spv_file: Path, array_name: str) -> tuple[str, int]:
+    """Reads a .spv binary and formats it as a C++ uint32_t array definition, plus a 64-bit hash of its contents."""
     binary_data = spv_file.read_bytes()
 
     # pad to a multiple of 4 bytes
@@ -42,7 +43,8 @@ def spv_to_c_array(spv_file: Path, array_name: str) -> str:
     for i in range(0, len(words), 16):
         lines.append(','.join(f'0x{word:08x}' for word in words[i:i + 16]))
     body = ',\n'.join(lines)
-    return f'static const uint32_t {array_name}[] = {{\n{body}\n}};\n'
+    digest = int.from_bytes(hashlib.blake2b(binary_data, digest_size=8).digest(), 'little')
+    return f'static const uint32_t {array_name}[] = {{\n{body}\n}};\n', digest
 
 
 def index_rows(variant: dict, binary: int) -> list[str]:
@@ -84,6 +86,7 @@ struct ShaderBinary {
     const char* name;
     const uint32_t* code;
     size_t size;
+    uint64_t hash;
 };
 
 struct ShaderIndexEntry {
@@ -111,8 +114,9 @@ def main(args):
 
     for binary, variant in enumerate(variants):
         array_name = f'spv_{variant["name"]}'
-        arrays.append(spv_to_c_array(args.build / f'{variant["name"]}.spv', array_name))
-        binaries.append(f'    {{ "{variant["name"]}", {array_name}, sizeof({array_name}) }},')
+        array, digest = spv_to_c_array(args.build / f'{variant["name"]}.spv', array_name)
+        arrays.append(array)
+        binaries.append(f'    {{ "{variant["name"]}", {array_name}, sizeof({array_name}), 0x{digest:016x}ull }},')
         index.extend(index_rows(variant, binary))
 
     source = [

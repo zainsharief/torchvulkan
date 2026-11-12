@@ -405,6 +405,7 @@ void dispatch_conv_shader(
 
         device->shader_manager->dispatchShader(
             ShaderKey{launch.tile_m == 128 ? torchvulkan::Kernel::CONV_128 : torchvulkan::Kernel::CONV_64, dtype},
+            device->default_subgroup_size,
             spd.build(),
             pcs.build(),
             /* read = */ reads,

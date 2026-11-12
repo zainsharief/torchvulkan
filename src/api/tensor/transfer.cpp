@@ -43,6 +43,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
 
     device->shader_manager->dispatchShader(
         shader_key,
+        device->default_subgroup_size,
         spd.build(),
         pcs.build(),
         /* read = */ {src},

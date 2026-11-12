@@ -2,6 +2,7 @@
 #include "vulkan_context.h"
 #include "generator.h"
 #include "shader.h"
+#include "autotuner.h"
 
 #include <algorithm>
 #include <atomic>
@@ -296,12 +297,19 @@ void VulkanContext::createDeviceContexts()
         context->properties = props2.properties;
         context->driver_id = props12.driverID;
 
-        // every pipeline is pinned to the largest subgroup size (see createPipeline); without control, kernels get the driver's default.
+        // pipelines are pinned to the largest subgroup size unless they require another (see createPipeline); without control, kernels get the driver's default.
         // a pinned size caps a workgroup at size * maxComputeWorkgroupSubgroups, so devices where that is below the workgroups
         // we launch (lavapipe: 4 * 32) are left unpinned
         bool pinned_fits = props13.maxSubgroupSize * props13.maxComputeWorkgroupSubgroups >= props2.properties.limits.maxComputeWorkGroupInvocations;
         context->support_subgroup_control = features13.subgroupSizeControl && (props13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) && pinned_fits;
-        context->subgroup_size = context->support_subgroup_control ? props13.maxSubgroupSize : subgroupProps.subgroupSize;
+        if (context->support_subgroup_control) {
+            context->min_subgroup_size = props13.minSubgroupSize;
+            context->max_subgroup_size = props13.maxSubgroupSize;
+        } else {
+            context->min_subgroup_size = context->max_subgroup_size = subgroupProps.subgroupSize;
+        }
+        context->default_subgroup_size = context->max_subgroup_size;
+        context->max_workgroup_subgroups = props13.maxComputeWorkgroupSubgroups;
 
         // subgroup reductions need arithmetic + shuffle ops available in compute shaders
         const VkSubgroupFeatureFlags requiredSubgroupOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
@@ -545,8 +553,10 @@ void VulkanContext::createDeviceAllocator()
 
         if (vmaCreateAllocator(&allocatorInfo, &device->allocator) == VK_SUCCESS) 
         {
+            device->cache.createPipelineCache();
             // the shader manager allocates its metadata buffer up front, so it needs the allocator
             device->shader_manager = new VulkanShaderManager(device);
+            device->tuner = new Autotuner(device);
             continue;
         }
 
