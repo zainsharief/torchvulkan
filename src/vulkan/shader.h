@@ -105,6 +105,7 @@ public:
     uint32_t resolveBinary(ShaderKey key) const;
 
     void flush();
+    void destroyAfterFlush(VulkanBuffer* buffer);
 
 private:
     DeviceContext* device = nullptr;
