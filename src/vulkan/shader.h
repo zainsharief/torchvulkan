@@ -113,6 +113,7 @@ private:
     std::mutex record_mutex_;
     std::vector<std::unique_ptr<OpInfo>> operations;
     std::vector<VulkanBuffer*> release_after_flush;
+    std::vector<VulkanBuffer*> destroy_after_flush;
 
     static const uint64_t METADATA_BUFFER_SIZE = 1024 * 1024; // 1MB
     std::unique_ptr<VulkanBuffer> metadata_buffer;

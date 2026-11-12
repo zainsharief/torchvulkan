@@ -57,6 +57,7 @@ VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
 
 VulkanShaderManager::~VulkanShaderManager()
 {
+    for (VulkanBuffer* buffer : destroy_after_flush) delete buffer;
     clearCache();
 }
 
@@ -88,6 +89,13 @@ void VulkanShaderManager::flush()
     submit();
 }
 
+void VulkanShaderManager::destroyAfterFlush(VulkanBuffer* buffer)
+{
+    std::lock_guard<std::mutex> lock(record_mutex_);
+    if (pending_buffers.count(reinterpret_cast<uint64_t>(buffer)) == 0) delete buffer;
+    else destroy_after_flush.push_back(buffer);
+}
+
 void VulkanShaderManager::submit()
 {
     // assume active mutex
@@ -97,8 +105,10 @@ void VulkanShaderManager::submit()
 
     std::vector<std::unique_ptr<OpInfo>> batch = std::move(operations);
     std::vector<VulkanBuffer*> release = std::move(release_after_flush);
+    std::vector<VulkanBuffer*> destroy = std::move(destroy_after_flush);
     operations.clear();
     release_after_flush.clear();
+    destroy_after_flush.clear();
     pending_buffers.clear();
     pending_bytes = 0;
 
@@ -106,6 +116,7 @@ void VulkanShaderManager::submit()
     dispatcher.dispatch(batch);
 
     for (VulkanBuffer* buffer : release) device->cache.deleteBuffer(buffer);
+    for (VulkanBuffer* buffer : destroy) delete buffer;
 }
 
 OpInfo* VulkanShaderManager::buildComputeOp(

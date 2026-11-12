@@ -43,6 +43,11 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     VkResult result = vmaCreateBuffer(owner_->allocator, &bufferInfo, &allocInfo, &buffer_, &allocation_, &allocInfo_);
     if (result != VK_SUCCESS) return result;
 
+    // unified memory reports every heap as device-local, so only a discrete GPU's spill into host memory clears this
+    VkMemoryPropertyFlags memoryFlags = 0;
+    vmaGetAllocationMemoryProperties(owner_->allocator, allocation_, &memoryFlags);
+    deviceLocal_ = (memoryFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+
     if (usage != MemoryUsage::DEVICE_ONLY) mappedData_ = allocInfo_.pMappedData;
 
     // The device address is fixed for the buffer's lifetime, so query it once, here.
