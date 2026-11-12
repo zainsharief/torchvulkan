@@ -102,6 +102,8 @@ public:
     );
 
     bool supportsTimestamps() const { return timestampValidBits > 0; }
+    uint32_t resolveBinary(ShaderKey key) const;
+
     void flush();
 
 private:
@@ -145,7 +147,6 @@ private:
     std::vector<VkShaderModule> shaderModuleCache;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
-    uint32_t resolveBinary(ShaderKey key) const;
     ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     VkShaderModule allocateShaderModule(uint32_t binary);
     

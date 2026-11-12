@@ -1,5 +1,6 @@
 #include "device_context.h"
 #include "shader.h"
+#include "autotuner.h"
 
 static constexpr double VRAM_USAGE_LIMIT = 0.95;
 
@@ -85,6 +86,8 @@ void DeviceContext::recordFree(size_t bytes)
 
 DeviceContext::~DeviceContext()
 {
+    delete tuner;
+    tuner = nullptr;
     delete shader_manager;
     shader_manager = nullptr;
 

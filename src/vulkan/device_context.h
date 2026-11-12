@@ -9,6 +9,7 @@
 #include "cache.h"
 
 class VulkanShaderManager;
+class Autotuner;
 
 struct DeviceContext {
     c10::DeviceIndex index = -1;
@@ -23,6 +24,7 @@ struct DeviceContext {
     VkPhysicalDeviceProperties properties{};
     VkDriverId driver_id = static_cast<VkDriverId>(0);
     VulkanShaderManager* shader_manager = nullptr;
+    Autotuner* tuner = nullptr;
     VulkanCache cache;
     at::Generator generator;
     bool valid = true;

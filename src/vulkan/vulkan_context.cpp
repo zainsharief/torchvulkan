@@ -2,6 +2,7 @@
 #include "vulkan_context.h"
 #include "generator.h"
 #include "shader.h"
+#include "autotuner.h"
 
 #include <algorithm>
 #include <atomic>
@@ -555,6 +556,7 @@ void VulkanContext::createDeviceAllocator()
             device->cache.createPipelineCache();
             // the shader manager allocates its metadata buffer up front, so it needs the allocator
             device->shader_manager = new VulkanShaderManager(device);
+            device->tuner = new Autotuner(device);
             continue;
         }
 
