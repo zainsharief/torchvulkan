@@ -3,6 +3,7 @@
 #include <ATen/native/Resize.h>
 #include <cstdlib>
 #include <functional>
+#include <cstdio>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
@@ -560,9 +561,9 @@ at::Tensor& addmm_activation_out_vulkan(const at::Tensor& input, const at::Tenso
 // TORCHVULKAN_INT_MM_SCALAR=1 forces the scalar kernel (for comparisons and debugging).
 // shared memory of matmul_coop's staged int8 kernel (mirrors Shared<T> in matmul_coop.slang, with
 // B_SMEM_COLMAJOR, whose B buffer is never smaller than the row-major one)
-uint64_t int_mm_shared_bytes(const CoopMatParams& params, uint32_t block, uint32_t bk)
+uint64_t int_mm_shared_bytes(const CoopMatParams& params, uint32_t block, uint32_t bk, uint32_t pad_elems = 4)
 {
-    const uint64_t pad = 4;
+    const uint64_t pad = pad_elems;
     const uint64_t rows_a = (uint64_t)params.warps_m * params.warp_frags_m * block;
     const uint64_t cols_b = (uint64_t)params.warps_n * params.warp_frags_n * block;
     return 2 * (rows_a * (bk + pad) + std::max<uint64_t>(bk * (cols_b + pad), cols_b * (bk + pad)));
@@ -589,6 +590,24 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
     CoopMatParams params = device->cache.getCoopMatParams(at::kChar, {block}, M, N);
     if (!params.is_valid) return false;
 
+    // tuning knobs (for sweeps): subgroup size, warp grid and fragments per warp, row padding
+    auto env_u32 = [](const char* name, uint32_t fallback) {
+        const char* v = std::getenv(name);
+        return (v && v[0]) ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : fallback;
+    };
+    auto env_pair = [](const char* name, uint32_t& a, uint32_t& b) {
+        const char* v = std::getenv(name);
+        if (!v || !v[0]) return;
+        unsigned x = 0, y = 0;
+        if (std::sscanf(v, "%ux%u", &x, &y) == 2 && x > 0 && y > 0) { a = x; b = y; }
+    };
+    params.subgroup_size = env_u32("TORCHVULKAN_INT_MM_SG", params.subgroup_size);
+    env_pair("TORCHVULKAN_INT_MM_WARPS", params.warps_m, params.warps_n);
+    env_pair("TORCHVULKAN_INT_MM_FRAGS", params.warp_frags_m, params.warp_frags_n);
+    params.workgroup_size = params.warps_m * params.warps_n * params.subgroup_size;
+    if (params.workgroup_size > device->properties.limits.maxComputeWorkGroupInvocations) return false;
+    const uint32_t pad = env_u32("TORCHVULKAN_INT_MM_PAD", 4);
+
     // a transposed B (a Linear weight, weight.t()) is staged column by column, and a 16-deep K step
     // reads only 16 contiguous bytes of each column; 32 is faster there (measured on RDNA4), while a
     // row-major B is fastest with the default. TORCHVULKAN_INT_MM_BK overrides it, as a tuning knob.
@@ -596,9 +615,9 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
     const char* bk_env = std::getenv("TORCHVULKAN_INT_MM_BK");
     if (params.use_shared_memory && (bk_env || b_is_transposed)) {
         const uint32_t bk = bk_env ? static_cast<uint32_t>(std::strtoul(bk_env, nullptr, 10)) : 32;
-        if (bk >= block && bk % block == 0 && int_mm_shared_bytes(params, block, bk) <= device->properties.limits.maxComputeSharedMemorySize) params.bk = bk;
+        if (bk >= block && bk % block == 0 && int_mm_shared_bytes(params, block, bk, pad) <= device->properties.limits.maxComputeSharedMemorySize) params.bk = bk;
     }
-    if (params.use_shared_memory && int_mm_shared_bytes(params, block, params.bk) > device->properties.limits.maxComputeSharedMemorySize) return false;
+    if (params.use_shared_memory && int_mm_shared_bytes(params, block, params.bk, pad) > device->properties.limits.maxComputeSharedMemorySize) return false;
 
     auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
     if (!coop_loadable(self) || !coop_loadable(mat2)) return false;
@@ -658,7 +677,8 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
        .push(b_vec_aligned)
        .push(params.block_size)
        .push(static_cast<uint32_t>(params.use_shared_memory))
-       .push(b_transposed); // B_SMEM_COLMAJOR
+       .push(b_transposed) // B_SMEM_COLMAJOR
+       .push(pad);         // PAD
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(a))
@@ -687,9 +707,9 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
     );
 
     if (std::getenv("TORCHVULKAN_INT_MM_DEBUG")) {
-        fprintf(stderr, "torchvulkan: _int_mm coop M=%u N=%u K=%u wg=%u sg=%u warps=%ux%u frags=%ux%u bk=%u smem=%d at=%u bt=%u direct=%d\n",
+        fprintf(stderr, "torchvulkan: _int_mm coop M=%u N=%u K=%u wg=%u sg=%u warps=%ux%u frags=%ux%u bk=%u pad=%u smem=%d at=%u bt=%u direct=%d\n",
             M, N, K, params.workgroup_size, params.subgroup_size, params.warps_m, params.warps_n, params.warp_frags_m, params.warp_frags_n,
-            params.bk, (int)params.use_shared_memory, a_transposed, b_transposed, (int)direct);
+            params.bk, pad, (int)params.use_shared_memory, a_transposed, b_transposed, (int)direct);
     }
 
     if (!direct) out.copy_(result.narrow(0, 0, M).narrow(1, 0, N));

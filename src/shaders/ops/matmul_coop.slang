@@ -34,7 +34,9 @@ __exported import core.dtype;
 [[vk::constant_id(20)]] public const uint B_SMEM_COLMAJOR = 0;
 
 // padding per shared-memory row, so consecutive rows fall in different banks
-static const uint PAD = 4;
+// row padding of the shared-memory tiles, in elements; int8 passes a larger value so rows stay
+// 16-byte aligned (hipBLASLt pads int8 LDS rows by 32 bytes)
+[[vk::constant_id(21)]] public const uint PAD = 4;
 
 public struct TensorStrides
 {
