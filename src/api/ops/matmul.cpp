@@ -7,6 +7,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
+#include "vulkan/autotuner.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 #include "api/fallback.h"
@@ -606,18 +607,18 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
     env_pair("TORCHVULKAN_INT_MM_FRAGS", params.warp_frags_m, params.warp_frags_n);
     params.workgroup_size = params.warps_m * params.warps_n * params.subgroup_size;
     if (params.workgroup_size > device->properties.limits.maxComputeWorkGroupInvocations) return false;
-    const uint32_t pad = env_u32("TORCHVULKAN_INT_MM_PAD", 4);
+    const uint32_t max_smem = device->properties.limits.maxComputeSharedMemorySize;
+    const char* pad_env = std::getenv("TORCHVULKAN_INT_MM_PAD");
+    const char* bk_env = std::getenv("TORCHVULKAN_INT_MM_BK");
 
     // a transposed B (a Linear weight, weight.t()) is staged column by column, and a 16-deep K step
-    // reads only 16 contiguous bytes of each column; 32 is faster there (measured on RDNA4), while a
-    // row-major B is fastest with the default. TORCHVULKAN_INT_MM_BK overrides it, as a tuning knob.
+    // reads only 16 contiguous bytes of each column, so it defaults to 32; a row-major B to the
+    // tiling's own BK
     const bool b_is_transposed = mat2.stride(1) != 1 && mat2.stride(0) == 1;
-    const char* bk_env = std::getenv("TORCHVULKAN_INT_MM_BK");
-    if (params.use_shared_memory && (bk_env || b_is_transposed)) {
-        const uint32_t bk = bk_env ? static_cast<uint32_t>(std::strtoul(bk_env, nullptr, 10)) : 32;
-        if (bk >= block && bk % block == 0 && int_mm_shared_bytes(params, block, bk, pad) <= device->properties.limits.maxComputeSharedMemorySize) params.bk = bk;
-    }
-    if (params.use_shared_memory && int_mm_shared_bytes(params, block, params.bk, pad) > device->properties.limits.maxComputeSharedMemorySize) return false;
+    const uint32_t default_bk = (params.use_shared_memory && b_is_transposed) ? 32 : params.bk;
+    auto bk_fits = [&](uint32_t bk, uint32_t pad) {
+        return bk >= block && bk % block == 0 && (!params.use_shared_memory || int_mm_shared_bytes(params, block, bk, pad) <= max_smem);
+    };
 
     auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
     if (!coop_loadable(self) || !coop_loadable(mat2)) return false;
@@ -653,63 +654,88 @@ bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out
     const uint32_t a_transposed = (a.stride(-1) != 1 && a.stride(-2) == 1) ? 1 : 0;
     const uint32_t b_transposed = (b.stride(-1) != 1 && b.stride(-2) == 1) ? 1 : 0;
     const uint32_t vec = get_dtype_vec_size(at::kChar);
-    const uint32_t a_vec_aligned = (!a_transposed && strides_a[1] % vec == 0 && strides_a[0] % vec == 0 && params.bk % vec == 0) ? 1 : 0;
     const uint32_t b_vec_aligned = (!b_transposed && strides_b[1] % vec == 0 && strides_b[0] % vec == 0) ? 1 : 0;
 
-    SpecializationBuilder spd{};
-    spd.push(params.workgroup_size)
-       .push(params.subgroup_size)
-       .push(params.warps_m)
-       .push(params.warps_n)
-       .push(params.warp_frags_m)
-       .push(params.warp_frags_n)
-       .push(params.bk)
-       .push(uint32_t(0)) // HAS_ALPHA
-       .push(uint32_t(0)) // HAS_BETA
-       .push(uint32_t(0)) // HAS_BIAS
-       .push(a_transposed)
-       .push(b_transposed)
-       .push(uint32_t(0)) // OUT_TRANSPOSED
-       .push(uint32_t(0)) // BIAS_TRANSPOSED
-       .push(static_cast<uint32_t>(M % tile_m == 0))
-       .push(static_cast<uint32_t>(N % tile_n == 0))
-       .push(a_vec_aligned)
-       .push(b_vec_aligned)
-       .push(params.block_size)
-       .push(static_cast<uint32_t>(params.use_shared_memory))
-       .push(b_transposed) // B_SMEM_COLMAJOR
-       .push(pad);         // PAD
+    // one dispatch of the kernel for a K step and a shared-memory row padding (in int8 elements)
+    auto make_dispatch = [&](uint32_t bk, uint32_t pad) {
+        const uint32_t a_vec_aligned = (!a_transposed && strides_a[1] % vec == 0 && strides_a[0] % vec == 0 && bk % vec == 0) ? 1 : 0;
+        TuneDispatch d;
+        d.key = ShaderKey{torchvulkan::Kernel::INT_MM_COOP_16, at::kChar};
+        d.subgroupSize = params.subgroup_size;
+        d.spec.push(params.workgroup_size)
+              .push(params.subgroup_size)
+              .push(params.warps_m)
+              .push(params.warps_n)
+              .push(params.warp_frags_m)
+              .push(params.warp_frags_n)
+              .push(bk)
+              .push(uint32_t(0)) // HAS_ALPHA
+              .push(uint32_t(0)) // HAS_BETA
+              .push(uint32_t(0)) // HAS_BIAS
+              .push(a_transposed)
+              .push(b_transposed)
+              .push(uint32_t(0)) // OUT_TRANSPOSED
+              .push(uint32_t(0)) // BIAS_TRANSPOSED
+              .push(static_cast<uint32_t>(M % tile_m == 0))
+              .push(static_cast<uint32_t>(N % tile_n == 0))
+              .push(a_vec_aligned)
+              .push(b_vec_aligned)
+              .push(params.block_size)
+              .push(static_cast<uint32_t>(params.use_shared_memory))
+              .push(b_transposed) // B_SMEM_COLMAJOR
+              .push(pad);         // PAD
+        d.push.push(get_tensor_address(a))
+              .push(get_tensor_address(b))
+              .push(get_tensor_address(c))
+              .push((uint64_t)0) // no bias
+              .push_array(strides_a)
+              .push_array(strides_b)
+              .push_array(strides_out)
+              .push_array(strides_bias)
+              .push(M)
+              .push(N)
+              .push(K)
+              .push((uint32_t)0) // padding
+              .push_scalar(1, at::kInt)
+              .push_scalar(0, at::kInt);
+        d.read = {a, b};
+        d.write = {c};
+        d.groupX = N_padded / tile_n;
+        d.groupY = M_padded / tile_m;
+        return d;
+    };
 
-    PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(a))
-       .push(get_tensor_address(b))
-       .push(get_tensor_address(c))
-       .push((uint64_t)0) // no bias
-       .push_array(strides_a)
-       .push_array(strides_b)
-       .push_array(strides_out)
-       .push_array(strides_bias)
-       .push(M)
-       .push(N)
-       .push(K)
-       .push((uint32_t)0) // padding
-       .push_scalar(1, at::kInt)
-       .push_scalar(0, at::kInt);
+    // Shared-memory row padding and K step. The best padding depends on the GPU: int8 rows padded to
+    // stay 16-byte aligned are ~2.5x faster on RDNA3 and slightly slower on RDNA4. So unless both are
+    // set through the environment (for sweeps), they are autotuned once per device and problem class,
+    // and the result is cached with the other tuning data.
+    uint32_t pad = pad_env && pad_env[0] ? static_cast<uint32_t>(std::strtoul(pad_env, nullptr, 10)) : 4;
+    uint32_t bk = bk_env && bk_env[0] ? static_cast<uint32_t>(std::strtoul(bk_env, nullptr, 10)) : default_bk;
+    const bool tune = device->tuner && params.use_shared_memory && !(pad_env && pad_env[0] && bk_env && bk_env[0]);
+    if (tune) {
+        TuneSpace space;
+        std::vector<uint32_t> pads = pad_env && pad_env[0] ? std::vector<uint32_t>{pad} : std::vector<uint32_t>{4, 16};
+        std::vector<uint32_t> bks = bk_env && bk_env[0] ? std::vector<uint32_t>{bk} : std::vector<uint32_t>{default_bk, default_bk == 32 ? 16u : 32u};
+        space.params = {{"pad", pads}, {"bk", bks}};
+        space.valid = [&](const TuneConfig& cfg) { return bk_fits(cfg[1], cfg[0]); };
+        auto bucket = [](uint32_t x) -> uint64_t { uint64_t b = 1; while (b < x && b < 4096) b <<= 1; return b; };
+        const uint64_t tuned_id = bucket(M) | (bucket(N) << 16) | (bucket(K) << 32) |
+                                  ((uint64_t)a_transposed << 48) | ((uint64_t)b_transposed << 49) |
+                                  ((uint64_t)params.subgroup_size << 50);
+        const TuneConfig& chosen = device->tuner->select(ShaderKey{torchvulkan::Kernel::INT_MM_COOP_16, at::kChar}, tuned_id, space,
+            [&](const TuneConfig& cfg) { return make_dispatch(cfg[1], cfg[0]); });
+        if (!chosen.empty()) { pad = chosen[0]; bk = chosen[1]; }
+    }
+    if (!bk_fits(bk, pad)) return false;
+    params.bk = bk;
 
-    device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::INT_MM_COOP_16, at::kChar},
-        params.subgroup_size,
-        spd.build(),
-        pcs.build(),
-        /* read = */ {a, b},
-        /* write = */ {c},
-        N_padded / tile_n, M_padded / tile_m, 1
-    );
+    TuneDispatch d = make_dispatch(bk, pad);
+    device->shader_manager->dispatchShader(d.key, d.subgroupSize, d.spec.build(), d.push.build(), d.read, d.write, d.groupX, d.groupY, d.groupZ);
 
     if (std::getenv("TORCHVULKAN_INT_MM_DEBUG")) {
-        fprintf(stderr, "torchvulkan: _int_mm coop M=%u N=%u K=%u wg=%u sg=%u warps=%ux%u frags=%ux%u bk=%u pad=%u smem=%d at=%u bt=%u direct=%d\n",
+        fprintf(stderr, "torchvulkan: _int_mm coop M=%u N=%u K=%u wg=%u sg=%u warps=%ux%u frags=%ux%u bk=%u pad=%u smem=%d at=%u bt=%u direct=%d tuned=%d\n",
             M, N, K, params.workgroup_size, params.subgroup_size, params.warps_m, params.warps_n, params.warp_frags_m, params.warp_frags_n,
-            params.bk, pad, (int)params.use_shared_memory, a_transposed, b_transposed, (int)direct);
+            params.bk, pad, (int)params.use_shared_memory, a_transposed, b_transposed, (int)direct, (int)tune);
     }
 
     if (!direct) out.copy_(result.narrow(0, 0, M).narrow(1, 0, N));
