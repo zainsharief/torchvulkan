@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <c10/core/MemoryFormat.h>
+#include <ATen/native/Resize.h>
 #include <functional>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
@@ -552,6 +553,58 @@ at::Tensor& addmm_activation_out_vulkan(const at::Tensor& input, const at::Tenso
     return fill_out(out, addmm_activation_vulkan(input, mat1, mat2, beta, alpha, use_gelu));
 }
 
+// torch._int_mm: int8 [M, K] x int8 [K, N] -> int32 [M, N]
+at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out)
+{
+    TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "_int_mm: expected 2D tensors, got ", self.dim(), "D and ", mat2.dim(), "D");
+    TORCH_CHECK(self.scalar_type() == at::kChar && mat2.scalar_type() == at::kChar,
+        "_int_mm: expected int8 inputs, got ", self.scalar_type(), " and ", mat2.scalar_type());
+    TORCH_CHECK(self.size(1) == mat2.size(0), "_int_mm: self.size(1) (", self.size(1), ") must match mat2.size(0) (", mat2.size(0), ")");
+    TORCH_CHECK(out.scalar_type() == at::kInt, "_int_mm: out must be int32, got ", out.scalar_type());
+    const int64_t M = self.size(0), K = self.size(1), N = mat2.size(1);
+    TORCH_CHECK(M <= UINT32_MAX && N <= UINT32_MAX && K <= UINT32_MAX, "_int_mm: dimensions too large");
+    at::native::resize_output(out, {M, N});
+    if (M == 0 || N == 0) return out;
+    if (K == 0) return out.zero_();
+
+    // the kernel writes rows of a row-major result
+    at::Tensor result = (out.stride(1) == 1 && out.stride(0) >= std::max<int64_t>(N, 1)) ? out : at::empty({M, N}, out.options());
+
+    DeviceContext* device = get_device_context(self);
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(self))
+       .push(get_tensor_address(mat2))
+       .push(get_tensor_address(result))
+       .push(self.stride(0))
+       .push(self.stride(1))
+       .push(mat2.stride(0))
+       .push(mat2.stride(1))
+       .push(result.stride(0))
+       .push(static_cast<uint32_t>(M))
+       .push(static_cast<uint32_t>(N))
+       .push(static_cast<uint32_t>(K));
+
+    SpecializationBuilder spd{};
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::INT_MM, at::kChar},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {self, mat2},
+        /* write = */ {result},
+        static_cast<uint32_t>((N + 63) / 64), static_cast<uint32_t>((M + 63) / 64), 1
+    );
+    if (!result.is_same(out)) out.copy_(result);
+    return out;
+}
+
+at::Tensor int_mm_vulkan(const at::Tensor& self, const at::Tensor& mat2)
+{
+    at::Tensor out = at::empty({0}, self.options().dtype(at::kInt));
+    int_mm_out_vulkan(self, mat2, out);
+    return out;
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -564,4 +617,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("addmm.out", &addmm_out_vulkan);
     m.impl("baddbmm.out", &baddbmm_out_vulkan);
     m.impl("_addmm_activation.out", &addmm_activation_out_vulkan);
+    m.impl("_int_mm", &int_mm_vulkan);
+    m.impl("_int_mm.out", &int_mm_out_vulkan);
 }

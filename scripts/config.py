@@ -149,6 +149,9 @@ KERNELS = [
     Kernel('resample', 'ops/resample.slang', [
         Entry('resample_main', [F64, F32]),
     ]),
+    Kernel('int_mm', 'ops/int_mm.slang', [
+        Entry('int_mm_main', [I8]),
+    ]),
     Kernel('resample_u8', 'ops/resample_u8.slang', [
         Entry('resample_u8_main', [U8]),
     ]),
