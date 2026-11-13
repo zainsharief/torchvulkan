@@ -152,6 +152,9 @@ KERNELS = [
     Kernel('int_mm', 'ops/int_mm.slang', [
         Entry('int_mm_main', [I8]),
     ]),
+    Kernel('int_mm_coop_16', 'ops/matmul_coop.slang', [
+        Entry('int_mm_coop_main', [I8], ('vec',), constants=(16,)),
+    ]),
     Kernel('resample_u8', 'ops/resample_u8.slang', [
         Entry('resample_u8_main', [U8]),
     ]),
