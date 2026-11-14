@@ -31,7 +31,7 @@ sdist.include = ["torchvulkan/_version.py"]
 write_to = "torchvulkan/_version.py"
 
 [project.optional-dependencies]
-test = ["pytest", "tox"]
+test = ["pytest", "tox", "hypothesis", "pyyaml"]
 
 [tool.cibuildwheel]
 build = "cp311-* cp312-* cp313-* cp314-* cp315-*"
