@@ -184,6 +184,8 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | `TORCHVULKAN_PROFILE=1` | Print each compute pipeline's driver statistics (such as register use) when it's compiled, on drivers that support `VK_KHR_pipeline_executable_properties`. |
 | `TORCHVULKAN_PIPELINE_CACHE=0` | Don't cache compiled pipelines between runs. By default they're cached in `%LOCALAPPDATA%\torchvulkan` on Windows and `$XDG_CACHE_HOME/torchvulkan` (or `~/.cache/torchvulkan`) elsewhere. |
 | `TORCHVULKAN_CACHE_DIR` | Directory for the pipeline cache. |
+| `TORCHVULKAN_INT_MM_SCALAR=1` | Run `torch._int_mm` on the scalar kernel instead of cooperative matrices. |
+| `TORCHVULKAN_INT_MM_DEBUG=1` | Print the kernel and tiling `torch._int_mm` picks. `TORCHVULKAN_INT_MM_SG`, `_WARPS`, `_FRAGS`, `_PAD` and `_BK` override the tiling for benchmarking; by default `_PAD` and `_BK` are autotuned per device and shape class. |
 
 ## Limitations
 
