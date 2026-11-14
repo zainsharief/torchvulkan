@@ -1,9 +1,13 @@
 #include <torch/extension.h>
 #include <c10/core/MemoryFormat.h>
+#include <ATen/native/Resize.h>
+#include <cstdlib>
 #include <functional>
+#include <cstdio>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
+#include "vulkan/autotuner.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 #include "api/fallback.h"
@@ -552,6 +556,245 @@ at::Tensor& addmm_activation_out_vulkan(const at::Tensor& input, const at::Tenso
     return fill_out(out, addmm_activation_vulkan(input, mat1, mat2, beta, alpha, use_gelu));
 }
 
+// torch._int_mm on cooperative matrices: matmul_coop's int_mm_coop_main, with int8 fragments
+// accumulated and stored as int32. Returns false (and does nothing) when the device has no
+// suitable int8 x int8 -> int32 configuration, so the caller can run the scalar kernel.
+// TORCHVULKAN_INT_MM_SCALAR=1 forces the scalar kernel (for comparisons and debugging).
+// shared memory of matmul_coop's staged int8 kernel (mirrors Shared<T> in matmul_coop.slang, with
+// B_SMEM_COLMAJOR, whose B buffer is never smaller than the row-major one)
+uint64_t int_mm_shared_bytes(const CoopMatParams& params, uint32_t block, uint32_t bk, uint32_t pad_elems = 4)
+{
+    const uint64_t pad = pad_elems;
+    const uint64_t rows_a = (uint64_t)params.warps_m * params.warp_frags_m * block;
+    const uint64_t cols_b = (uint64_t)params.warps_n * params.warp_frags_n * block;
+    return 2 * (rows_a * (bk + pad) + std::max<uint64_t>(bk * (cols_b + pad), cols_b * (bk + pad)));
+}
+
+bool int_mm_coop(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out)
+{
+    DeviceContext* device = get_device_context(self);
+    if (!device->support_coopmat) return false;
+    if (const char* env = std::getenv("TORCHVULKAN_INT_MM_SCALAR"); env && env[0] != '\0' && env[0] != '0') return false;
+
+    // only the 16x16x16 shape is compiled for int8 (see scripts/config.py)
+    const uint32_t block = 16;
+    bool has_block = false;
+    for (const CoopMatConfig& c : device->cache.getCoopMatConfig(at::kChar, at::kChar, at::kInt, at::kInt)) {
+        if (c.m == block && c.n == block && c.k == block) has_block = true;
+    }
+    if (!has_block) return false;
+
+    const uint32_t M = static_cast<uint32_t>(self.size(0));
+    const uint32_t K = static_cast<uint32_t>(self.size(1));
+    const uint32_t N = static_cast<uint32_t>(mat2.size(1));
+
+    CoopMatParams params = device->cache.getCoopMatParams(at::kChar, {block}, M, N);
+    if (!params.is_valid) return false;
+
+    // tuning knobs (for sweeps): subgroup size, warp grid and fragments per warp, row padding
+    auto env_u32 = [](const char* name, uint32_t fallback) {
+        const char* v = std::getenv(name);
+        return (v && v[0]) ? static_cast<uint32_t>(std::strtoul(v, nullptr, 10)) : fallback;
+    };
+    auto env_pair = [](const char* name, uint32_t& a, uint32_t& b) {
+        const char* v = std::getenv(name);
+        if (!v || !v[0]) return;
+        unsigned x = 0, y = 0;
+        if (std::sscanf(v, "%ux%u", &x, &y) == 2 && x > 0 && y > 0) { a = x; b = y; }
+    };
+    params.subgroup_size = env_u32("TORCHVULKAN_INT_MM_SG", params.subgroup_size);
+    env_pair("TORCHVULKAN_INT_MM_WARPS", params.warps_m, params.warps_n);
+    env_pair("TORCHVULKAN_INT_MM_FRAGS", params.warp_frags_m, params.warp_frags_n);
+    params.workgroup_size = params.warps_m * params.warps_n * params.subgroup_size;
+    if (params.workgroup_size > device->properties.limits.maxComputeWorkGroupInvocations) return false;
+    const uint32_t max_smem = device->properties.limits.maxComputeSharedMemorySize;
+    const char* pad_env = std::getenv("TORCHVULKAN_INT_MM_PAD");
+    const char* bk_env = std::getenv("TORCHVULKAN_INT_MM_BK");
+
+    // a transposed B (a Linear weight, weight.t()) is staged column by column, and a 16-deep K step
+    // reads only 16 contiguous bytes of each column, so it defaults to 32; a row-major B to the
+    // tiling's own BK
+    const bool b_is_transposed = mat2.stride(1) != 1 && mat2.stride(0) == 1;
+    const uint32_t default_bk = (params.use_shared_memory && b_is_transposed) ? 32 : params.bk;
+    auto bk_fits = [&](uint32_t bk, uint32_t pad) {
+        return bk >= block && bk % block == 0 && (!params.use_shared_memory || int_mm_shared_bytes(params, block, bk, pad) <= max_smem);
+    };
+
+    auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
+    if (!coop_loadable(self) || !coop_loadable(mat2)) return false;
+
+    const uint32_t tile_m = params.block_size * params.warps_m * params.warp_frags_m;
+    const uint32_t tile_n = params.block_size_acc * params.warps_n * params.warp_frags_n;
+    const uint32_t M_padded = ((M + tile_m - 1) / tile_m) * tile_m;
+    const uint32_t N_padded = ((N + tile_n - 1) / tile_n) * tile_n;
+    if (N_padded / tile_n > device->properties.limits.maxComputeWorkGroupCount[0] ||
+        M_padded / tile_m > device->properties.limits.maxComputeWorkGroupCount[1]) return false;
+
+    // whole fragments are stored, so the result is written straight into `out` only when it has
+    // no partial tiles and rows that are 16-byte aligned; otherwise into a padded scratch tensor
+    const bool direct = M_padded == M && N_padded == N && out.stride(1) == 1 && out.stride(0) % 4 == 0 && out.stride(0) >= (int64_t)N &&
+                        (get_tensor_address(out) % 16) == 0;
+    at::Tensor result = direct ? out : at::empty({(int64_t)M_padded, (int64_t)N_padded}, out.options());
+
+    at::Tensor a = self.unsqueeze(0);
+    at::Tensor b = mat2.unsqueeze(0);
+    at::Tensor c = result.unsqueeze(0);
+    if (!fits_32bit_indexing({a, b, c})) return false;
+
+    auto strides_of = [](const at::Tensor& t, uint32_t (&strides)[4]) {
+        for (int i = 0; i < 3; i++) strides[i] = static_cast<uint32_t>(t.stride(i));
+        strides[3] = 0;
+    };
+    uint32_t strides_a[4], strides_b[4], strides_out[4];
+    uint32_t strides_bias[4] = {0, 0, 0, 0};
+    strides_of(a, strides_a);
+    strides_of(b, strides_b);
+    strides_of(c, strides_out);
+
+    const uint32_t a_transposed = (a.stride(-1) != 1 && a.stride(-2) == 1) ? 1 : 0;
+    const uint32_t b_transposed = (b.stride(-1) != 1 && b.stride(-2) == 1) ? 1 : 0;
+    const uint32_t vec = get_dtype_vec_size(at::kChar);
+    const uint32_t b_vec_aligned = (!b_transposed && strides_b[1] % vec == 0 && strides_b[0] % vec == 0) ? 1 : 0;
+
+    // one dispatch of the kernel for a K step and a shared-memory row padding (in int8 elements)
+    auto make_dispatch = [&](uint32_t bk, uint32_t pad) {
+        const uint32_t a_vec_aligned = (!a_transposed && strides_a[1] % vec == 0 && strides_a[0] % vec == 0 && bk % vec == 0) ? 1 : 0;
+        TuneDispatch d;
+        d.key = ShaderKey{torchvulkan::Kernel::INT_MM_COOP_16, at::kChar};
+        d.subgroupSize = params.subgroup_size;
+        d.spec.push(params.workgroup_size)
+              .push(params.subgroup_size)
+              .push(params.warps_m)
+              .push(params.warps_n)
+              .push(params.warp_frags_m)
+              .push(params.warp_frags_n)
+              .push(bk)
+              .push(uint32_t(0)) // HAS_ALPHA
+              .push(uint32_t(0)) // HAS_BETA
+              .push(uint32_t(0)) // HAS_BIAS
+              .push(a_transposed)
+              .push(b_transposed)
+              .push(uint32_t(0)) // OUT_TRANSPOSED
+              .push(uint32_t(0)) // BIAS_TRANSPOSED
+              .push(static_cast<uint32_t>(M % tile_m == 0))
+              .push(static_cast<uint32_t>(N % tile_n == 0))
+              .push(a_vec_aligned)
+              .push(b_vec_aligned)
+              .push(params.block_size)
+              .push(static_cast<uint32_t>(params.use_shared_memory))
+              .push(b_transposed) // B_SMEM_COLMAJOR
+              .push(pad);         // PAD
+        d.push.push(get_tensor_address(a))
+              .push(get_tensor_address(b))
+              .push(get_tensor_address(c))
+              .push((uint64_t)0) // no bias
+              .push_array(strides_a)
+              .push_array(strides_b)
+              .push_array(strides_out)
+              .push_array(strides_bias)
+              .push(M)
+              .push(N)
+              .push(K)
+              .push((uint32_t)0) // padding
+              .push_scalar(1, at::kInt)
+              .push_scalar(0, at::kInt);
+        d.read = {a, b};
+        d.write = {c};
+        d.groupX = N_padded / tile_n;
+        d.groupY = M_padded / tile_m;
+        return d;
+    };
+
+    // Shared-memory row padding and K step. The best padding depends on the GPU: int8 rows padded to
+    // stay 16-byte aligned are ~2.5x faster on RDNA3 and slightly slower on RDNA4. So unless both are
+    // set through the environment (for sweeps), they are autotuned once per device and problem class,
+    // and the result is cached with the other tuning data.
+    uint32_t pad = pad_env && pad_env[0] ? static_cast<uint32_t>(std::strtoul(pad_env, nullptr, 10)) : 4;
+    uint32_t bk = bk_env && bk_env[0] ? static_cast<uint32_t>(std::strtoul(bk_env, nullptr, 10)) : default_bk;
+    const bool tune = device->tuner && params.use_shared_memory && !(pad_env && pad_env[0] && bk_env && bk_env[0]);
+    if (tune) {
+        TuneSpace space;
+        std::vector<uint32_t> pads = pad_env && pad_env[0] ? std::vector<uint32_t>{pad} : std::vector<uint32_t>{4, 16};
+        std::vector<uint32_t> bks = bk_env && bk_env[0] ? std::vector<uint32_t>{bk} : std::vector<uint32_t>{default_bk, default_bk == 32 ? 16u : 32u};
+        space.params = {{"pad", pads}, {"bk", bks}};
+        space.valid = [&](const TuneConfig& cfg) { return bk_fits(cfg[1], cfg[0]); };
+        auto bucket = [](uint32_t x) -> uint64_t { uint64_t b = 1; while (b < x && b < 4096) b <<= 1; return b; };
+        const uint64_t tuned_id = bucket(M) | (bucket(N) << 16) | (bucket(K) << 32) |
+                                  ((uint64_t)a_transposed << 48) | ((uint64_t)b_transposed << 49) |
+                                  ((uint64_t)params.subgroup_size << 50);
+        const TuneConfig& chosen = device->tuner->select(ShaderKey{torchvulkan::Kernel::INT_MM_COOP_16, at::kChar}, tuned_id, space,
+            [&](const TuneConfig& cfg) { return make_dispatch(cfg[1], cfg[0]); });
+        if (!chosen.empty()) { pad = chosen[0]; bk = chosen[1]; }
+    }
+    if (!bk_fits(bk, pad)) return false;
+    params.bk = bk;
+
+    TuneDispatch d = make_dispatch(bk, pad);
+    device->shader_manager->dispatchShader(d.key, d.subgroupSize, d.spec.build(), d.push.build(), d.read, d.write, d.groupX, d.groupY, d.groupZ);
+
+    if (std::getenv("TORCHVULKAN_INT_MM_DEBUG")) {
+        fprintf(stderr, "torchvulkan: _int_mm coop M=%u N=%u K=%u wg=%u sg=%u warps=%ux%u frags=%ux%u bk=%u pad=%u smem=%d at=%u bt=%u direct=%d tuned=%d\n",
+            M, N, K, params.workgroup_size, params.subgroup_size, params.warps_m, params.warps_n, params.warp_frags_m, params.warp_frags_n,
+            params.bk, pad, (int)params.use_shared_memory, a_transposed, b_transposed, (int)direct, (int)tune);
+    }
+
+    if (!direct) out.copy_(result.narrow(0, 0, M).narrow(1, 0, N));
+    return true;
+}
+
+// torch._int_mm: int8 [M, K] x int8 [K, N] -> int32 [M, N]
+at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out)
+{
+    TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "_int_mm: expected 2D tensors, got ", self.dim(), "D and ", mat2.dim(), "D");
+    TORCH_CHECK(self.scalar_type() == at::kChar && mat2.scalar_type() == at::kChar,
+        "_int_mm: expected int8 inputs, got ", self.scalar_type(), " and ", mat2.scalar_type());
+    TORCH_CHECK(self.size(1) == mat2.size(0), "_int_mm: self.size(1) (", self.size(1), ") must match mat2.size(0) (", mat2.size(0), ")");
+    TORCH_CHECK(out.scalar_type() == at::kInt, "_int_mm: out must be int32, got ", out.scalar_type());
+    const int64_t M = self.size(0), K = self.size(1), N = mat2.size(1);
+    TORCH_CHECK(M <= UINT32_MAX && N <= UINT32_MAX && K <= UINT32_MAX, "_int_mm: dimensions too large");
+    at::native::resize_output(out, {M, N});
+    if (M == 0 || N == 0) return out;
+    if (K == 0) return out.zero_();
+    if (int_mm_coop(self, mat2, out)) return out;
+
+    // the kernel writes rows of a row-major result
+    at::Tensor result = (out.stride(1) == 1 && out.stride(0) >= std::max<int64_t>(N, 1)) ? out : at::empty({M, N}, out.options());
+
+    DeviceContext* device = get_device_context(self);
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(self))
+       .push(get_tensor_address(mat2))
+       .push(get_tensor_address(result))
+       .push(self.stride(0))
+       .push(self.stride(1))
+       .push(mat2.stride(0))
+       .push(mat2.stride(1))
+       .push(result.stride(0))
+       .push(static_cast<uint32_t>(M))
+       .push(static_cast<uint32_t>(N))
+       .push(static_cast<uint32_t>(K));
+
+    SpecializationBuilder spd{};
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::INT_MM, at::kChar},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {self, mat2},
+        /* write = */ {result},
+        static_cast<uint32_t>((N + 63) / 64), static_cast<uint32_t>((M + 63) / 64), 1
+    );
+    if (!result.is_same(out)) out.copy_(result);
+    return out;
+}
+
+at::Tensor int_mm_vulkan(const at::Tensor& self, const at::Tensor& mat2)
+{
+    at::Tensor out = at::empty({0}, self.options().dtype(at::kInt));
+    int_mm_out_vulkan(self, mat2, out);
+    return out;
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -564,4 +807,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("addmm.out", &addmm_out_vulkan);
     m.impl("baddbmm.out", &baddbmm_out_vulkan);
     m.impl("_addmm_activation.out", &addmm_activation_out_vulkan);
+    m.impl("_int_mm", &int_mm_vulkan);
+    m.impl("_int_mm.out", &int_mm_out_vulkan);
 }
