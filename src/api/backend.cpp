@@ -70,6 +70,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->memoryUsage();
     });
 
+    m.def("_memory_reserved", [](int64_t device_index) -> uint64_t {
+        return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->reservedBytes();
+    });
+
     m.def("_mem_get_info", [](int64_t device_index) -> std::pair<uint64_t, uint64_t> {
         DeviceContext* device = VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index));
         return {device->memoryFree(), device->memoryTotal()};

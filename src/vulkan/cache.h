@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <c10/core/ScalarType.h>
 #include <c10/util/Exception.h>
 #include <atomic>
@@ -54,6 +55,7 @@ public:
     void deleteBuffer(VulkanBuffer* buffer);
     bool releaseOldestBuffer(MemoryUsage usage);
     void releaseBuffers();
+    size_t cachedDeviceBytes() const { return cached_device_bytes.load(); }
 
     void clear();
 
@@ -84,6 +86,8 @@ private:
     };
     BufferPool deviceBufferPool;
     BufferPool stagingBufferPool;
+    std::atomic<size_t> cached_device_bytes{0};
+    void countCached(const VulkanBuffer* buffer, bool added);
     BufferPool& poolFor(MemoryUsage usage);
 
     std::unordered_map<uint64_t, std::vector<CoopMatConfig>> coopMatCache;

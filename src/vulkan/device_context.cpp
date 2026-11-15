@@ -75,13 +75,18 @@ size_t DeviceContext::memoryFree()
 void DeviceContext::recordAllocation(size_t bytes)
 {
     size_t now = allocated_bytes.fetch_add(bytes) + bytes;
+    total_allocated_bytes.fetch_add(bytes);
     size_t peak = peak_allocated_bytes.load();
     while (now > peak && !peak_allocated_bytes.compare_exchange_weak(peak, now)) {}
+    size_t reserved = reservedBytes();
+    size_t peak_reserved = peak_reserved_bytes.load();
+    while (reserved > peak_reserved && !peak_reserved_bytes.compare_exchange_weak(peak_reserved, reserved)) {}
 }
 
 void DeviceContext::recordFree(size_t bytes)
 {
     allocated_bytes.fetch_sub(bytes);
+    total_freed_bytes.fetch_add(bytes);
 }
 
 DeviceContext::~DeviceContext()

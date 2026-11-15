@@ -75,7 +75,7 @@ def max_memory_allocated(device=None) -> int:
     return _C._max_memory_allocated(_device_index(device))
 
 def memory_reserved(device=None) -> int:
-    return _C._memory_usage(_device_index(device))
+    return _C._memory_reserved(_device_index(device))
 
 def mem_get_info(device=None) -> tuple:
     return _C._mem_get_info(_device_index(device))
@@ -92,7 +92,7 @@ def memory_stats(device=None) -> dict:
         "active_bytes.all.peak": peak,
         "allocated_bytes.all.current": allocated,
         "allocated_bytes.all.peak": peak,
-        "reserved_bytes.all.current": _C._memory_usage(index),
+        "reserved_bytes.all.current": _C._memory_reserved(index),
     }
 
 DeviceProperties = namedtuple("DeviceProperties", ["name", "total_memory", "vendor_id", "device_id", "api_version", "driver_version", "subgroup_size", "has_fp64", "has_int64", "has_fp16", "has_bf16", "has_int16", "has_int8"])

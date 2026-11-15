@@ -6,6 +6,56 @@
 VulkanAllocator globalVulkanAllocator;
 REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1, &globalVulkanAllocator);
 
+bool VulkanAllocator::initialized()
+{
+    return VulkanContext::IsInitialized();
+}
+
+void VulkanAllocator::emptyCache(c10::MempoolId_t /* mempool_id */)
+{
+    for (DeviceContext* device : VulkanContext::Instance().devices) device->releaseCachedBuffers(SIZE_MAX, MemoryUsage::DEVICE_ONLY);
+}
+
+void VulkanAllocator::recordStream(const c10::DataPtr& /* ptr */, c10::Stream /* stream */) {}
+
+c10::CachingDeviceAllocator::DeviceStats VulkanAllocator::getDeviceStats(c10::DeviceIndex index)
+{
+    DeviceContext* device = VulkanContext::Instance().GetDeviceContext(index);
+    c10::CachingDeviceAllocator::DeviceStats stats;
+    auto aggregate = static_cast<size_t>(c10::CachingAllocator::StatType::AGGREGATE);
+    for (c10::CachingAllocator::StatArray* stat : {&stats.allocated_bytes, &stats.active_bytes, &stats.requested_bytes}) {
+        c10::CachingAllocator::Stat& s = (*stat)[aggregate];
+        s.current = static_cast<int64_t>(device->allocated_bytes.load());
+        s.peak = static_cast<int64_t>(device->peak_allocated_bytes.load());
+        s.allocated = static_cast<int64_t>(device->total_allocated_bytes.load());
+        s.freed = static_cast<int64_t>(device->total_freed_bytes.load());
+    }
+    c10::CachingAllocator::Stat& reserved = stats.reserved_bytes[aggregate];
+    reserved.current = static_cast<int64_t>(device->reservedBytes());
+    reserved.peak = std::max(reserved.current, static_cast<int64_t>(device->peak_reserved_bytes.load()));
+    return stats;
+}
+
+void VulkanAllocator::resetAccumulatedStats(c10::DeviceIndex index)
+{
+    DeviceContext* device = VulkanContext::Instance().GetDeviceContext(index);
+    device->total_allocated_bytes.store(0);
+    device->total_freed_bytes.store(0);
+}
+
+void VulkanAllocator::resetPeakStats(c10::DeviceIndex index)
+{
+    DeviceContext* device = VulkanContext::Instance().GetDeviceContext(index);
+    device->peak_allocated_bytes.store(device->allocated_bytes.load());
+    device->peak_reserved_bytes.store(device->reservedBytes());
+}
+
+std::pair<size_t, size_t> VulkanAllocator::getMemoryInfo(c10::DeviceIndex index)
+{
+    DeviceContext* device = VulkanContext::Instance().GetDeviceContext(index);
+    return {device->memoryFree(), device->memoryTotal()};
+}
+
 c10::DataPtr VulkanAllocator::allocate(size_t nbytes)
 {
     c10::Device device(c10::DeviceType::PrivateUse1, VulkanContext::CurrentDevice());
@@ -14,6 +64,7 @@ c10::DataPtr VulkanAllocator::allocate(size_t nbytes)
     DeviceContext* context = VulkanContext::Instance().CurrentDeviceContext();
     VulkanBuffer* buffer = allocateBuffer(context, nbytes, MemoryUsage::DEVICE_ONLY);
     context->recordAllocation(buffer->size());
+    c10::reportMemoryUsageToProfiler(buffer, static_cast<int64_t>(buffer->size()), context->allocated_bytes.load(), context->reservedBytes(), device);
     return {buffer, buffer, &VulkanAllocator::deleter, device};
 }
 
@@ -21,7 +72,10 @@ void VulkanAllocator::deleter(void* ptr)
 {
     if (ptr == nullptr || VulkanContext::IsInBadFork()) return;
     VulkanBuffer* buffer = static_cast<VulkanBuffer*>(ptr);
-    buffer->owner()->recordFree(buffer->size());
+    DeviceContext* owner = buffer->owner();
+    owner->recordFree(buffer->size());
+    c10::reportMemoryUsageToProfiler(buffer, -static_cast<int64_t>(buffer->size()), owner->allocated_bytes.load(), owner->reservedBytes(),
+                                     c10::Device(c10::DeviceType::PrivateUse1, owner->index));
 
     // a buffer that spilled into system RAM is freed, not cached
     if (buffer->deviceLocal()) buffer->owner()->cache.deleteBuffer(buffer);

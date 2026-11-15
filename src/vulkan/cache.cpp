@@ -91,6 +91,13 @@ VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
     return usage == MemoryUsage::DEVICE_ONLY ? deviceBufferPool : stagingBufferPool;
 }
 
+void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
+{
+    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) return;
+    if (added) cached_device_bytes.fetch_add(buffer->size());
+    else cached_device_bytes.fetch_sub(buffer->size());
+}
+
 VulkanBuffer* VulkanCache::allocateBuffer(size_t size, MemoryUsage usage)
 {
     size_t rounded = roundBufferSize(size);
@@ -107,6 +114,7 @@ VulkanBuffer* VulkanCache::allocateBuffer(size_t size, MemoryUsage usage)
 
     VulkanBuffer* buffer = *entry;
     pool.lru.erase(entry);
+    countCached(buffer, false);
     return buffer;
 }
 
@@ -116,6 +124,7 @@ void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
     BufferPool& pool = poolFor(buffer->usage());
     pool.lru.push_back(buffer);
     pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
+    countCached(buffer, true);
 }
 
 bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
@@ -131,6 +140,7 @@ bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
     if (it->second.empty()) pool.by_size.erase(it);
 
     pool.lru.pop_front();
+    countCached(buffer, false);
     delete buffer;
     return true;
 }
@@ -139,7 +149,11 @@ void VulkanCache::releaseBuffers()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     for (BufferPool* pool : {&deviceBufferPool, &stagingBufferPool}) {
-        for (VulkanBuffer* buffer : pool->lru) delete buffer;
+        for (VulkanBuffer* buffer : pool->lru) 
+        {
+            countCached(buffer, false);
+            delete buffer;
+        }
         pool->lru.clear();
         pool->by_size.clear();
     }
