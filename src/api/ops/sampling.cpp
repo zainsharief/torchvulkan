@@ -34,7 +34,7 @@ void dispatch_multinomial_shader(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(cdf))
-        .push(get_tensor_address(out))
+        .push(get_output_address(out))
         .push(numel)
         .push(static_cast<uint64_t>(n_sample))
         .push(static_cast<uint64_t>(n_categories))

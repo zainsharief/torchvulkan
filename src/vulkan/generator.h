@@ -7,20 +7,29 @@
 #include <utility>
 #include <vector>
 
+struct VulkanGeneratorState : public c10::intrusive_ptr_target {
+    uint64_t seed = c10::default_rng_seed_val;
+    uint64_t offset = 0;
+};
+
 class VulkanGeneratorImpl : public c10::GeneratorImpl {
 public:
     VulkanGeneratorImpl(c10::DeviceIndex device_index);
+    VulkanGeneratorImpl(c10::DeviceIndex device_index, c10::intrusive_ptr<VulkanGeneratorState> state);
     ~VulkanGeneratorImpl() override = default;
 
     void set_current_seed(uint64_t seed) override;
     uint64_t seed() override;
-    uint64_t current_seed() const override { return seed_; };
+    uint64_t current_seed() const override { return state_->seed; };
 
-    void set_offset(uint64_t offset) override { offset_ = offset; };
-    uint64_t get_offset() const override { return offset_; };
+    void set_offset(uint64_t offset) override { state_->offset = offset; };
+    uint64_t get_offset() const override { return state_->offset; };
 
     void set_state(const c10::TensorImpl& new_state) override;
     c10::intrusive_ptr<c10::TensorImpl> get_state() const override;
+
+    void graphsafe_set_state(const c10::intrusive_ptr<c10::GeneratorImpl>& new_state) override;
+    c10::intrusive_ptr<c10::GeneratorImpl> graphsafe_get_state() const override;
 
     static std::vector<at::Generator> create_default_generators(size_t count);
     static const at::Generator& default_generator(c10::DeviceIndex device_index = -1);
@@ -41,8 +50,7 @@ private:
 
     static constexpr int64_t STATE_BYTES = 2 * sizeof(uint64_t);
 
-    uint64_t seed_ = c10::default_rng_seed_val;
-    uint64_t offset_ = 0;
+    c10::intrusive_ptr<VulkanGeneratorState> state_;
 
     static std::mutex pending_seeds_mutex_;
     static bool default_generators_created_;

@@ -144,7 +144,7 @@ void dispatch_random_shader(
     auto [seed, offset] = VulkanGeneratorImpl::reserve(generator, self.device().index());
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(self))
+    pcs.push(get_output_address(self))
         .push_metadata(contiguous ? nullptr : &metadata)
         .push(numel)
         .push(seed)

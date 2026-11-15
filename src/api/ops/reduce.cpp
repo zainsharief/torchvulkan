@@ -89,7 +89,7 @@ at::Tensor dispatch_reduce_shader(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(self))
-       .push(get_tensor_address(partial))
+       .push(get_output_address(partial))
        .push_metadata(&metadata)
        .push(numel_out)
        .push(static_cast<uint32_t>(self.stride(dim)))
@@ -327,7 +327,7 @@ at::Tensor argreduce(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(x))
-       .push(get_tensor_address(idx))
+       .push(get_output_address(idx))
        .push_metadata(&metadata)
        .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(x.stride(d)))

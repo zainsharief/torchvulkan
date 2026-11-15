@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <algorithm>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
@@ -11,6 +12,63 @@ at::Tensor& fill_scalar_vulkan(
     at::Tensor& self, 
     const at::Scalar& value)
 {
+    if (self.is_complex() && self.numel() > 0) 
+    {
+        c10::complex<double> v = value.toComplexDouble();
+        at::Tensor pairs = at::view_as_real(self.is_conj() ? self.conj() : self);  // conj() of a conjugate view is the plain one
+        pairs.select(-1, 0).fill_(v.real());
+        pairs.select(-1, 1).fill_(self.is_conj() ? -v.imag() : v.imag());
+        return self;
+    }
+
+    if (c10::isFloat8Type(self.scalar_type()) && self.numel() > 0) 
+    {
+        float v = value.toFloat();
+        uint8_t bits = 0;
+        switch (self.scalar_type()) {
+            case at::kFloat8_e4m3fn: bits = c10::Float8_e4m3fn(v).x; break;
+            case at::kFloat8_e5m2: bits = c10::Float8_e5m2(v).x; break;
+            case at::kFloat8_e4m3fnuz: bits = c10::Float8_e4m3fnuz(v).x; break;
+            case at::kFloat8_e5m2fnuz: bits = c10::Float8_e5m2fnuz(v).x; break;
+            case at::kFloat8_e8m0fnu: bits = c10::Float8_e8m0fnu(v).x; break;
+            default: TORCH_CHECK(false, "torchvulkan [ERROR]: no fill for ", self.scalar_type());
+        }
+        self.view(at::kByte).fill_(bits);
+        return self;
+    }
+
+    for (int64_t d = 0; d < self.dim(); d++) 
+    {
+        if (self.stride(d) == 0 && self.size(d) > 1) 
+        {
+            at::Tensor distinct = self.narrow(d, 0, 1);
+            fill_scalar_vulkan(distinct, value);
+            return self;
+        }
+    }
+
+    constexpr int64_t chunk = int64_t(1) << 30;
+    if (self.is_contiguous() && self.numel() > chunk) 
+    {
+        at::Tensor flat = self.view({-1});
+        for (int64_t start = 0; start < flat.numel(); start += chunk)
+        {
+            at::Tensor part = flat.narrow(0, start, std::min(chunk, flat.numel() - start));
+            fill_scalar_vulkan(part, value);
+        }
+        return self;
+    }
+
+    if (!is_dtype_supported(self, self.scalar_type()) && value.equal(0) && !self.is_complex())
+    {
+        at::ScalarType bits = c10::elementSize(self.scalar_type()) == 1 ? at::kByte
+                            : c10::elementSize(self.scalar_type()) == 2 ? at::kShort
+                            : c10::elementSize(self.scalar_type()) == 4 ? at::kInt : at::kLong;
+        at::Tensor raw = self.view(bits);
+        fill_scalar_vulkan(raw, 0);
+        return self;
+    }
+
     at::TensorIterator iter = at::TensorIterator::borrowing_nullary_op(self);
 
     uint64_t numel = iter.numel();
@@ -38,7 +96,7 @@ at::Tensor& fill_scalar_vulkan(
     Metadata metadata = metadataBuilder.build();
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(self))
+    pcs.push(get_output_address(self))
         .push_metadata(contiguous ? nullptr : &metadata)
         .push(numel)
         .push_scalar(value, self.scalar_type());

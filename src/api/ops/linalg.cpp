@@ -87,8 +87,8 @@ void dispatch_cholesky_shader(const at::Tensor& a, const at::Tensor& info)
         spd.push(workgroupSizeX);
 
         PushConstantBuilder pcs{};
-        pcs.push(get_tensor_address(a_part))
-           .push(get_tensor_address(info_part))
+        pcs.push(get_output_address(a_part))
+           .push(get_output_address(info_part))
            .push(static_cast<uint32_t>(a.size(1)));
 
         device->shader_manager->dispatchShader(
@@ -148,7 +148,7 @@ void dispatch_triangular_solve_shader(const at::Tensor& a, const at::Tensor& x, 
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(a))
-       .push(get_tensor_address(x))
+       .push(get_output_address(x))
        .push(count)
        .push(static_cast<uint32_t>(x.size(1)))
        .push(static_cast<uint32_t>(x.size(2)));
@@ -224,9 +224,9 @@ void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tens
            .push(workgroupSizeX);
 
         PushConstantBuilder pcs{};
-        pcs.push(get_tensor_address(a_part))
-           .push(get_tensor_address(v_part))
-           .push(get_tensor_address(r_part))
+        pcs.push(get_output_address(a_part))
+           .push(get_output_address(v_part))
+           .push(get_output_address(r_part))
            .push(static_cast<uint32_t>(a.size(1)))
            .push(static_cast<uint32_t>(n))
            .push(static_cast<uint32_t>(pairs));

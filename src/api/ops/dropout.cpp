@@ -44,8 +44,8 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(src))
-        .push(get_tensor_address(output))
-        .push(get_tensor_address(mask))
+        .push(get_output_address(output))
+        .push(get_output_address(mask))
         .push(numel)
         .push(seed)
         .push(offset)

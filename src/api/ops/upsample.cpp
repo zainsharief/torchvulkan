@@ -59,7 +59,7 @@ void dispatch_resample_shader(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(input))
-       .push(get_tensor_address(output))
+       .push(get_output_address(output))
        .push(count)
        .push(static_cast<uint32_t>(in_length))
        .push(static_cast<uint32_t>(out_length))
@@ -187,7 +187,7 @@ void dispatch_resample_u8_shader(const at::Tensor& input, const at::Tensor& outp
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(input))
-       .push(get_tensor_address(output))
+       .push(get_output_address(output))
        .push(get_tensor_address(index_min))
        .push(get_tensor_address(index_size))
        .push(get_tensor_address(weights))

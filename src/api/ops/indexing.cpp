@@ -72,7 +72,7 @@ bool dispatch_index_gather_shader(
     Metadata metadata = metadataBuilder.build();
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(out))
+    pcs.push(get_output_address(out))
        .push(get_tensor_address(src));
     for (size_t k = 0; k < INDEX_MAX_TENSORS; k++) pcs.push(k < num_indices ? get_tensor_address(indices[k]) : uint64_t(0));
     pcs.push_metadata(&metadata)
@@ -297,7 +297,7 @@ at::Tensor embedding_dense_backward_vulkan(
     pcs.push(get_tensor_address(flat_grad))
        .push(get_tensor_address(sorted))
        .push(get_tensor_address(permutation))
-       .push(get_tensor_address(grad_weight))
+       .push(get_output_address(grad_weight))
        .push(padding_idx_)
        .push(numel_out)
        .push(static_cast<uint32_t>(n))

@@ -52,6 +52,9 @@ struct DeviceContext {
 
     std::atomic<size_t> allocated_bytes{0};
     std::atomic<size_t> peak_allocated_bytes{0};
+    std::atomic<size_t> total_allocated_bytes{0};
+    std::atomic<size_t> total_freed_bytes{0};
+    std::atomic<size_t> peak_reserved_bytes{0};
 
     DeviceContext() { cache.setOwner(this); }
     DeviceContext(const DeviceContext&) = delete;
@@ -63,6 +66,7 @@ struct DeviceContext {
     size_t memoryTotal();
     size_t memoryFree();
     bool releaseCachedBuffers(size_t size, MemoryUsage usage);
+    size_t reservedBytes() { return allocated_bytes.load() + cache.cachedDeviceBytes(); }
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();

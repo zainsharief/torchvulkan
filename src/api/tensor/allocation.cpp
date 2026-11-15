@@ -2,6 +2,8 @@
 #include <c10/core/MemoryFormat.h>
 #include <ATen/native/Resize.h>
 #include <ATen/EmptyTensor.h>
+#include <ATen/native/TensorFactories.h>
+#include <ATen/native/ResizeCommon.h>
 #include <c10/core/DeviceGuard.h>
 #include "vulkan/memory.h"
 #include "vulkan/allocator.h"
@@ -10,6 +12,25 @@
 #include "api/ops/internal.h"
 
 namespace {
+
+namespace {
+
+void fill_deterministic_if_enabled(const at::Tensor& tensor)
+{
+    if (!at::globalContext().deterministicAlgorithms() || !at::globalContext().deterministicFillUninitializedMemory()) return;
+    int64_t numel = static_cast<int64_t>(tensor.storage().nbytes()) / static_cast<int64_t>(tensor.itemsize());
+    if (numel == 0) return;
+    at::Tensor flat = at::empty({0}, tensor.options());
+    flat.set_(tensor.storage(), 0, {numel}, {1});
+    at::native::fill_empty_deterministic_(flat);
+}
+
+void warn_complex_half(at::ScalarType dtype)
+{
+    if (dtype == at::kComplexHalf) TORCH_WARN_ONCE("ComplexHalf support is experimental and many operators don't support it yet.");
+}
+
+} // namespace
 
 at::Tensor empty_memory_format_vulkan(
     c10::SymIntArrayRef size,
@@ -23,9 +44,10 @@ at::Tensor empty_memory_format_vulkan(
     c10::OptionalDeviceGuard guard;
     if (device.has_value() && device->has_index()) guard.reset_device(*device);
 
-    at::ScalarType dtype_ = dtype.value_or(at::kFloat);
+    at::ScalarType dtype_ = dtype.value_or(c10::typeMetaToScalarType(at::get_default_dtype()));  // torch.set_default_dtype
     at::Layout layout_ = layout.value_or(at::kStrided);
     at::MemoryFormat memory_format_ = memory_format.value_or(at::MemoryFormat::Contiguous);
+    warn_complex_half(dtype_);
 
     TORCH_CHECK(layout_ == at::kStrided, "torchvulkan [ERROR]: Only Strided layout is supported");
     
@@ -54,6 +76,7 @@ at::Tensor empty_memory_format_vulkan(
     );
     
     tensor.unsafeGetTensorImpl()->set_sizes_and_strides(concrete_sizes, strides);
+    fill_deterministic_if_enabled(tensor);
 
     return tensor;
 }
@@ -69,10 +92,11 @@ at::Tensor empty_strided_vulkan(
     c10::OptionalDeviceGuard guard;
     if (device.has_value() && device->has_index()) guard.reset_device(*device);
 
-    at::ScalarType dtype_ = dtype.value_or(at::kFloat);
+    at::ScalarType dtype_ = dtype.value_or(c10::typeMetaToScalarType(at::get_default_dtype()));  // torch.set_default_dtype
     
     std::vector<int64_t> concrete_sizes;
     std::vector<int64_t> concrete_strides;
+    warn_complex_half(dtype_);
     concrete_sizes.reserve(size.size());
     concrete_strides.reserve(stride.size());
     
@@ -106,6 +130,7 @@ at::Tensor empty_strided_vulkan(
     );
     
     tensor.unsafeGetTensorImpl()->set_sizes_and_strides(concrete_sizes, concrete_strides);
+    fill_deterministic_if_enabled(tensor);
 
     return tensor;
 }
@@ -119,8 +144,7 @@ void torchvulkan::resize_bytes_vulkan(c10::StorageImpl* storage, size_t nbytes)
     c10::OptionalDeviceGuard guard;
     if (storage->data() != nullptr) guard.reset_device(storage->data_ptr().device());
 
-    at::DataPtr new_data;
-    if (nbytes != 0) new_data = storage->allocator()->allocate(nbytes);
+    at::DataPtr new_data = storage->allocator()->allocate(nbytes);
 
     size_t copy_bytes = std::min(nbytes, storage->nbytes());
     if (copy_bytes > 0 && storage->data() != nullptr) {
@@ -139,10 +163,15 @@ const at::Tensor& torchvulkan::resize_vulkan(
     at::TensorImpl* impl = self.unsafeGetTensorImpl();
 
     at::detail::check_size_nonnegative(size);
+    if (impl->sizes() == size && !memory_format.has_value()) return self;
     size_t new_bytes = at::detail::computeStorageNbytesContiguous(size, self.itemsize(), impl->storage_offset());
 
     if (impl->storage().nbytes() < new_bytes) {
+        int64_t old_bytes = static_cast<int64_t>(impl->storage().nbytes());
         torchvulkan::resize_bytes_vulkan(impl->storage().unsafeGetStorageImpl(), new_bytes);
+        if (at::globalContext().deterministicAlgorithms() && at::globalContext().deterministicFillUninitializedMemory()) {
+            at::native::fill_resize_deterministic_(self, old_bytes);
+        }
     }
 
     at::MemoryFormat format = memory_format.value_or(at::MemoryFormat::Contiguous);

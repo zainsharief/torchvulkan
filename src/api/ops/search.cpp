@@ -35,7 +35,7 @@ void dispatch_searchsorted_shader(
     pcs.push(get_tensor_address(sorted))
        .push(sorter.defined() ? get_tensor_address(sorter) : uint64_t(0))
        .push(get_tensor_address(values))
-       .push(get_tensor_address(out))
+       .push(get_output_address(out))
        .push(count)
        .push(static_cast<uint32_t>(sorted.size(-1)))
        .push(static_cast<uint32_t>(std::max<int64_t>(values_per_row, 1)))

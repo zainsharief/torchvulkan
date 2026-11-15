@@ -11,7 +11,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         .set_check_mem_overlap(true)
         .check_all_same_dtype(false)
         .add_output(dst)
-        .add_input(src)
+        .add_const_input(src)
         .build();
 
     uint64_t numel = iter.numel();
@@ -24,7 +24,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
     ShaderKey shader_key{torchvulkan::Kernel::CAST, src.scalar_type(), dst.scalar_type()};
     uint32_t vecSize = std::min(get_dtype_vec_size(src.scalar_type()), get_dtype_vec_size(dst.scalar_type()));
     uint32_t workgroupSizeX = get_dtype_workgroup_size(dst.scalar_type(), vecSize, device);
-    uint32_t isBoolCast = (dst.scalar_type() == at::kBool) ? 1 : 0;
+    uint32_t isBoolCast = (dst.scalar_type() == at::kBool || src.scalar_type() == at::kBool) ? 1 : 0;
     uint32_t isContig = iter.is_contiguous() ? 1 : 0;
 
     SpecializationBuilder spd{};
@@ -38,7 +38,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(src))
-        .push(get_tensor_address(dst))
+        .push(get_output_address(dst))
         .push_metadata(isContig ? nullptr : &metadata)
         .push(numel);
 

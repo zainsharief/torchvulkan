@@ -4,6 +4,7 @@
 #include "vulkan/builders.h"
 #include "vulkan/shader.h"
 #include <c10/core/Device.h>
+#include <c10/core/impl/COW.h>
 #include <c10/core/DefaultDtype.h>
 #include <c10/core/MemoryFormat.h>
 #include <c10/util/strides.h>
@@ -22,7 +23,20 @@
 inline uint64_t get_tensor_address(const at::Tensor& t) 
 {
     VulkanBuffer* buffer = extract_buffer(t.storage());
-    return buffer->bufferAddress() + t.storage_offset() * t.element_size();
+    return buffer->bufferAddress() + extract_buffer_offset(t.storage()) + t.storage_offset() * t.element_size();
+}
+
+inline void materialize_cow(const at::Tensor& t)
+{
+    if (t.defined() && c10::impl::cow::is_cow_data_ptr(t.storage().data_ptr())) {
+        c10::impl::cow::materialize_cow(t.storage().unsafeGetStorageImpl());
+    }
+}
+
+inline uint64_t get_output_address(const at::Tensor& t)
+{
+    materialize_cow(t);
+    return get_tensor_address(t);
 }
 
 // the device a vulkan tensor lives on: ops dispatch there, whatever the current device is

@@ -63,7 +63,7 @@ bool dispatch_integer_binary_shader(
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(a))
        .push(use_scalar ? uint64_t(0) : get_tensor_address(b))
-       .push(get_tensor_address(iter.output()))
+       .push(get_output_address(iter.output()))
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel)
        .push_scalar(use_scalar ? scalar : at::Scalar(0), dtype);

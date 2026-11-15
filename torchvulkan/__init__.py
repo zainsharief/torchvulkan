@@ -56,6 +56,15 @@ def device(dev):
 def synchronize(device=None) -> None:
     _C.synchronize(_device_index(device))
 
+def current_stream(device=None) -> torch.Stream:
+    return torch.accelerator.current_stream(torch.device("vulkan", _device_index(device)))
+
+def default_stream(device=None) -> torch.Stream:
+    return torch.Stream(stream_id=0, device_index=_device_index(device), device_type=torch.accelerator.current_stream().device_type)
+
+def set_stream(stream: torch.Stream) -> None:
+    torch.accelerator.set_stream(stream)
+
 def empty_cache() -> None:
     _C.empty_cache()
 
@@ -66,7 +75,7 @@ def max_memory_allocated(device=None) -> int:
     return _C._max_memory_allocated(_device_index(device))
 
 def memory_reserved(device=None) -> int:
-    return _C._memory_usage(_device_index(device))
+    return _C._memory_reserved(_device_index(device))
 
 def mem_get_info(device=None) -> tuple:
     return _C._mem_get_info(_device_index(device))
@@ -83,7 +92,7 @@ def memory_stats(device=None) -> dict:
         "active_bytes.all.peak": peak,
         "allocated_bytes.all.current": allocated,
         "allocated_bytes.all.peak": peak,
-        "reserved_bytes.all.current": _C._memory_usage(index),
+        "reserved_bytes.all.current": _C._memory_reserved(index),
     }
 
 DeviceProperties = namedtuple("DeviceProperties", ["name", "total_memory", "vendor_id", "device_id", "api_version", "driver_version", "subgroup_size", "has_fp64", "has_int64", "has_fp16", "has_bf16", "has_int16", "has_int8"])
@@ -161,10 +170,75 @@ atexit.register(_C._save_pipeline_caches)
 torch.utils.rename_privateuse1_backend('vulkan')
 torch._register_device_module('vulkan', sys.modules[__name__])
 
+from torch._functorch._aot_autograd.utils import register_graphsafe_rng_device_type
+register_graphsafe_rng_device_type('vulkan')
+
+class _VulkanLegacyStorage(torch.storage._LegacyStorage):
+    @classmethod
+    def from_buffer(cls, *args, **kwargs):
+        raise RuntimeError("from_buffer: Not available for Vulkan storage")
+
+def _legacy_storage_class(name, dtype):
+    def _dtype(cls):
+        return dtype
+    def public_dtype(cls):
+        torch.storage._warn_typed_storage_removal()
+        return dtype
+    return type(name, (_VulkanLegacyStorage,), {
+        "__module__": "torch.vulkan",
+        "_dtype": torch._utils.classproperty(_dtype),
+        "dtype": torch._utils.classproperty(public_dtype),
+    })
+
+for _dtype, _name in torch.storage._dtype_to_storage_type_map().items():
+    setattr(sys.modules[__name__], _name, _legacy_storage_class(_name, _dtype))
+
 def _tensor_to_vulkan(self, device=None, non_blocking=False, **kwargs) -> torch.Tensor:
+    if isinstance(device, (str, torch.device)) and torch.device(device).type != "vulkan":
+        raise RuntimeError("Invalid device, must be vulkan device")
     return self.to(torch.device("vulkan", _device_index(device)), non_blocking=non_blocking, **kwargs)
 
 # override torch.Tensor existing implementations for torch's own Vulkan backend
 torch.Tensor.vulkan = _tensor_to_vulkan
 torch.Tensor.is_vulkan = property(lambda self: self.device.type == "vulkan")
 torch.utils.generate_methods_for_privateuse1_backend(for_tensor=False)
+
+_C._record_storage_slice_deleter(torch.empty(0, dtype=torch.uint8).set_(torch.UntypedStorage(2)[0:1]))
+
+_tensor_totype = torch._tensor_str.tensor_totype
+
+def _vulkan_tensor_totype(t):
+    if t.device.type == "vulkan" and not get_device_properties(t.device).has_fp64:
+        return t.to(dtype=torch.float)
+    return _tensor_totype(t)
+
+torch._tensor_str.tensor_totype = _vulkan_tensor_totype
+
+def _rebuild_vulkan_tensor(cpu, device_index, requires_grad, is_parameter):
+    tensor = cpu.to(torch.device("vulkan", device_index))
+    if is_parameter:
+        return torch.nn.Parameter(tensor, requires_grad=requires_grad)
+    return tensor.requires_grad_(requires_grad)
+
+def _register_multiprocessing_reducer():
+    from multiprocessing.reduction import ForkingPickler
+    from torch.multiprocessing import reductions
+
+    torch_reduce_tensor = reductions.reduce_tensor
+    if getattr(torch_reduce_tensor, "_torchvulkan", False):
+        return
+
+    def reduce_tensor(tensor):
+        if tensor.device.type != "vulkan":
+            return torch_reduce_tensor(tensor)
+        if tensor.requires_grad and not tensor.is_leaf:
+            return torch_reduce_tensor(tensor)  # torch's own error: autograd can't cross processes
+        cpu = tensor.detach().cpu()
+        return (_rebuild_vulkan_tensor, (cpu, tensor.device.index, tensor.requires_grad, isinstance(tensor, torch.nn.Parameter)))
+
+    reduce_tensor._torchvulkan = True
+    reductions.reduce_tensor = reduce_tensor
+    for cls in (*torch._tensor_classes, torch.Tensor, torch.nn.Parameter):
+        ForkingPickler.register(cls, reduce_tensor)
+
+_register_multiprocessing_reducer()
