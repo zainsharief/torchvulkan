@@ -170,6 +170,9 @@ atexit.register(_C._save_pipeline_caches)
 torch.utils.rename_privateuse1_backend('vulkan')
 torch._register_device_module('vulkan', sys.modules[__name__])
 
+from torch._functorch._aot_autograd.utils import register_graphsafe_rng_device_type
+register_graphsafe_rng_device_type('vulkan')
+
 def _tensor_to_vulkan(self, device=None, non_blocking=False, **kwargs) -> torch.Tensor:
     return self.to(torch.device("vulkan", _device_index(device)), non_blocking=non_blocking, **kwargs)
 

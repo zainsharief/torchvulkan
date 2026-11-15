@@ -12,17 +12,23 @@ std::optional<uint64_t> VulkanGeneratorImpl::pending_seed_all_;
 std::unordered_map<c10::DeviceIndex, uint64_t> VulkanGeneratorImpl::pending_seeds_;
 
 VulkanGeneratorImpl::VulkanGeneratorImpl(c10::DeviceIndex device_index)
+    : VulkanGeneratorImpl(device_index, c10::make_intrusive<VulkanGeneratorState>())
+{
+}
+
+VulkanGeneratorImpl::VulkanGeneratorImpl(c10::DeviceIndex device_index, c10::intrusive_ptr<VulkanGeneratorState> state)
     : c10::GeneratorImpl{
         c10::Device(c10::DeviceType::PrivateUse1, device_index),
         c10::DispatchKeySet(c10::DispatchKey::PrivateUse1)
-    }
+    },
+      state_(std::move(state))
 {
 }
 
 void VulkanGeneratorImpl::set_current_seed(uint64_t seed)
 {
-    seed_ = seed;
-    offset_ = 0;
+    state_->seed = seed;
+    state_->offset = 0;
 }
 
 uint64_t VulkanGeneratorImpl::seed()
@@ -40,31 +46,43 @@ void VulkanGeneratorImpl::set_state(const c10::TensorImpl& new_state)
     );
 
     const uint8_t* data = new_state.data_dtype_initialized<uint8_t>();
-    std::memcpy(&seed_, data, sizeof(uint64_t));
-    std::memcpy(&offset_, data + sizeof(uint64_t), sizeof(uint64_t));
+    std::memcpy(&state_->seed, data, sizeof(uint64_t));
+    std::memcpy(&state_->offset, data + sizeof(uint64_t), sizeof(uint64_t));
 }
 
 c10::intrusive_ptr<c10::TensorImpl> VulkanGeneratorImpl::get_state() const
 {
     at::Tensor state = at::detail::empty_cpu({STATE_BYTES}, at::ScalarType::Byte, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
     uint8_t* data = state.data_ptr<uint8_t>();
-    std::memcpy(data, &seed_, sizeof(uint64_t));
-    std::memcpy(data + sizeof(uint64_t), &offset_, sizeof(uint64_t));
+    std::memcpy(data, &state_->seed, sizeof(uint64_t));
+    std::memcpy(data + sizeof(uint64_t), &state_->offset, sizeof(uint64_t));
     return state.getIntrusivePtr();
+}
+
+void VulkanGeneratorImpl::graphsafe_set_state(const c10::intrusive_ptr<c10::GeneratorImpl>& new_state)
+{
+    auto* other = dynamic_cast<VulkanGeneratorImpl*>(new_state.get());
+    TORCH_CHECK(other != nullptr, "torchvulkan [ERROR]: graphsafe_set_state expects a vulkan generator.");
+    state_ = other->state_;
+}
+
+c10::intrusive_ptr<c10::GeneratorImpl> VulkanGeneratorImpl::graphsafe_get_state() const
+{
+    return c10::make_intrusive<VulkanGeneratorImpl>(device().index(), state_);
 }
 
 VulkanGeneratorImpl* VulkanGeneratorImpl::clone_impl() const
 {
-    auto* generator = new VulkanGeneratorImpl(device().index());
-    generator->seed_ = seed_;
-    generator->offset_ = offset_;
-    return generator;
+    auto state = c10::make_intrusive<VulkanGeneratorState>();
+    state->seed = state_->seed;
+    state->offset = state_->offset;
+    return new VulkanGeneratorImpl(device().index(), std::move(state));
 }
 
 std::pair<uint64_t, uint64_t> VulkanGeneratorImpl::advance()
 {
-    std::pair<uint64_t, uint64_t> inputs{seed_, offset_};
-    offset_ += 1;
+    std::pair<uint64_t, uint64_t> inputs{state_->seed, state_->offset};
+    state_->offset += 1;
     return inputs;
 }
 
