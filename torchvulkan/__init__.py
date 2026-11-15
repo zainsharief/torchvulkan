@@ -56,6 +56,15 @@ def device(dev):
 def synchronize(device=None) -> None:
     _C.synchronize(_device_index(device))
 
+def current_stream(device=None) -> torch.Stream:
+    return torch.accelerator.current_stream(torch.device("vulkan", _device_index(device)))
+
+def default_stream(device=None) -> torch.Stream:
+    return torch.Stream(stream_id=0, device_index=_device_index(device), device_type=torch.accelerator.current_stream().device_type)
+
+def set_stream(stream: torch.Stream) -> None:
+    torch.accelerator.set_stream(stream)
+
 def empty_cache() -> None:
     _C.empty_cache()
 
