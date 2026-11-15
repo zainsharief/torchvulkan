@@ -22,7 +22,7 @@
 inline uint64_t get_tensor_address(const at::Tensor& t) 
 {
     VulkanBuffer* buffer = extract_buffer(t.storage());
-    return buffer->bufferAddress() + t.storage_offset() * t.element_size();
+    return buffer->bufferAddress() + extract_buffer_offset(t.storage()) + t.storage_offset() * t.element_size();
 }
 
 // the device a vulkan tensor lives on: ops dispatch there, whatever the current device is

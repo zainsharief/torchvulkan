@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <torch/csrc/Generator.h>
 #include "vulkan/vulkan_context.h"
+#include "vulkan/memory.h"
 #include "vulkan/allocator.h"
 #include "vulkan/generator.h"
 #include "vulkan/shader.h"
@@ -85,6 +86,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("_reset_peak_memory_stats", [](int64_t device_index) {
         DeviceContext* device = VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index));
         device->peak_allocated_bytes.store(device->allocated_bytes.load());
+    });
+
+    m.def("_record_storage_slice_deleter", [](const at::Tensor& slice) {
+        storage_slice_deleter() = slice.storage().data_ptr().get_deleter();
     });
 
     m.def("_is_initialized", []() -> bool {

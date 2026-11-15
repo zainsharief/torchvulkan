@@ -168,3 +168,5 @@ def _tensor_to_vulkan(self, device=None, non_blocking=False, **kwargs) -> torch.
 torch.Tensor.vulkan = _tensor_to_vulkan
 torch.Tensor.is_vulkan = property(lambda self: self.device.type == "vulkan")
 torch.utils.generate_methods_for_privateuse1_backend(for_tensor=False)
+
+_C._record_storage_slice_deleter(torch.empty(0, dtype=torch.uint8).set_(torch.UntypedStorage(2)[0:1]))

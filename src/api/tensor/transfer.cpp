@@ -58,7 +58,7 @@ void copy_host_to_vulkan(at::Tensor src, const at::Tensor& dst)
     if (!src.is_contiguous()) src = src.contiguous();
 
     void* dest_ptr = extract_buffer(dst.storage());
-    uint64_t dest_offset = dst.storage_offset() * dst.itemsize();
+    uint64_t dest_offset = extract_buffer_offset(dst.storage()) + dst.storage_offset() * dst.itemsize();
     if (dst.is_contiguous()) {
         globalVulkanAllocator.copy_host_to_device(dest_ptr, dest_offset, src.data_ptr(), dst.nbytes());
         return;
@@ -66,7 +66,7 @@ void copy_host_to_vulkan(at::Tensor src, const at::Tensor& dst)
 
     at::Tensor staging = at::empty_like(dst, dst.options().memory_format(at::MemoryFormat::Contiguous));
     void* staging_ptr = extract_buffer(staging.storage());
-    uint64_t staging_offset = staging.storage_offset() * dst.itemsize();
+    uint64_t staging_offset = extract_buffer_offset(staging.storage()) + staging.storage_offset() * dst.itemsize();
     globalVulkanAllocator.copy_host_to_device(staging_ptr, staging_offset, src.data_ptr(), dst.nbytes());
     dispatch_copy_shader(staging, dst);
 }
@@ -91,7 +91,7 @@ void copy_vulkan_to_host(at::Tensor src, const at::Tensor& dst)
     if (!src.is_contiguous()) src = src.contiguous();
 
     void* src_ptr = extract_buffer(src.storage());
-    uint64_t src_offset = src.storage_offset() * src.itemsize();
+    uint64_t src_offset = extract_buffer_offset(src.storage()) + src.storage_offset() * src.itemsize();
 
     if (dst.is_contiguous()) {
         globalVulkanAllocator.copy_device_to_host(dst.data_ptr(), src_ptr, src_offset, dst.nbytes());
@@ -139,9 +139,9 @@ void copy_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
     if (src.is_contiguous() && dst.is_contiguous())
     {
         void* src_ptr = extract_buffer(src.storage());
-        uint64_t src_offset = src.storage_offset() * src.itemsize();
+        uint64_t src_offset = extract_buffer_offset(src.storage()) + src.storage_offset() * src.itemsize();
         void* dest_ptr = extract_buffer(dst.storage());
-        uint64_t dest_offset = dst.storage_offset() * dst.itemsize();
+        uint64_t dest_offset = extract_buffer_offset(dst.storage()) + dst.storage_offset() * dst.itemsize();
         globalVulkanAllocator.copy_device_to_device(dest_ptr, dest_offset, src_ptr, src_offset, dst.nbytes());
         return;
     }

@@ -157,7 +157,7 @@ OpInfo* VulkanShaderManager::buildComputeOp(
     {
         return MemoryRange{
             reinterpret_cast<uint64_t>(extract_buffer(t.storage())),
-            static_cast<size_t>(t.storage_offset() * t.element_size()),
+            static_cast<size_t>(extract_buffer_offset(t.storage()) + t.storage_offset() * t.element_size()),
             t.nbytes()
         };
     };
