@@ -15,7 +15,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(dst)
-        .add_input(src)
+        .add_const_input(src)
         .build();
 
     uint64_t numel = iter.numel();
@@ -37,7 +37,7 @@ void dispatch_copy_shader(const at::Tensor& src, const at::Tensor& dst)
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(src))
-        .push(get_tensor_address(dst))
+        .push(get_output_address(dst))
         .push_metadata(&metadata)
         .push(numel);
 
@@ -57,6 +57,7 @@ void copy_host_to_vulkan(at::Tensor src, const at::Tensor& dst)
     if (src.scalar_type() != dst.scalar_type()) src = src.to(dst.scalar_type());
     if (!src.is_contiguous()) src = src.contiguous();
 
+    materialize_cow(dst);
     void* dest_ptr = extract_buffer(dst.storage());
     uint64_t dest_offset = extract_buffer_offset(dst.storage()) + dst.storage_offset() * dst.itemsize();
     if (dst.is_contiguous()) {
@@ -140,6 +141,7 @@ void copy_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
     {
         void* src_ptr = extract_buffer(src.storage());
         uint64_t src_offset = extract_buffer_offset(src.storage()) + src.storage_offset() * src.itemsize();
+        materialize_cow(dst);
         void* dest_ptr = extract_buffer(dst.storage());
         uint64_t dest_offset = extract_buffer_offset(dst.storage()) + dst.storage_offset() * dst.itemsize();
         globalVulkanAllocator.copy_device_to_device(dest_ptr, dest_offset, src_ptr, src_offset, dst.nbytes());

@@ -57,7 +57,7 @@ at::Tensor cumscan(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(x))
-       .push(get_tensor_address(out))
+       .push(get_output_address(out))
        .push_metadata(&metadata)
        .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(scan_size))
@@ -161,8 +161,8 @@ void cumscanarg(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(self))
-       .push(get_tensor_address(val_t))
-       .push(get_tensor_address(idx_t))
+       .push(get_output_address(val_t))
+       .push(get_output_address(idx_t))
        .push_metadata(&metadata)
        .push(static_cast<uint64_t>(num_lines))
        .push(static_cast<uint32_t>(scan_size))

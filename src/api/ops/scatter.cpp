@@ -57,7 +57,7 @@ void dispatch_scatter_shader(
        .push(workgroupSizeX);
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(out))
+    pcs.push(get_output_address(out))
        .push(get_tensor_address(self))
        .push(get_tensor_address(src))
        .push(get_tensor_address(keys))

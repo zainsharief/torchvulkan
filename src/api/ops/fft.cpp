@@ -45,7 +45,7 @@ void dispatch_fft_shader(
 
     PushConstantBuilder pcs{};
     pcs.push(input.defined() ? get_tensor_address(input) : uint64_t(0))
-       .push(get_tensor_address(output))
+       .push(get_output_address(output))
        .push(aux.defined() ? get_tensor_address(aux) : uint64_t(0))
        .push(count)
        .push(static_cast<uint32_t>(n))

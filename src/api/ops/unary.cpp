@@ -99,7 +99,7 @@ at::Tensor unary_op_vulkan(
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(src))
-        .push(get_tensor_address(dst))
+        .push(get_output_address(dst))
         .push_metadata(contiguous ? nullptr : &metadata)
         .push(numel);
 

@@ -85,7 +85,7 @@ bool dispatch_compare_shader(
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(a))
        .push(use_scalar ? (uint64_t)0 : get_tensor_address(b)) // the shader never reads the second operand for a scalar
-       .push(get_tensor_address(out))
+       .push(get_output_address(out))
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel)
        .push_scalar(scalar_value, promoted);
@@ -153,7 +153,7 @@ at::Tensor where_vulkan(
     pcs.push(get_tensor_address(c))
        .push(get_tensor_address(a))
        .push(get_tensor_address(b))
-       .push(get_tensor_address(out))
+       .push(get_output_address(out))
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel);
 

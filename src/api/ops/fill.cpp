@@ -38,7 +38,7 @@ at::Tensor& fill_scalar_vulkan(
     Metadata metadata = metadataBuilder.build();
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(self))
+    pcs.push(get_output_address(self))
         .push_metadata(contiguous ? nullptr : &metadata)
         .push(numel)
         .push_scalar(value, self.scalar_type());

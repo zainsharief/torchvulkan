@@ -38,7 +38,7 @@ void dispatch_nllloss_shader(
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(in))
        .push(get_tensor_address(target))
-       .push(get_tensor_address(out))
+       .push(get_output_address(out))
        .push(ignore_index)
        .push(N)
        .push(C);

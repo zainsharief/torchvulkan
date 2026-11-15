@@ -11,7 +11,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         .set_check_mem_overlap(true)
         .check_all_same_dtype(false)
         .add_output(dst)
-        .add_input(src)
+        .add_const_input(src)
         .build();
 
     uint64_t numel = iter.numel();
@@ -38,7 +38,7 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(src))
-        .push(get_tensor_address(dst))
+        .push(get_output_address(dst))
         .push_metadata(isContig ? nullptr : &metadata)
         .push(numel);
 

@@ -1,6 +1,7 @@
 #include "shader.h"
 #include "generated/shader_registry.h"
 #include "allocator.h"
+#include <c10/core/impl/COW.h>
 #include "vulkan_context.h"
 #include <algorithm>
 #include <cstring>
@@ -165,6 +166,12 @@ OpInfo* VulkanShaderManager::buildComputeOp(
     info->inputs.reserve(readTensors.size());
     for (const at::Tensor& in : readTensors) info->inputs.push_back(range_of(in));
     info->outputs.reserve(writeTensors.size());
+    for (const at::Tensor& out : writeTensors) 
+    {
+        TORCH_INTERNAL_ASSERT(!c10::impl::cow::is_cow_data_ptr(out.storage().data_ptr()),
+            "torchvulkan [ERROR]: ", torchvulkan::KERNEL_NAMES[static_cast<size_t>(key.kernel)], " writes a copy-on-write tensor without materializing it"
+        );
+    }
     for (const at::Tensor& out : writeTensors) info->outputs.push_back(range_of(out));
     return info;
 }

@@ -48,7 +48,7 @@ at::Tensor dispatch_distribution_shader(
     auto [seed, offset] = VulkanGeneratorImpl::reserve(generator, input0.device().index());
 
     PushConstantBuilder pcs{};
-    pcs.push(get_tensor_address(out))
+    pcs.push(get_output_address(out))
         .push(get_tensor_address(in0))
         .push(in1.defined() ? get_tensor_address(in1) : uint64_t(0))
         .push(numel)
