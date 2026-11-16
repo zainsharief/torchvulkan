@@ -275,21 +275,58 @@ public extension float : ITorchVulkan
     public static float castFromF64(double v) { return float(v); }
 }
 
+// Conversions to float16 round to nearest even, as on the CPU and CUDA. They are done in software
+// because Vulkan leaves the rounding mode of a float conversion to the driver, and AMD's rounds
+// toward zero (half of all values come out one step low).
+
+// float32 -> float16, round to nearest even (Fabian Giesen's float_to_half_fast3_rtne)
+public half halfFromFloat(float f)
+{
+    uint x = asuint(f);
+    uint sign = (x >> 16) & 0x8000;
+    uint ax = x & 0x7fffffff;
+    uint h;
+    if (ax >= 0x7f800000) h = ax > 0x7f800000 ? 0x7e00 : 0x7c00;  // nan, inf
+    else if (ax >= 0x477ff000) h = 0x7c00;                         // rounds to inf
+    else if (ax < 0x38800000)
+    {
+        // a float16 subnormal or zero: adding 0.5 lines the float's last bit up with float16's
+        // smallest step, and the float add (which rounds to nearest even) does the rounding
+        float t = asfloat(ax) + 0.5f;
+        h = asuint(t) - asuint(0.5f);
+    }
+    else
+    {
+        uint odd = (ax >> 13) & 1;
+        h = (ax + 0xc8000fff + odd) >> 13;  // rebias the exponent and round half to even
+    }
+    return bit_cast<half>(uint16_t(sign | h));
+}
+
+// a float32 result as T: rounded to nearest even for float16, exact for float32 and float64
+public T fromFloat<T : __BuiltinFloatingPointType>(float f)
+{
+    if (sizeof(T) == 2) return bit_cast<T>(halfFromFloat(f));
+    return T(f);
+}
+
 public extension half : ITorchVulkan
 {
     // accumulate in float32
     public typealias Accum = float;
     public float toAccum() { return float(this); }
-    public static half fromAccum(float v) { return half(v); }
+    public static half fromAccum(float v) { return halfFromFloat(v); }
     public typealias PushScalar = float;
-    public static half fromPushScalar(float v) { return half(v); }
+    public static half fromPushScalar(float v) { return halfFromFloat(v); }
 
     public typealias Wide = float;
     public float widen() { return float(this); }
-    public static half castFromI64(int64_t v) { return half(v); }
-    public static half castFromU64(uint64_t v) { return half(v); }
-    public static half castFromF32(float v) { return half(v); }
-    public static half castFromF64(double v) { return half(v); }
+    // (every integer that does not round to inf is exact in float32)
+    public static half castFromI64(int64_t v) { return halfFromFloat(float(v)); }
+    public static half castFromU64(uint64_t v) { return halfFromFloat(float(v)); }
+    public static half castFromF32(float v) { return halfFromFloat(v); }
+    // through float32, as PyTorch's c10::Half(double) does
+    public static half castFromF64(double v) { return halfFromFloat(float(v)); }
 }
 
 public extension BFloat16 : ITorchVulkan
@@ -314,7 +351,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // half and double have no native pow, so both route through float32
     public static T _safe_pow(T base, T exp)
     {
-        if (sizeof(T) != 4) return T(pow(base.toFloat(), exp.toFloat()));
+        if (sizeof(T) != 4) return fromFloat<T>(pow(base.toFloat(), exp.toFloat()));
         return pow(base, exp);
     }
 
@@ -378,7 +415,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // so every subtraction is exact (Sterbenz). a - b * trunc(a / b) rounds once the quotient is large
     public static T ext_fmod(T a, T b)
     {
-        if (sizeof(T) < 4) return T(float.ext_fmod(a.toFloat(), b.toFloat()));
+        if (sizeof(T) < 4) return fromFloat<T>(float.ext_fmod(a.toFloat(), b.toFloat()));
         if (isnan(a) || isnan(b) || isinf(a) || b == T(0)) return T(0.0) / T(0.0);  // NaN
 
         T x = abs(a);
@@ -407,7 +444,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // with a zero quotient keeping the sign of a / b
     public static T ext_floor_divide(T a, T b)
     {
-        if (sizeof(T) < 4) return T(float.ext_floor_divide(a.toFloat(), b.toFloat()));
+        if (sizeof(T) < 4) return fromFloat<T>(float.ext_floor_divide(a.toFloat(), b.toFloat()));
         if (b == T(0)) return a / b;
 
         T mod = ext_fmod(a, b);
@@ -437,7 +474,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_atan2(T a, T b)
     {
         if (a == T(0) && b == T(0)) return T(0);
-        if (sizeof(T) != 4) return T(atan2(a.toFloat(), b.toFloat()));
+        if (sizeof(T) != 4) return fromFloat<T>(atan2(a.toFloat(), b.toFloat()));
         return atan2(a, b);
     }
 
@@ -483,7 +520,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // a Taylor series near zero, where exp(a) - 1 cancels to nothing
     public static T ext_expm1(T a)
     {
-        if (sizeof(T) < 4) return T(float.ext_expm1(a.toFloat()));
+        if (sizeof(T) < 4) return fromFloat<T>(float.ext_expm1(a.toFloat()));
         if (abs(a) >= T(0.5)) return ext_exp(a) - T(1);
         T p = T(1.0 / 362880.0);
         p = T(1.0 / 40320.0) + a * p;
@@ -500,7 +537,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // log1p(a) = 2 atanh(s) with s = a / (2 + a), a short odd series near zero, where log(1 + a) loses a
     public static T ext_log1p(T a)
     {
-        if (sizeof(T) < 4) return T(float.ext_log1p(a.toFloat()));
+        if (sizeof(T) < 4) return fromFloat<T>(float.ext_log1p(a.toFloat()));
         if (a < T(-0.25) || a > T(0.4)) return ext_log(T(1) + a);
         T s = a / (T(2) + a);
         T s2 = s * s;
@@ -585,7 +622,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
             float t = 1.0f / (1.0f + 0.5f * w);
             return T(-0.6931471805599453f + log(t) - w * w + _erfc_poly(t));  // log(1/2) + log(erfc(w))
         }
-        return T(float.ext_log1p(-0.5f * _erfc_pos(-w)));
+        return fromFloat<T>(float.ext_log1p(-0.5f * _erfc_pos(-w)));
     }
 
     // erfinv: Giles (2010) two-branch polynomial approximation (branch split at w = 5)
@@ -667,7 +704,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     {
         float x = a.toFloat();
         if (x <= 0.0f && x == floor(x)) { float zero = 0.0f; return T(1.0f / zero); }
-        return T(_lgamma_lanczos(x));
+        return fromFloat<T>(_lgamma_lanczos(x));
     }
 
     // digamma: asymptotic (Stirling) series with Bernoulli terms 1/12, 1/120, 1/252, shifted to
@@ -721,7 +758,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_i0(T a)
     {
         float ax = abs(a.toFloat());
-        if (ax < 3.75f) return T(_i0e(ax) * exp(ax));
+        if (ax < 3.75f) return fromFloat<T>(_i0e(ax) * exp(ax));
         return T(exp(ax) * _i0e(ax));
     }
 
@@ -732,7 +769,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         return T(x < 0.0f ? -r : r);
     }
 
-    public static T ext_i0e(T a) { return T(_i0e(abs(a.toFloat()))); }
+    public static T ext_i0e(T a) { return fromFloat<T>(_i0e(abs(a.toFloat()))); }
 
     public static T ext_i1e(T a)
     {
@@ -744,7 +781,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // scaled, so x * x + y * y can't overflow or underflow; infinity wins even over NaN, as in std::hypot
     public static T ext_hypot(T a, T b)
     {
-        if (sizeof(T) < 4) return T(float.ext_hypot(a.toFloat(), b.toFloat()));
+        if (sizeof(T) < 4) return fromFloat<T>(float.ext_hypot(a.toFloat(), b.toFloat()));
         T x = abs(a);
         T y = abs(b);
         if (isinf(x) || isinf(y)) return T(1.0) / T(0.0);
