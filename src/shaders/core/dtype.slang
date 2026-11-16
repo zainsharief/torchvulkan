@@ -312,6 +312,33 @@ public extension BFloat16 : ITorchVulkan
     public static BFloat16 castFromF64(double v) { return BFloat16(float(v)); }
 }
 
+// 2/pi from bit 31 on (bit j weighs 2^(31 - j)), for the exact argument reduction below
+static const uint _TWO_OVER_PI[8] = { 0x00000000u, 0xA2F9836Eu, 0x4E441529u, 0xFC2757D1u, 0xF534DDC0u, 0xDB629599u, 0x3C439041u, 0xFE5163ABu };
+
+// Payne-Hanek for |x| >= 2^18 (native sin/cos lose all accuracy from 2^22 on Metal): the 24-bit mantissa times the 96
+// bits of 2/pi its exponent selects (higher bits only add multiples of 4) gives the quadrant and the remainder in Q64;
+// returns the remainder in [-pi/4, pi/4]
+float _reduce_half_pi(float x, out uint quadrant)
+{
+    uint b = asuint(x);
+    uint64_t m = uint64_t((b & 0x7FFFFFu) | 0x800000u);
+    uint j0 = ((b >> 23) & 0xFFu) - 120u;
+    uint idx = j0 >> 5, sh = j0 & 31u;
+    uint w0 = _TWO_OVER_PI[idx], w1 = _TWO_OVER_PI[idx + 1], w2 = _TWO_OVER_PI[idx + 2], w3 = _TWO_OVER_PI[idx + 3];
+    if (sh != 0u) {
+        w0 = (w0 << sh) | (w1 >> (32u - sh));
+        w1 = (w1 << sh) | (w2 >> (32u - sh));
+        w2 = (w2 << sh) | (w3 >> (32u - sh));
+    }
+    uint64_t p0 = m * uint64_t(w2), p1 = m * uint64_t(w1), p2 = m * uint64_t(w0);
+    uint64_t lo = p0 + (p1 << 32);
+    uint hi = uint((p1 >> 32) + p2 + (lo < p0 ? 1ull : 0ull));
+    quadrant = hi >> 30;
+    uint64_t f = (uint64_t(hi & 0x3FFFFFFFu) << 34) | (lo >> 30);
+    if ((f >> 63) != 0ull) quadrant = (quadrant + 1u) & 3u;
+    return float(int64_t(f)) * 5.421010862427522e-20 * 1.5707963267948966;
+}
+
 uint64_t _mulhi64(uint64_t a, uint64_t b)
 {
     uint64_t a0 = a & 0xFFFFFFFFull, a1 = a >> 32, b0 = b & 0xFFFFFFFFull, b1 = b >> 32;
@@ -533,11 +560,39 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_sqrt(T a) { return sqrt(a); }
     public static T ext_reciprocal(T a) { return T(1.0) / a; }
+    // the GPU's sin and cos give 0 for inf and NaN: those are NaN, tested and built on the bits so fast math keeps them
     static bool _nonfinite(T a) { return (asuint(a.toFloat()) & 0x7F800000u) == 0x7F800000u; }
     static T _nan() { return T(asfloat(0x7FC00000u)); }
-    public static T ext_sin(T a) { if (sizeof(T) == 8) return T(sin(a.toFloat())); return sin(a); }
-    public static T ext_cos(T a) { if (sizeof(T) == 8) return T(cos(a.toFloat())); return cos(a); }
-    public static T ext_tan(T a) { if (sizeof(T) == 8) return T(tan(a.toFloat())); return tan(a); }
+    public static T ext_sin(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(sin(x)) : sin(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? cos(t) : sin(t);
+        return T(((q & 2u) != 0) != (x < 0.0) ? -r : r);
+    }
+    public static T ext_cos(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(cos(x)) : cos(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? sin(t) : cos(t);
+        return T(((q + 1u) & 2u) != 0 ? -r : r);
+    }
+    public static T ext_tan(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(tan(x)) : tan(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? -cos(t) / sin(t) : tan(t);
+        return T(x < 0.0 ? -r : r);
+    }
     public static T ext_asin(T a) { if (sizeof(T) == 8) return T(asin(a.toFloat())); return asin(a); }
     public static T ext_acos(T a) { if (sizeof(T) == 8) return T(acos(a.toFloat())); return acos(a); }
     public static T ext_atan(T a) { if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
