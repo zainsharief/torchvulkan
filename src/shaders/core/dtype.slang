@@ -418,6 +418,55 @@ float _accurate_pow(float x, float y)
     return p * asfloat(uint(int(n) + 191) << 23) * 5.421010862427522e-20;  // subnormal: 2^(n + 64) * 2^-64
 }
 
+// exp(x) = 2^n exp(r), r = x - n ln 2 in two parts (fdlibm's split): the GPU's exp is exp2(x log2 e), and rounding that
+// product costs about |x| ulp
+float _exp_f32(float x)
+{
+    if (!(abs(x) < 104.0f)) return exp(x);
+    float n = round(x * 1.44269504088896341f);
+    float r = (x - n * 6.9313812256e-01f) - n * 9.0580006145e-06f;
+    int ni = int(n);
+    int h = ni / 2;
+    // 2^n in two halves, so 2^128 can't overflow before exp(r) < 1 scales it back
+    return exp(r) * asfloat(uint(h + 127) << 23) * asfloat(uint(ni - h + 127) << 23);
+}
+
+float _with_sign_of(float magnitude, float x) { return asfloat((asuint(magnitude) & 0x7fffffffu) | (asuint(x) & 0x80000000u)); }
+
+// fdlibm's sinh and cosh: expm1 near zero, where (e^x - e^-x) / 2 cancels
+float _sinh_f32(float x)
+{
+    float ax = abs(x);
+    float r;
+    if (ax < 22.0f) {
+        float t = float.ext_expm1(ax);
+        r = ax < 1.0f ? 0.5f * (2.0f * t - t * t / (t + 1.0f)) : 0.5f * (t + t / (t + 1.0f));
+    } else if (ax < 88.0f) {
+        r = 0.5f * _exp_f32(ax);
+    } else {
+        float w = _exp_f32(0.5f * ax);
+        r = (0.5f * w) * w;
+    }
+    return _with_sign_of(r, x);
+}
+
+float _cosh_f32(float x)
+{
+    float ax = abs(x);
+    if (ax < 0.34657359f) {
+        float t = float.ext_expm1(ax);
+        float w = 1.0f + t;
+        return 1.0f + (t * t) / (w + w);
+    }
+    if (ax < 22.0f) {
+        float t = _exp_f32(ax);
+        return 0.5f * t + 0.5f / t;
+    }
+    if (ax < 88.0f) return 0.5f * _exp_f32(ax);
+    float w = _exp_f32(0.5f * ax);
+    return (0.5f * w) * w;
+}
+
 public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 {
     // C99 Annex F special cases; signed zeros and infinities from bit patterns (fast math assumes neither).
@@ -548,7 +597,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         return atan2(a, b);
     }
 
-    public static T ext_exp(T a) { if (sizeof(T) == 8) return T(exp(a.toFloat())); return exp(a); }
+    public static T ext_exp(T a) { if (sizeof(T) >= 4) return T(_exp_f32(a.toFloat())); return exp(a); }
 
     public static T ext_log(T a)
     {
@@ -596,8 +645,8 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_asin(T a) { if (sizeof(T) == 8) return T(asin(a.toFloat())); return asin(a); }
     public static T ext_acos(T a) { if (sizeof(T) == 8) return T(acos(a.toFloat())); return acos(a); }
     public static T ext_atan(T a) { if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
-    public static T ext_sinh(T a) { if (sizeof(T) == 8) return T(sinh(a.toFloat())); return sinh(a); }
-    public static T ext_cosh(T a) { if (sizeof(T) == 8) return T(cosh(a.toFloat())); return cosh(a); }
+    public static T ext_sinh(T a) { return T(_sinh_f32(a.toFloat())); }
+    public static T ext_cosh(T a) { return T(_cosh_f32(a.toFloat())); }
     public static T ext_tanh(T a) { if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
     public static T ext_exp2(T a) { if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
 
