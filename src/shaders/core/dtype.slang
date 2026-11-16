@@ -467,6 +467,24 @@ float _cosh_f32(float x)
     return (0.5f * w) * w;
 }
 
+// sqrt(x^2 + y^2) of finite x, y >= 0 scaled by a power of 2 into range, then Borges' fma correction of the square root
+// (nearly always correctly rounded; m sqrt(1 + r^2) is an ulp off often enough to flip isclose at a boundary)
+float _hypot_f32(float x, float y)
+{
+    float m = max(x, y);
+    float scale = 1.0f;
+    if (m > 1.0e18f) scale = 1.4210854715202004e-14f;        // 2^-46
+    else if (m < 1.0e-18f) scale = 70368744177664.0f;        // 2^46
+    float a = x * scale;
+    float b = y * scale;
+    float h = sqrt(fma(a, a, b * b));
+    float h_sq = h * h;
+    float a_sq = a * a;
+    float e = fma(-b, b, h_sq - a_sq) + fma(h, h, -h_sq) - fma(a, a, -a_sq);
+    h = h - e / (2.0f * h);
+    return h / scale;
+}
+
 public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 {
     // C99 Annex F special cases; signed zeros and infinities from bit patterns (fast math assumes neither).
@@ -937,6 +955,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         if (isnan(x) || isnan(y)) return x + y;
         T m = max(x, y);
         if (m == T(0)) return T(0);
+        if (sizeof(T) == 4) return T(_hypot_f32(x.toFloat(), y.toFloat()));
         // scaled by 2^-32 near the top of the range: GPUs divide via 1 / m, which flushes to zero once it's subnormal
         T scale = m > T(1.0e30) ? T(2.3283064365386963e-10) : T(1);
         T r = (min(x, y) * scale) / (m * scale);
