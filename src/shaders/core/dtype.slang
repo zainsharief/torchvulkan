@@ -357,6 +357,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_pow(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_pow(a.toFloat(), b.toFloat()));
         if (b == T(0.0)) return T(1.0);
         else if (b == T(1.0)) return a;
         else if (b == T(2.0)) return a * a;
@@ -390,7 +391,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_add(T a, T b) { return a + b; }
     public static T ext_sub(T a, T b) { return a - b; }
     public static T ext_mul(T a, T b) { return a * b; }
-    public static T ext_div(T a, T b) { return a / b; }
+    public static T ext_div(T a, T b) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_div(a.toFloat(), b.toFloat())); return a / b; }
 
     public static T ext_floor(T a) { return floor(a); }
     public static T ext_ceil(T a) { return ceil(a); }
@@ -415,6 +416,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // so every subtraction is exact (Sterbenz). a - b * trunc(a / b) rounds once the quotient is large
     public static T ext_fmod(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_fmod(a.toFloat(), b.toFloat()));
         if (sizeof(T) < 4) return fromFloat<T>(float.ext_fmod(a.toFloat(), b.toFloat()));
         if (isnan(a) || isnan(b) || isinf(a) || b == T(0)) return T(0.0) / T(0.0);  // NaN
 
@@ -435,6 +437,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // as torch computes it: fmod, then moved into the divisor's sign
     public static T ext_remainder(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_remainder(a.toFloat(), b.toFloat()));
         T r = ext_fmod(a, b);
         if (r != T(0) && ((r < T(0)) != (b < T(0)))) r = r + b;
         return r;
@@ -444,6 +447,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // with a zero quotient keeping the sign of a / b
     public static T ext_floor_divide(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_floor_divide(a.toFloat(), b.toFloat()));
         if (sizeof(T) < 4) return fromFloat<T>(float.ext_floor_divide(a.toFloat(), b.toFloat()));
         if (b == T(0)) return a / b;
 
@@ -473,36 +477,39 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_atan2(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_atan2(a.toFloat(), b.toFloat()));
         if (a == T(0) && b == T(0)) return T(0);
         if (sizeof(T) != 4) return fromFloat<T>(atan2(a.toFloat(), b.toFloat()));
         return atan2(a, b);
     }
 
-    public static T ext_exp(T a) { if (sizeof(T) == 8) return T(exp(a.toFloat())); return exp(a); }
+    public static T ext_exp(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_exp(a.toFloat())); if (sizeof(T) == 8) return T(exp(a.toFloat())); return exp(a); }
 
     public static T ext_log(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_log(a.toFloat()));
         if (a < T(0.0)) return T(0.0) / T(0.0);   // NaN
         if (a == T(0.0)) return T(-1.0) / T(0.0); // -inf
         if (sizeof(T) == 8) return T(log(a.toFloat()));
         return log(a);
     }
 
-    public static T ext_sqrt(T a) { return sqrt(a); }
-    public static T ext_reciprocal(T a) { return T(1.0) / a; }
-    public static T ext_sin(T a) { if (sizeof(T) == 8) return T(sin(a.toFloat())); return sin(a); }
-    public static T ext_cos(T a) { if (sizeof(T) == 8) return T(cos(a.toFloat())); return cos(a); }
-    public static T ext_tan(T a) { if (sizeof(T) == 8) return T(tan(a.toFloat())); return tan(a); }
-    public static T ext_asin(T a) { if (sizeof(T) == 8) return T(asin(a.toFloat())); return asin(a); }
-    public static T ext_acos(T a) { if (sizeof(T) == 8) return T(acos(a.toFloat())); return acos(a); }
-    public static T ext_atan(T a) { if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
-    public static T ext_sinh(T a) { if (sizeof(T) == 8) return T(sinh(a.toFloat())); return sinh(a); }
-    public static T ext_cosh(T a) { if (sizeof(T) == 8) return T(cosh(a.toFloat())); return cosh(a); }
-    public static T ext_tanh(T a) { if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
-    public static T ext_exp2(T a) { if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
+    public static T ext_sqrt(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sqrt(a.toFloat())); return sqrt(a); }
+    public static T ext_reciprocal(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_reciprocal(a.toFloat())); return T(1.0) / a; }
+    public static T ext_sin(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sin(a.toFloat())); if (sizeof(T) == 8) return T(sin(a.toFloat())); return sin(a); }
+    public static T ext_cos(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_cos(a.toFloat())); if (sizeof(T) == 8) return T(cos(a.toFloat())); return cos(a); }
+    public static T ext_tan(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_tan(a.toFloat())); if (sizeof(T) == 8) return T(tan(a.toFloat())); return tan(a); }
+    public static T ext_asin(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_asin(a.toFloat())); if (sizeof(T) == 8) return T(asin(a.toFloat())); return asin(a); }
+    public static T ext_acos(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_acos(a.toFloat())); if (sizeof(T) == 8) return T(acos(a.toFloat())); return acos(a); }
+    public static T ext_atan(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_atan(a.toFloat())); if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
+    public static T ext_sinh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sinh(a.toFloat())); if (sizeof(T) == 8) return T(sinh(a.toFloat())); return sinh(a); }
+    public static T ext_cosh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_cosh(a.toFloat())); if (sizeof(T) == 8) return T(cosh(a.toFloat())); return cosh(a); }
+    public static T ext_tanh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_tanh(a.toFloat())); if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
+    public static T ext_exp2(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_exp2(a.toFloat())); if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
 
     public static T ext_log2(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_log2(a.toFloat()));
         if (a < T(0.0)) return T(0.0) / T(0.0);   // NaN
         if (a == T(0.0)) return T(-1.0) / T(0.0); // -inf
         if (sizeof(T) == 8) return T(log2(a.toFloat()));
@@ -511,6 +518,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_log10(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_log10(a.toFloat()));
         if (a < T(0.0)) return T(0.0) / T(0.0);   // NaN
         if (a == T(0.0)) return T(-1.0) / T(0.0); // -inf
         if (sizeof(T) == 8) return T(log10(a.toFloat()));
@@ -520,6 +528,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // a Taylor series near zero, where exp(a) - 1 cancels to nothing
     public static T ext_expm1(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_expm1(a.toFloat()));
         if (sizeof(T) < 4) return fromFloat<T>(float.ext_expm1(a.toFloat()));
         if (abs(a) >= T(0.5)) return ext_exp(a) - T(1);
         T p = T(1.0 / 362880.0);
@@ -537,6 +546,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // log1p(a) = 2 atanh(s) with s = a / (2 + a), a short odd series near zero, where log(1 + a) loses a
     public static T ext_log1p(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_log1p(a.toFloat()));
         if (sizeof(T) < 4) return fromFloat<T>(float.ext_log1p(a.toFloat()));
         if (a < T(-0.25) || a > T(0.4)) return ext_log(T(1) + a);
         T s = a / (T(2) + a);
@@ -551,14 +561,14 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         p = T(1) + s2 * p;
         return T(2) * s * p;
     }
-    public static T ext_rsqrt(T a) { return T(1) / ext_sqrt(a); }
-    public static T ext_sigmoid(T a) { return T(1) / (T(1) + ext_exp(-a)); }
-    public static T ext_asinh(T a) { if (sizeof(T) == 8) return T(asinh(a.toFloat())); return asinh(a); }
-    public static T ext_acosh(T a) { if (sizeof(T) == 8) return T(acosh(a.toFloat())); return acosh(a); }
-    public static T ext_atanh(T a) { if (sizeof(T) == 8) return T(atanh(a.toFloat())); return atanh(a); }
+    public static T ext_rsqrt(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_rsqrt(a.toFloat())); return T(1) / ext_sqrt(a); }
+    public static T ext_sigmoid(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sigmoid(a.toFloat())); return T(1) / (T(1) + ext_exp(-a)); }
+    public static T ext_asinh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_asinh(a.toFloat())); if (sizeof(T) == 8) return T(asinh(a.toFloat())); return asinh(a); }
+    public static T ext_acosh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_acosh(a.toFloat())); if (sizeof(T) == 8) return T(acosh(a.toFloat())); return acosh(a); }
+    public static T ext_atanh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_atanh(a.toFloat())); if (sizeof(T) == 8) return T(atanh(a.toFloat())); return atanh(a); }
     // multiplied out: radians()/degrees() have no 64-bit form in SPIR-V
-    public static T ext_deg2rad(T a) { return a * T(0.017453292519943295); }
-    public static T ext_rad2deg(T a) { return a * T(57.29577951308232); }
+    public static T ext_deg2rad(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_deg2rad(a.toFloat())); return a * T(0.017453292519943295); }
+    public static T ext_rad2deg(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_rad2deg(a.toFloat())); return a * T(57.29577951308232); }
 
     // the exponent of erfc(z) = t * exp(-z^2 + P(t)), t = 1 / (1 + z / 2), for z >= 0: Numerical Recipes'
     // erfcc Chebyshev fit, with fractional error under 1.2e-7 everywhere
@@ -578,6 +588,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // erf: its Maclaurin series below 0.5, where 1 - erfc would cancel, and 1 - erfc above
     public static T ext_erf(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_erf(a.toFloat()));
         float x = a.toFloat();
         float ax = abs(x);
         if (ax < 0.5f)
@@ -597,6 +608,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_erfc(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_erfc(a.toFloat()));
         float x = a.toFloat();
         float e = _erfc_pos(abs(x));
         return T(x >= 0.0f ? e : 2.0f - e);
@@ -605,6 +617,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // erfcx(x) = exp(x^2) erfc(x): for x >= 0 the exp(-x^2) inside erfc cancels, so it never overflows
     public static T ext_erfcx(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_erfcx(a.toFloat()));
         float x = a.toFloat();
         float z = abs(x);
         float t = 1.0f / (1.0f + 0.5f * z);
@@ -615,6 +628,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // log(ndtr(x)), ndtr(x) = erfc(-x / sqrt 2) / 2: in log space for x < 0, so the far left tail stays finite
     public static T ext_log_ndtr(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_log_ndtr(a.toFloat()));
         float x = a.toFloat();
         float w = -x * 0.7071067811865476f;
         if (w >= 0.0f)
@@ -628,6 +642,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // erfinv: Giles (2010) two-branch polynomial approximation (branch split at w = 5)
     public static T ext_erfinv(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_erfinv(a.toFloat()));
         float x = a.toFloat();
         if (x >= 1.0f || x <= -1.0f)
         {
@@ -670,12 +685,14 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_sinc(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_sinc(a.toFloat()));
         float px = 3.14159265358979f * a.toFloat();  // 3.14159265358979 = pi
         return T(px == 0.0f ? 1.0f : sin(px) / px);  // normalized sinc = sin(pi*x)/(pi*x)
     }
 
     public static T ext_entr(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_entr(a.toFloat()));
         float x = a.toFloat();
         if (x > 0.0f) return T(-x * log(x));
         if (x == 0.0f) return T(0.0f);
@@ -702,6 +719,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_lgamma(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_lgamma(a.toFloat()));
         float x = a.toFloat();
         if (x <= 0.0f && x == floor(x)) { float zero = 0.0f; return T(1.0f / zero); }
         return fromFloat<T>(_lgamma_lanczos(x));
@@ -711,6 +729,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // x >= 6 by the recurrence psi(x) = psi(x+1) - 1/x, plus reflection for x < 0.5
     public static T ext_digamma(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_digamma(a.toFloat()));
         float x0 = a.toFloat();
         const float PI = 3.14159265358979f;
         if (x0 <= 0.0f && x0 == floor(x0)) return T(x0 == 0.0f ? asfloat(0xff800000u) : asfloat(0x7fc00000u));
@@ -757,6 +776,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_i0(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_i0(a.toFloat()));
         float ax = abs(a.toFloat());
         if (ax < 3.75f) return fromFloat<T>(_i0e(ax) * exp(ax));
         return T(exp(ax) * _i0e(ax));
@@ -764,15 +784,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_i1(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_i1(a.toFloat()));
         float x = a.toFloat();
         float r = exp(abs(x)) * _i1e(abs(x));
         return T(x < 0.0f ? -r : r);
     }
 
-    public static T ext_i0e(T a) { return fromFloat<T>(_i0e(abs(a.toFloat()))); }
+    public static T ext_i0e(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_i0e(a.toFloat())); return fromFloat<T>(_i0e(abs(a.toFloat()))); }
 
     public static T ext_i1e(T a)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_i1e(a.toFloat()));
         float x = a.toFloat();
         float r = _i1e(abs(x));
         return T(x < 0.0f ? -r : r);
@@ -781,6 +803,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // scaled, so x * x + y * y can't overflow or underflow; infinity wins even over NaN, as in std::hypot
     public static T ext_hypot(T a, T b)
     {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_hypot(a.toFloat(), b.toFloat()));
         if (sizeof(T) < 4) return fromFloat<T>(float.ext_hypot(a.toFloat(), b.toFloat()));
         T x = abs(a);
         T y = abs(b);
@@ -793,12 +816,12 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         T r = (min(x, y) * scale) / (m * scale);
         return m * sqrt(T(1) + r * r);
     }
-    public static T ext_xlogy(T a, T b) { if (isnan(a)) return a; if (a == T(0)) return T(0); return a * ext_log(b); }
-    public static T ext_logaddexp(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
-    public static T ext_logaddexp2(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
+    public static T ext_xlogy(T a, T b) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_xlogy(a.toFloat(), b.toFloat())); if (isnan(a)) return a; if (a == T(0)) return T(0); return a * ext_log(b); }
+    public static T ext_logaddexp(T a, T b) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_logaddexp(a.toFloat(), b.toFloat())); T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
+    public static T ext_logaddexp2(T a, T b) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_logaddexp2(a.toFloat(), b.toFloat())); T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
 
     // the exact (erf) form, as torch computes gelu with approximate='none'
-    public static T ext_gelu(T a) { return T(0.5) * a * (T(1.0) + ext_erf(a * T(0.7071067811865476))); }
+    public static T ext_gelu(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_gelu(a.toFloat())); return T(0.5) * a * (T(1.0) + ext_erf(a * T(0.7071067811865476))); }
 }
 
 public extension<T : __BuiltinIntegerType> T : IDtypeOps
