@@ -7,7 +7,7 @@ public interface IUnaryOp<T>
     static T eval(T a);
 }
 
-public struct ReluOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_max(a, T.ext_zero()); } }
+public struct ReluOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_lt(a, T.ext_zero()) ? T.ext_zero() : a; } }
 public struct NegOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_neg(a); } }
 public struct FloorOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_floor(a); } }
 public struct CeilOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_ceil(a); } }
