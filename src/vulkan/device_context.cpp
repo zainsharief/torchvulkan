@@ -91,6 +91,9 @@ void DeviceContext::recordFree(size_t bytes)
 
 DeviceContext::~DeviceContext()
 {
+    // finish in-flight work before freeing anything it may still use
+    if (device != VK_NULL_HANDLE) device_table.vkDeviceWaitIdle(device);
+
     delete tuner;
     tuner = nullptr;
     delete shader_manager;
