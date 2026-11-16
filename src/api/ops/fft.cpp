@@ -13,7 +13,8 @@ enum class FftMode {
     CHIRP_IN = 1,
     CHIRP_KERNEL = 2,
     POINTWISE = 3,
-    CHIRP_OUT = 4
+    CHIRP_OUT = 4,
+    DIRECT = 5
 };
 
 enum class FftNorm {
@@ -81,6 +82,17 @@ at::Tensor stockham(const at::Tensor& rows, bool inverse)
     return current.is_same(rows) ? rows.clone() : current;
 }
 
+// short rows that aren't a power of two: a direct DFT is cheaper than Bluestein's three FFTs and more accurate
+constexpr int64_t DIRECT_DFT_MAX = 64;
+
+at::Tensor direct_dft(const at::Tensor& rows, bool inverse)
+{
+    int64_t n = rows.size(1);
+    at::Tensor out = at::empty_like(rows);
+    dispatch_fft_shader(FftMode::DIRECT, inverse, rows, out, at::Tensor(), static_cast<uint64_t>(rows.size(0) * n), n, n, 0);
+    return out;
+}
+
 at::Tensor bluestein(const at::Tensor& rows, bool inverse)
 {
     int64_t n = rows.size(1);
@@ -113,7 +125,7 @@ at::Tensor transform_dim(const at::Tensor& self, int64_t dim, bool inverse)
     at::Tensor moved = self.movedim(dim, -1).contiguous();
     std::vector<int64_t> shape = moved.sizes().vec();
     at::Tensor rows = moved.view({-1, n});
-    at::Tensor result = is_power_of_two(n) ? stockham(rows, inverse) : bluestein(rows, inverse);
+    at::Tensor result = is_power_of_two(n) ? stockham(rows, inverse) : n <= DIRECT_DFT_MAX ? direct_dft(rows, inverse) : bluestein(rows, inverse);
     return result.view(shape).movedim(-1, dim);
 }
 
