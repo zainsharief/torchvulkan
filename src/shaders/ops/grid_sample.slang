@@ -1,6 +1,7 @@
 module grid_sample;
 
 import core.indexing;
+import core.special_functions;
 
 [[vk::constant_id(0)]] public const uint MODE = 0;
 [[vk::constant_id(1)]] public const uint DIMS = 2;
@@ -31,15 +32,35 @@ public struct GridSamplePushConstants
 
 int toInt<T : __BuiltinFloatingPointType>(T x) { return int(trunc(x).toFloat()); }
 
+// a * b rounded once, from the integer product: a float product Metal fuses into a later add rounds differently
+T roundedProduct<T : __BuiltinFloatingPointType>(T a, T b)
+{
+    if (sizeof(T) != 4) return a * b;
+    float x = a.toFloat();
+    float y = b.toFloat();
+    uint xb = asuint(x);
+    uint yb = asuint(y);
+    int ex = int((xb >> 23) & 0xFFu);
+    int ey = int((yb >> 23) & 0xFFu);
+    if (ex == 0 || ey == 0 || ex == 255 || ey == 255 || ex + ey < 130 || ex + ey > 380) return a * b;
+    uint64_t mx = uint64_t((xb & 0x7FFFFFu) | 0x800000u);
+    uint64_t my = uint64_t((yb & 0x7FFFFFu) | 0x800000u);
+    float r = _float_rn(mx * my, ex + ey - 300, false);
+    return T(((xb ^ yb) & 0x80000000u) != 0u ? -r : r);
+}
+
 T unnormalize<T : __BuiltinFloatingPointType>(T coord, int size, out T grad)
 {
+    // 2-D rounds as the CPU's vectorized ComputeLocationBase, 3-D as the scalar kernel
     if (ALIGN_CORNERS != 0)
     {
         grad = T(size - 1) / T(2);
-        return ((coord + T(1)) / T(2)) * T(size - 1);
+        if (DIMS == 2) return roundedProduct<T>(coord + T(1), grad);
+        return roundedProduct<T>((coord + T(1)) / T(2), T(size - 1));
     }
     grad = T(size) / T(2);
-    return ((coord + T(1)) * T(size) - T(1)) / T(2);
+    if (DIMS == 2) return roundedProduct<T>(coord + T(1), grad) - T(0.5);
+    return (roundedProduct<T>(coord + T(1), T(size)) - T(1)) / T(2);
 }
 
 T clipCoordinates<T : __BuiltinFloatingPointType>(T x, int size, out T grad)
@@ -109,7 +130,8 @@ void cubicCoefficients<T : __BuiltinFloatingPointType>(T t, out T c[4])
     c[1] = ((a + T(2)) * x1 - (a + T(3))) * x1 * x1 + T(1);
     T x2 = T(1) - t;
     c[2] = ((a + T(2)) * x2 - (a + T(3))) * x2 * x2 + T(1);
-    c[3] = ((a * (x2 + T(1)) - T(5) * a) * (x2 + T(1)) + T(8) * a) * (x2 + T(1)) - T(4) * a;
+    T x3 = (DIMS == 2) ? T(2) - t : x2 + T(1);
+    c[3] = ((a * x3 - T(5) * a) * x3 + T(8) * a) * x3 - T(4) * a;
 }
 
 void cubicCoefficientsGrad<T : __BuiltinFloatingPointType>(T t, out T c[4])
@@ -172,7 +194,8 @@ void cubicAxis<T : __BuiltinFloatingPointType>(T coord, int size, out T multipli
     {
         T grad;
         T tap = applyPadding<T>(base + T(i - 1), size, grad);
-        index[i] = (tap >= T(0) && tap < T(size)) ? toInt<T>(tap) : -1;
+        // in integers: T(size) may round down onto the last index
+        index[i] = (tap >= T(0) && tap < T(2147483647.0) && toInt<T>(tap) < size) ? toInt<T>(tap) : -1;
     }
 }
 
@@ -327,8 +350,9 @@ void computeTaps<T : __BuiltinFloatingPointType>(T coord[3], Geometry g, out int
     T x0 = floor(ix);
     T y0 = floor(iy);
     T z0 = floor(iz);
-    T dx[2] = { x0 + T(1) - ix, ix - x0 };
-    T dy[2] = { y0 + T(1) - iy, iy - y0 };
+    // 2-D weights as the CPU's vectorized kernel (1 - w), 3-D as the scalar one
+    T dx[2] = { (DIMS == 2) ? T(1) - (ix - x0) : x0 + T(1) - ix, ix - x0 };
+    T dy[2] = { (DIMS == 2) ? T(1) - (iy - y0) : y0 + T(1) - iy, iy - y0 };
     T dz[2] = { z0 + T(1) - iz, iz - z0 };
     int depth = (DIMS == 3) ? 2 : 1;
     for (int k = 0; k < depth; k++)
@@ -519,8 +543,8 @@ void gridSampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, GridSamplePushCo
             }
             else
             {
-                T dx[2] = { x0 + T(1) - ix, ix - x0 };
-                T dy[2] = { y0 + T(1) - iy, iy - y0 };
+                T dx[2] = { (DIMS == 2) ? T(1) - (ix - x0) : x0 + T(1) - ix, ix - x0 };
+                T dy[2] = { (DIMS == 2) ? T(1) - (iy - y0) : y0 + T(1) - iy, iy - y0 };
                 T dz[2] = { z0 + T(1) - iz, iz - z0 };
                 int depth = (DIMS == 3) ? 2 : 1;
                 for (int k = 0; k < depth; k++)
