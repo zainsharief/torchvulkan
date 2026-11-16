@@ -40,7 +40,7 @@ public struct TensorStrides
     public uint padding;
 }
 
-public struct CoopPushConstants<T>
+public struct CoopPushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor_a;
     public uint64_t tensor_b;
@@ -54,8 +54,8 @@ public struct CoopPushConstants<T>
     public uint n_dim;
     public uint k_dim;
     public uint padding;
-    public T alpha;
-    public T beta;
+    public T.PushScalar alpha;
+    public T.PushScalar beta;
 }
 
 static const uint SMEM_ROWS_A = WARPS_M * WARP_FRAGS_M * BLOCK_SIZE;
@@ -88,7 +88,7 @@ struct CoopTile
     uint total_threads;
 }
 
-CoopTile makeTile<Acc, let BLOCK : uint>(uint3 wg, uint ti, CoopPushConstants<Acc> pcs)
+CoopTile makeTile<Acc : ITorchVulkan, let BLOCK : uint>(uint3 wg, uint ti, CoopPushConstants<Acc> pcs)
 {
     CoopTile tile;
     tile.batch_offset_a = wg.z * pcs.strides_a.batch;
@@ -427,6 +427,9 @@ void finishTile<T : ITorchVulkan & ICoopElement, let BLOCK : uint>(
 {
     T* tensor_out = (T*)pcs.tensor_out;
     T* tensor_bias = (T*)pcs.tensor_bias;
+    typealias Acc = T.Accum;
+    Acc alpha = Acc.fromPushScalar(pcs.alpha);
+    Acc beta = Acc.fromPushScalar(pcs.beta);
 
     [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
     {
@@ -438,7 +441,7 @@ void finishTile<T : ITorchVulkan & ICoopElement, let BLOCK : uint>(
 
             if (HAS_ALPHA == 1)
             {
-                acc[flat_idx] = acc[flat_idx] * pcs.alpha;
+                acc[flat_idx] = acc[flat_idx] * alpha;
             }
 
             if (HAS_BETA == 1)
@@ -450,7 +453,7 @@ void finishTile<T : ITorchVulkan & ICoopElement, let BLOCK : uint>(
                 } else {
                     matC = matC.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, c_idx, pcs.strides_out.row);
                 }
-                acc[flat_idx] = acc[flat_idx] + (Accumulator<T.Accum, BLOCK>(matC) * pcs.beta);
+                acc[flat_idx] = acc[flat_idx] + (Accumulator<T.Accum, BLOCK>(matC) * beta);
             }
 
             if (HAS_BIAS == 1)
@@ -465,7 +468,7 @@ void finishTile<T : ITorchVulkan & ICoopElement, let BLOCK : uint>(
                 } else {
                     matBias = matBias.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_bias, bias_idx, pcs.strides_bias.row);
                 }
-                acc[flat_idx] = acc[flat_idx] + (Accumulator<T.Accum, BLOCK>(matBias) * pcs.beta);
+                acc[flat_idx] = acc[flat_idx] + (Accumulator<T.Accum, BLOCK>(matBias) * beta);
             }
         }
     }

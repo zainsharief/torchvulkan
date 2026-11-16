@@ -17,7 +17,7 @@ public struct TensorStrides
     public uint padding;
 }
 
-public struct MatmulPushConstants<T>
+public struct MatmulPushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor_a;
     public uint64_t tensor_b;
@@ -31,8 +31,8 @@ public struct MatmulPushConstants<T>
     public uint N;
     public uint K;
     public uint padding;
-    public T alpha;
-    public T beta;
+    public T.PushScalar alpha;
+    public T.PushScalar beta;
 }
 
 public static const int TILE_N = 128;
@@ -333,7 +333,7 @@ void matmul_simd_main<T : ITorchVulkan, let VEC : int, let TILE_M : int>(
     AccumMatrix<T> b = AccumMatrix<T>(pcs.tensor_b, pcs.strides_B);
     AccumMatrix<T> bias = AccumMatrix<T>(pcs.tensor_bias, pcs.strides_bias);
     AccumMatrix<T> out = AccumMatrix<T>(pcs.tensor_out, pcs.strides_C);
-    Epilogue epilogue = Epilogue(pcs.alpha, pcs.beta, bias);
+    Epilogue epilogue = Epilogue(Acc.fromPushScalar(pcs.alpha), Acc.fromPushScalar(pcs.beta), bias);
 
     matmulTile<Acc, VEC, TILE_M, AccumMatrix<T>, AccumMatrix<T>, Epilogue, AccumMatrix<T>>(
         li, wg, wg.z, smemA, smemB, a, b, epilogue, out, pcs.M, pcs.N, pcs.K);

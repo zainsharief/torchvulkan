@@ -13,12 +13,12 @@ public struct Metadata
     public uint64_t strides;
 }
 
-public struct FillPushConstants<T>
+public struct FillPushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor;
     public uint64_t metadata;
     public uint64_t numel;
-    public T fill_value;
+    public T.PushScalar fill_value;
 }
 
 public void fillKernel<T, let VEC_SIZE : int>(
@@ -57,9 +57,9 @@ public void fillKernel<T, let VEC_SIZE : int>(
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void fill_main<T, let VEC_SIZE : int>(
+void fill_main<T : ITorchVulkan, let VEC_SIZE : int>(
     uint3 gi : SV_DispatchThreadID,
     uniform FillPushConstants<T> pcs)
 {
-    fillKernel<T, VEC_SIZE>(gi, pcs.tensor, pcs.metadata, pcs.numel, pcs.fill_value);
+    fillKernel<T, VEC_SIZE>(gi, pcs.tensor, pcs.metadata, pcs.numel, T.fromPushScalar(pcs.fill_value));
 }

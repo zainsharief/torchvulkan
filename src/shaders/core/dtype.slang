@@ -26,6 +26,12 @@ public interface ITorchVulkan : IDtypeOps, ICastable
     associatedtype Accum : __BuiltinArithmeticType & ITorchVulkan;
     Accum toAccum();
     static This fromAccum(Accum v);
+
+    // How a scalar of this dtype travels in push constants (PushConstantBuilder::push_scalar).
+    // 8- and 16-bit types widen to 32 bits: storagePushConstant8/16 are optional features, and
+    // AMD's Windows driver for RDNA2 has neither, so a T-typed push constant fails to build there.
+    associatedtype PushScalar;
+    static This fromPushScalar(PushScalar v);
 }
 
 public interface IDtypeOps
@@ -114,6 +120,8 @@ public extension int64_t : ITorchVulkan
     public typealias Accum = int64_t;
     public int64_t toAccum() { return this; }
     public static int64_t fromAccum(int64_t v) { return v; }
+    public typealias PushScalar = int64_t;
+    public static int64_t fromPushScalar(int64_t v) { return v; }
 
     public typealias Wide = int64_t;
     public int64_t widen() { return this; }
@@ -128,6 +136,8 @@ public extension int32_t : ITorchVulkan
     public typealias Accum = int32_t;
     public int32_t toAccum() { return this; }
     public static int32_t fromAccum(int32_t v) { return v; }
+    public typealias PushScalar = int32_t;
+    public static int32_t fromPushScalar(int32_t v) { return v; }
 
     public typealias Wide = int64_t;
     public int64_t widen() { return int64_t(this); }
@@ -142,6 +152,8 @@ public extension int16_t : ITorchVulkan
     public typealias Accum = int16_t;
     public int16_t toAccum() { return this; }
     public static int16_t fromAccum(int16_t v) { return v; }
+    public typealias PushScalar = int32_t;
+    public static int16_t fromPushScalar(int32_t v) { return int16_t(v); }
 
     public typealias Wide = int64_t;
     public int64_t widen() { return int64_t(this); }
@@ -156,6 +168,8 @@ public extension int8_t : ITorchVulkan
     public typealias Accum = int8_t;
     public int8_t toAccum() { return this; }
     public static int8_t fromAccum(int8_t v) { return v; }
+    public typealias PushScalar = int32_t;
+    public static int8_t fromPushScalar(int32_t v) { return int8_t(v); }
 
     public typealias Wide = int64_t;
     public int64_t widen() { return int64_t(this); }
@@ -170,6 +184,8 @@ public extension uint64_t : ITorchVulkan
     public typealias Accum = uint64_t;
     public uint64_t toAccum() { return this; }
     public static uint64_t fromAccum(uint64_t v) { return v; }
+    public typealias PushScalar = uint64_t;
+    public static uint64_t fromPushScalar(uint64_t v) { return v; }
 
     public typealias Wide = uint64_t;
     public uint64_t widen() { return this; }
@@ -184,6 +200,8 @@ public extension uint32_t : ITorchVulkan
     public typealias Accum = uint32_t;
     public uint32_t toAccum() { return this; }
     public static uint32_t fromAccum(uint32_t v) { return v; }
+    public typealias PushScalar = uint32_t;
+    public static uint32_t fromPushScalar(uint32_t v) { return v; }
 
     public typealias Wide = uint64_t;
     public uint64_t widen() { return uint64_t(this); }
@@ -198,6 +216,8 @@ public extension uint16_t : ITorchVulkan
     public typealias Accum = uint16_t;
     public uint16_t toAccum() { return this; }
     public static uint16_t fromAccum(uint16_t v) { return v; }
+    public typealias PushScalar = uint32_t;
+    public static uint16_t fromPushScalar(uint32_t v) { return uint16_t(v); }
 
     public typealias Wide = uint64_t;
     public uint64_t widen() { return uint64_t(this); }
@@ -212,6 +232,8 @@ public extension uint8_t : ITorchVulkan
     public typealias Accum = uint8_t;
     public uint8_t toAccum() { return this; }
     public static uint8_t fromAccum(uint8_t v) { return v; }
+    public typealias PushScalar = uint32_t;
+    public static uint8_t fromPushScalar(uint32_t v) { return uint8_t(v); }
 
     public typealias Wide = uint64_t;
     public uint64_t widen() { return uint64_t(this); }
@@ -226,6 +248,8 @@ public extension double : ITorchVulkan
     public typealias Accum = double;
     public double toAccum() { return this; }
     public static double fromAccum(double v) { return v; }
+    public typealias PushScalar = double;
+    public static double fromPushScalar(double v) { return v; }
 
     public typealias Wide = double;
     public double widen() { return this; }
@@ -240,6 +264,8 @@ public extension float : ITorchVulkan
     public typealias Accum = float;
     public float toAccum() { return this; }
     public static float fromAccum(float v) { return v; }
+    public typealias PushScalar = float;
+    public static float fromPushScalar(float v) { return v; }
 
     public typealias Wide = float;
     public float widen() { return this; }
@@ -255,6 +281,8 @@ public extension half : ITorchVulkan
     public typealias Accum = float;
     public float toAccum() { return float(this); }
     public static half fromAccum(float v) { return half(v); }
+    public typealias PushScalar = float;
+    public static half fromPushScalar(float v) { return half(v); }
 
     public typealias Wide = float;
     public float widen() { return float(this); }
@@ -269,6 +297,8 @@ public extension BFloat16 : ITorchVulkan
     public typealias Accum = float;
     public float toAccum() { return float(this); }
     public static BFloat16 fromAccum(float v) { return BFloat16(v); }
+    public typealias PushScalar = float;
+    public static BFloat16 fromPushScalar(float v) { return BFloat16(v); }
 
     // bfloat16 converts natively only to and from float32, so everything else goes through it
     public typealias Wide = float;
