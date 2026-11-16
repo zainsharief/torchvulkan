@@ -527,7 +527,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_add(T a, T b) { return a + b; }
     public static T ext_sub(T a, T b) { return a - b; }
     public static T ext_mul(T a, T b) { return a * b; }
-    public static T ext_div(T a, T b) { return a / b; }
+
+    // a GPU may divide as a * (1 / b), and 1 / b flushes to zero once |b| passes 2^126: past 2^125, quarter both first. b is
+    // quartered through its exponent bits, which a fast-math compiler can't fold back into a / b.
+    public static T ext_div(T a, T b)
+    {
+        if (sizeof(T) == 4 && abs(b) > T(4.2535295865117308e37) && !isinf(b)) {
+            float quarter_b = asfloat(asuint(b.toFloat()) - 0x01000000u);
+            return T((a.toFloat() * 0.25f) / quarter_b);
+        }
+        return a / b;
+    }
 
     public static T ext_floor(T a) { return floor(a); }
     public static T ext_ceil(T a) { return ceil(a); }
@@ -585,7 +595,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         if (b == T(0)) return a / b;
 
         T mod = ext_fmod(a, b);
-        T div = (a - mod) / b;
+        T div = ext_div(a - mod, b);
         if (mod != T(0) && ((b < T(0)) != (mod < T(0)))) div = div - T(1);
 
         if (div != T(0))
@@ -594,7 +604,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
             if (div - floordiv > T(0.5)) floordiv = floordiv + T(1);
             return floordiv;
         }
-        T q = a / b;
+        T q = ext_div(a, b);
         bool negative = q < T(0) || (q == T(0) && T(1) / q < T(0));
         return negative ? -T(0) : T(0);
     }
@@ -626,7 +636,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     }
 
     public static T ext_sqrt(T a) { return sqrt(a); }
-    public static T ext_reciprocal(T a) { return T(1.0) / a; }
+    public static T ext_reciprocal(T a) { return ext_div(T(1.0), a); }
     // the GPU's sin and cos give 0 for inf and NaN: those are NaN, tested and built on the bits so fast math keeps them
     static bool _nonfinite(T a) { return (asuint(a.toFloat()) & 0x7F800000u) == 0x7F800000u; }
     static T _nan() { return T(asfloat(0x7FC00000u)); }
