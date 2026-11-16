@@ -127,7 +127,7 @@ public struct RandomIntOp<T : IRandomDtype> : IRandomOp<T>
         uint64_t from = pcs.param0;
         uint64_t range = pcs.param1;
         if (range == 0) return castValue<int64_t, T>(int64_t(stream.nextUint64()));
-        if (range >= (uint64_t(1) << 32)) return castValue<int64_t, T>(int64_t(from + stream.nextUint64() % range));
+        if (range >= (uint64_t(1) << 28)) return castValue<int64_t, T>(int64_t(from + stream.nextUint64() % range));
         return castValue<int64_t, T>(int64_t(from + uint64_t(stream.nextUint() % uint(range))));
     }
 }
