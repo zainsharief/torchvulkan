@@ -38,7 +38,12 @@ def test_binary_scalar(dtype, value):
         check(lambda t: torch.bitwise_and(t, value), dtype)
 
 
-@pytest.mark.parametrize("dtype,value", CASES, ids=str)
+# Vulkan lets a device flush float16 subnormals to zero in arithmetic (Intel's Gen9 does), so comparing
+# against one is device-dependent; test_fill still checks that a subnormal arrives intact.
+NORMAL_CASES = [(dtype, value) for dtype, value in CASES if not (dtype == torch.float16 and abs(value) < 6.2e-5 and value != 0)]
+
+
+@pytest.mark.parametrize("dtype,value", NORMAL_CASES, ids=str)
 def test_compare_scalar(dtype, value):
     check(lambda t: t >= value, dtype)
 
