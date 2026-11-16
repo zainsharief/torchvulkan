@@ -620,7 +620,12 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_atan2(T a, T b)
     {
-        if (a == T(0) && b == T(0)) return T(0);
+        // both zero: +-pi when b is -0, +-0 when it is +0, signed like a (C's atan2)
+        if (a == T(0) && b == T(0)) {
+            bool a_negative = (asuint(a.toFloat()) >> 31) != 0, b_negative = (asuint(b.toFloat()) >> 31) != 0;
+            T magnitude = b_negative ? T(3.14159265358979) : T(0);
+            return a_negative ? -magnitude : magnitude;
+        }
         if (sizeof(T) != 4) return T(atan2(a.toFloat(), b.toFloat()));
         return atan2(a, b);
     }
@@ -675,7 +680,14 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_atan(T a) { if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
     public static T ext_sinh(T a) { return T(_sinh_f32(a.toFloat())); }
     public static T ext_cosh(T a) { return T(_cosh_f32(a.toFloat())); }
-    public static T ext_tanh(T a) { if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
+    public static T ext_tanh(T a)
+    {
+        float x = a.toFloat();
+        // +-1 past 20 (already so in float): the builtin's exponentials overflow to inf / inf, in half from 6
+        if (abs(x) > 20.0f) return T(x < 0.0f ? -1.0f : 1.0f);
+        if (sizeof(T) != 4) return T(tanh(x));
+        return tanh(a);
+    }
     public static T ext_exp2(T a) { if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
 
     public static T ext_log2(T a)
@@ -730,9 +742,38 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     }
     public static T ext_rsqrt(T a) { return T(1) / ext_sqrt(a); }
     public static T ext_sigmoid(T a) { return T(1) / (T(1) + ext_exp(-a)); }
-    public static T ext_asinh(T a) { if (sizeof(T) == 8) return T(asinh(a.toFloat())); return asinh(a); }
-    public static T ext_acosh(T a) { if (sizeof(T) == 8) return T(acosh(a.toFloat())); return acosh(a); }
-    public static T ext_atanh(T a) { if (sizeof(T) == 8) return T(atanh(a.toFloat())); return atanh(a); }
+    // fdlibm's forms, in float: the builtins overflow past |x| ~ 1.8e19 (x * x) and lose small arguments to log(1 + y)
+    public static T ext_asinh(T a)
+    {
+        float x = a.toFloat();
+        float ax = abs(x);
+        if (isnan(x) || isinf(x)) return T(x);
+        float r;
+        if (ax > 268435456.0f) r = float.ext_log(ax) + 0.693147180559945309f;  // 2^28: log(2|x|)
+        else if (ax > 2.0f) r = float.ext_log(2.0f * ax + 1.0f / (sqrt(x * x + 1.0f) + ax));
+        else r = float.ext_log1p(ax + x * x / (1.0f + sqrt(1.0f + x * x)));
+        return T(x < 0.0f ? -r : r);
+    }
+    public static T ext_acosh(T a)
+    {
+        float x = a.toFloat();
+        if (isnan(x) || x < 1.0f) return _nan();
+        if (isinf(x)) return T(x);
+        if (x > 268435456.0f) return T(float.ext_log(x) + 0.693147180559945309f);
+        if (x > 2.0f) return T(float.ext_log(2.0f * x - 1.0f / (x + sqrt(x * x - 1.0f))));
+        float t = x - 1.0f;
+        return T(float.ext_log1p(t + sqrt(2.0f * t + t * t)));
+    }
+    public static T ext_atanh(T a)
+    {
+        float x = a.toFloat();
+        float ax = abs(x);
+        if (isnan(x) || ax > 1.0f) return _nan();
+        if (ax == 1.0f) return T(x < 0.0f ? -asfloat(0x7F800000u) : asfloat(0x7F800000u));
+        float r = ax < 0.5f ? 0.5f * float.ext_log1p(2.0f * ax + 2.0f * ax * ax / (1.0f - ax))
+                            : 0.5f * float.ext_log1p(2.0f * ax / (1.0f - ax));
+        return T(x < 0.0f ? -r : r);
+    }
     // multiplied out: radians()/degrees() have no 64-bit form in SPIR-V
     public static T ext_deg2rad(T a) { return a * T(0.017453292519943295); }
     public static T ext_rad2deg(T a) { return a * T(57.29577951308232); }
@@ -847,13 +888,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_sinc(T a)
     {
-        float px = 3.14159265358979f * a.toFloat();  // 3.14159265358979 = pi
-        return T(px == 0.0f ? 1.0f : sin(px) / px);  // normalized sinc = sin(pi*x)/(pi*x)
+        float x = a.toFloat();
+        if (isinf(x)) return _nan();
+        float px = 3.14159265358979f * x;  // 3.14159265358979 = pi
+        // normalized sinc = sin(pi*x)/(pi*x), through ext_sin: the builtin sin loses large arguments
+        return T(px == 0.0f ? 1.0f : float.ext_sin(px) / px);
     }
 
     public static T ext_entr(T a)
     {
         float x = a.toFloat();
+        if (isnan(x)) return a;
         if (x > 0.0f) return T(-x * log(x));
         if (x == 0.0f) return T(0.0f);
         float zero = 0.0f;
@@ -873,13 +918,15 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
             + 12.507343278686905f / (z + 5.0f) - 0.13857109526572012f / (z + 6.0f)
             + 9.9843695780195716e-6f / (z + 7.0f) + 1.5056327351493116e-7f / (z + 8.0f);
         float lg = 0.5f * log(2.0f * PI) + (z + 0.5f) * log(t) - t + log(a);
-        if (reflect) return log(PI / abs(sin(PI * z0))) - lg;
+        // |sin(pi x)| has period 1, so x - round(x) (exact) keeps the precision pi * x loses for large x
+        if (reflect) return log(PI / abs(sin(PI * (z0 - round(z0))))) - lg;
         return lg;
     }
 
     public static T ext_lgamma(T a)
     {
         float x = a.toFloat();
+        if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return T(asfloat(0x7f800000u));  // lgamma(+-inf) = +inf
         if (x <= 0.0f && x == floor(x)) { float zero = 0.0f; return T(1.0f / zero); }
         return T(_lgamma_lanczos(x));
     }
@@ -890,7 +937,9 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     {
         float x0 = a.toFloat();
         const float PI = 3.14159265358979f;
-        if (x0 <= 0.0f && x0 == floor(x0)) return T(x0 == 0.0f ? asfloat(0xff800000u) : asfloat(0x7fc00000u));
+        // +-0 gives -+inf (copysign(inf, -x), as the CPU); other non-positive integers are poles
+        if (x0 == 0.0f) return T(asfloat((asuint(x0) & 0x80000000u) != 0u ? 0x7f800000u : 0xff800000u));
+        if (x0 < 0.0f && x0 == floor(x0)) return T(asfloat(0x7fc00000u));
 
         bool reflect = x0 < 0.5f;
         float x = reflect ? (1.0f - x0) : x0;
@@ -900,7 +949,8 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         float inv = 1.0f / x;
         float inv2 = inv * inv;
         result += log(x) - 0.5f * inv - inv2 * (1.0f / 12.0f - inv2 * (1.0f / 120.0f - inv2 / 252.0f));
-        if (reflect) result -= PI / tan(PI * x0);
+        // tan(pi x) has period 1: as the CPU, take it of the exact fractional part
+        if (reflect) result -= PI / tan(PI * (x0 - round(x0)));
         return T(result);
     }
 
@@ -972,8 +1022,8 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         return m * sqrt(T(1) + r * r);
     }
     public static T ext_xlogy(T a, T b) { if (isnan(a)) return a; if (a == T(0)) return T(0); return a * ext_log(b); }
-    public static T ext_logaddexp(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
-    public static T ext_logaddexp2(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
+    public static T ext_logaddexp(T a, T b) { if (isnan(a) || isnan(b)) return a + b; T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
+    public static T ext_logaddexp2(T a, T b) { if (isnan(a) || isnan(b)) return a + b; T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
 
     // the exact (erf) form, as torch computes gelu with approximate='none'
     public static T ext_gelu(T a) { return T(0.5) * a * (T(1.0) + ext_erf(a * T(0.7071067811865476))); }
