@@ -109,6 +109,39 @@ public interface IDtypeOps
     static This ext_gelu(This a);
 }
 
+int64_t _saturate_f32(float v, int64_t lo, int64_t hi)
+{
+    if ((asuint(v) & 0x7fffffffu) > 0x7f800000u) return 0;
+    if (v <= float(lo)) return lo;
+    if (v >= float(hi)) return hi;
+    return int64_t(v);
+}
+
+int64_t _saturate_f64(double v, int64_t lo, int64_t hi)
+{
+    if (v != v) return 0;
+    if (v <= double(lo)) return lo;
+    if (v >= double(hi)) return hi;
+    return int64_t(v);
+}
+
+uint64_t _saturate_f32_u64(float v)
+{
+    if ((asuint(v) & 0x7fffffffu) > 0x7f800000u || v <= 0.0f) return 0;
+    if (v >= 18446744073709551616.0f) return 0xffffffffffffffffull;
+    return uint64_t(v);
+}
+
+uint64_t _saturate_f64_u64(double v)
+{
+    if (v != v || v <= 0.0) return 0;
+    if (v >= 18446744073709551616.0) return 0xffffffffffffffffull;
+    return uint64_t(v);
+}
+
+static const int64_t _INT64_MIN = int64_t(0x8000000000000000ull);
+static const int64_t _INT64_MAX = 0x7fffffffffffffffll;
+
 public extension int64_t : ITorchVulkan
 {
     public typealias Accum = int64_t;
@@ -119,8 +152,8 @@ public extension int64_t : ITorchVulkan
     public int64_t widen() { return this; }
     public static int64_t castFromI64(int64_t v) { return v; }
     public static int64_t castFromU64(uint64_t v) { return int64_t(v); }
-    public static int64_t castFromF32(float v) { return int64_t(v); }
-    public static int64_t castFromF64(double v) { return int64_t(v); }
+    public static int64_t castFromF32(float v) { return _saturate_f32(v, _INT64_MIN, _INT64_MAX); }
+    public static int64_t castFromF64(double v) { return _saturate_f64(v, _INT64_MIN, _INT64_MAX); }
 }
 
 public extension int32_t : ITorchVulkan
@@ -133,8 +166,8 @@ public extension int32_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int32_t castFromI64(int64_t v) { return int32_t(v); }
     public static int32_t castFromU64(uint64_t v) { return int32_t(v); }
-    public static int32_t castFromF32(float v) { return int32_t(v); }
-    public static int32_t castFromF64(double v) { return int32_t(v); }
+    public static int32_t castFromF32(float v) { return int32_t(_saturate_f32(v, -2147483648ll, 2147483647ll)); }
+    public static int32_t castFromF64(double v) { return int32_t(_saturate_f64(v, -2147483648ll, 2147483647ll)); }
 }
 
 public extension int16_t : ITorchVulkan
@@ -147,8 +180,8 @@ public extension int16_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int16_t castFromI64(int64_t v) { return int16_t(v); }
     public static int16_t castFromU64(uint64_t v) { return int16_t(v); }
-    public static int16_t castFromF32(float v) { return int16_t(v); }
-    public static int16_t castFromF64(double v) { return int16_t(v); }
+    public static int16_t castFromF32(float v) { return int16_t(_saturate_f32(v, -32768ll, 32767ll)); }
+    public static int16_t castFromF64(double v) { return int16_t(_saturate_f64(v, -32768ll, 32767ll)); }
 }
 
 public extension int8_t : ITorchVulkan
@@ -161,8 +194,8 @@ public extension int8_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int8_t castFromI64(int64_t v) { return int8_t(v); }
     public static int8_t castFromU64(uint64_t v) { return int8_t(v); }
-    public static int8_t castFromF32(float v) { return int8_t(v); }
-    public static int8_t castFromF64(double v) { return int8_t(v); }
+    public static int8_t castFromF32(float v) { return int8_t(_saturate_f32(v, -128ll, 127ll)); }
+    public static int8_t castFromF64(double v) { return int8_t(_saturate_f64(v, -128ll, 127ll)); }
 }
 
 public extension uint64_t : ITorchVulkan
@@ -175,8 +208,8 @@ public extension uint64_t : ITorchVulkan
     public uint64_t widen() { return this; }
     public static uint64_t castFromI64(int64_t v) { return uint64_t(v); }
     public static uint64_t castFromU64(uint64_t v) { return v; }
-    public static uint64_t castFromF32(float v) { return uint64_t(v); }
-    public static uint64_t castFromF64(double v) { return uint64_t(v); }
+    public static uint64_t castFromF32(float v) { return _saturate_f32_u64(v); }
+    public static uint64_t castFromF64(double v) { return _saturate_f64_u64(v); }
 }
 
 public extension uint32_t : ITorchVulkan
@@ -189,8 +222,8 @@ public extension uint32_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint32_t castFromI64(int64_t v) { return uint32_t(v); }
     public static uint32_t castFromU64(uint64_t v) { return uint32_t(v); }
-    public static uint32_t castFromF32(float v) { return uint32_t(v); }
-    public static uint32_t castFromF64(double v) { return uint32_t(v); }
+    public static uint32_t castFromF32(float v) { return uint32_t(_saturate_f32(v, 0ll, 4294967295ll)); }
+    public static uint32_t castFromF64(double v) { return uint32_t(_saturate_f64(v, 0ll, 4294967295ll)); }
 }
 
 public extension uint16_t : ITorchVulkan
@@ -203,8 +236,8 @@ public extension uint16_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint16_t castFromI64(int64_t v) { return uint16_t(v); }
     public static uint16_t castFromU64(uint64_t v) { return uint16_t(v); }
-    public static uint16_t castFromF32(float v) { return uint16_t(v); }
-    public static uint16_t castFromF64(double v) { return uint16_t(v); }
+    public static uint16_t castFromF32(float v) { return uint16_t(_saturate_f32(v, 0ll, 65535ll)); }
+    public static uint16_t castFromF64(double v) { return uint16_t(_saturate_f64(v, 0ll, 65535ll)); }
 }
 
 public extension uint8_t : ITorchVulkan
@@ -217,8 +250,8 @@ public extension uint8_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint8_t castFromI64(int64_t v) { return uint8_t(v); }
     public static uint8_t castFromU64(uint64_t v) { return uint8_t(v); }
-    public static uint8_t castFromF32(float v) { return uint8_t(v); }
-    public static uint8_t castFromF64(double v) { return uint8_t(v); }
+    public static uint8_t castFromF32(float v) { return uint8_t(_saturate_f32(v, 0ll, 255ll)); }
+    public static uint8_t castFromF64(double v) { return uint8_t(_saturate_f64(v, 0ll, 255ll)); }
 }
 
 public extension double : ITorchVulkan
