@@ -181,12 +181,35 @@ at::Tensor accumulate_bins(const at::Tensor& keys, const c10::optional<at::Tenso
     return hist.narrow(0, 0, bins);
 }
 
+// integer inputs bin in int64 as CUDA does: (x - min) * bins / (max - min), truncated
+at::Tensor histc_integral(const at::Tensor& self, int64_t bins, const at::Scalar& min, const at::Scalar& max)
+{
+    int64_t lo = min.toLong();
+    int64_t hi = max.toLong();
+    if (lo == hi && self.numel() > 0) {
+        auto [mn, mx] = at::aminmax(self);
+        lo = mn.item<int64_t>();
+        hi = mx.item<int64_t>();
+    }
+    if (lo == hi) {
+        lo -= 1;
+        hi += 1;
+    }
+    TORCH_CHECK(lo < hi, "torch.histc(): max must be larger than min");
+
+    at::Tensor x = self.reshape({-1}).to(at::kLong);
+    at::Tensor scaled = at::div(at::mul(at::sub(x, lo), bins), hi - lo, "trunc");
+    at::Tensor position = at::clamp_max(scaled, bins - 1);
+    at::Tensor inside = at::logical_and(at::ge(x, lo), at::le(x, hi));
+    at::Tensor keys = at::where(inside, position, at::full_like(position, bins));
+    return accumulate_bins(keys, c10::nullopt, bins, self.options());
+}
+
 at::Tensor histc_vulkan(const at::Tensor& self, int64_t bins, const at::Scalar& min, const at::Scalar& max)
 {
     TORCH_CHECK(bins > 0, "torch.histc(): bins must be > 0, but got ", bins, " for dimension 0");
-    TORCH_CHECK(at::isFloatingType(self.scalar_type()), "torch.histogram: input tensor and bins tensors should have the same dtype, but got input ",
-        self.scalar_type(), " and bins ", self.scalar_type()
-    );
+    TORCH_CHECK(self.scalar_type() != at::kBool && !self.is_complex(), "\"histc\" not implemented for '", self.scalar_type(), "'");
+    if (at::isIntegralType(self.scalar_type(), /*includeBool=*/false)) return histc_integral(self, bins, min, max);
     double lo = min.toDouble();
     double hi = max.toDouble();
     if (lo == hi && self.numel() > 0) {
@@ -213,6 +236,8 @@ at::Tensor histc_vulkan(const at::Tensor& self, int64_t bins, const at::Scalar& 
 
 at::Tensor& histc_out_vulkan(const at::Tensor& self, int64_t bins, const at::Scalar& min, const at::Scalar& max, at::Tensor& out)
 {
+    TORCH_CHECK(self.dtype() == out.dtype(), "torch.histogram: input tensor and hist tensor should have the same dtype, but got input ",
+        self.dtype(), " and hist ", out.dtype());
     return fill_out(out, histc_vulkan(self, bins, min, max));
 }
 
@@ -250,9 +275,7 @@ std::vector<at::Tensor> histogramdd_bin_edges_vulkan(
     bool /* density */)
 {
     int64_t dims = self.size(-1);
-    TORCH_CHECK(static_cast<int64_t>(bin_ct.size()) == dims, "torch.histogramdd: expected ", dims, " sequences of bin edges for a ", dims,
-        "-dimensional histogram but got ", bin_ct.size()
-    );
+    TORCH_CHECK(static_cast<int64_t>(bin_ct.size()) == dims, "histogramdd: The size of bins must be equal to the innermost dimension of the input.");
     at::Tensor input = self.reshape({-1, dims});
     auto outer = outer_bin_edges(input, dims, range);
     std::vector<at::Tensor> edges;
@@ -414,6 +437,8 @@ at::Tensor isin_impl(const at::Tensor& elements, const at::Tensor& test_elements
 
 at::Tensor& isin_tensor_tensor_out_vulkan(const at::Tensor& elements, const at::Tensor& test_elements, bool /* assume_unique */, bool invert, at::Tensor& out)
 {
+    TORCH_CHECK(elements.device() == test_elements.device(), "Expected all tensors to be on the same device, but found at least two devices, ",
+        elements.device(), " and ", test_elements.device(), "!");
     return fill_out(out, isin_impl(elements, test_elements, invert));
 }
 
@@ -515,8 +540,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> unique_dim_vulkan(const at::Tenso
     at::Tensor rows = rows_along(self, d);
     int64_t n = rows.size(0);
     if (n == 0) {
-        at::Tensor empty_long = at::empty({0}, self.options().dtype(at::kLong));
-        return std::make_tuple(self.clone(), empty_long, empty_long);
+        at::TensorOptions long_options = self.options().dtype(at::kLong);
+        return std::make_tuple(self.clone(), at::empty({0}, long_options), at::empty({0}, long_options));
     }
 
     at::Tensor order = at::arange(n, rows.options().dtype(at::kLong));

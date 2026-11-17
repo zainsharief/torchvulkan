@@ -32,11 +32,20 @@ at::ScalarType grid_sample_dtype(const at::Tensor& input)
 
 GridSampleProblem make_problem(const at::Tensor& input, const at::Tensor& grid, int64_t dims)
 {
+    // check_grid_sampler_common's order: the grid's last dimension against the input first
+    TORCH_CHECK(grid.size(-1) == input.dim() - 2, "grid_sampler(): expected grid to have size ", input.dim() - 2, " in last dimension, but got grid with sizes ",
+        grid.sizes());
     TORCH_CHECK(input.dim() == dims + 2, "grid_sampler(): expected ", dims + 2, "D input, but got input with sizes ", input.sizes());
-    TORCH_CHECK(grid.dim() == dims + 2 && grid.size(-1) == dims, "grid_sampler(): expected grid to have size ", dims, " in last dimension, but got grid with sizes ", grid.sizes());
+    TORCH_CHECK(grid.dim() == dims + 2, "grid_sampler(): expected grid to have size ", dims, " in last dimension, but got grid with sizes ", grid.sizes());
     TORCH_CHECK(input.size(0) == grid.size(0), "grid_sampler(): expected grid and input to have same batch size, but got input with sizes ", input.sizes(),
         " and grid with sizes ", grid.sizes()
     );
+    TORCH_CHECK(input.device() == grid.device(), "grid_sampler(): expected input and grid to be on same device, but input is on ", input.device(),
+        " and grid is on ", grid.device());
+    for (int64_t d = 2; d < input.dim(); d++) {
+        TORCH_CHECK(input.size(d) > 0, "grid_sampler(): expected input to have non-empty spatial dimensions, but input has sizes ", input.sizes(),
+            " with dimension ", d, " being empty");
+    }
     at::ScalarType dtype = grid_sample_dtype(input);
     GridSampleProblem p;
     p.input = input.to(dtype).contiguous();
@@ -96,6 +105,7 @@ void dispatch_grid_sample_shader(
        .push(workgroupSizeX);
 
     PushConstantBuilder pcs{};
+    for (const at::Tensor& t : {output, taps, weights}) materialize_cow(t);
     pcs.push(get_tensor_address(p.input))
        .push(get_tensor_address(p.grid))
        .push(output.defined() ? get_tensor_address(output) : uint64_t(0))
@@ -157,6 +167,10 @@ std::tuple<at::Tensor, at::Tensor> grid_sampler_backward(
     std::array<bool, 2> output_mask)
 {
     GridSampleProblem p = make_problem(input, grid, dims);
+    std::vector<int64_t> expected = {input.size(0), input.size(1)};
+    for (int64_t d = 1; d <= dims; d++) expected.push_back(grid.size(d));
+    TORCH_CHECK_VALUE(grad_output.sizes().equals(expected), "grid_sampler(): expected grad_output to have sizes ", at::IntArrayRef(expected),
+        " but got grad_output with sizes ", grad_output.sizes());
     at::Tensor go = grad_output.to(p.input.scalar_type()).contiguous();
     int64_t outputs = outputs_of(p);
     int64_t inputs = p.in[0] * p.in[1] * p.in[2];

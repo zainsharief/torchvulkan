@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/WrapDimUtils.h>
 #include <limits>
 #include <tuple>
@@ -108,7 +109,7 @@ std::tuple<at::Tensor&, at::Tensor&> sort_stable_out_vulkan(
     at::Tensor& values,
     at::Tensor& indices)
 {
-    auto [sorted_values, sorted_indices] = sort_along(self, dim, descending);
+    auto [sorted_values, sorted_indices] = sort_along(normalize_bool(self), dim, descending);
     fill_out(values, sorted_values);
     fill_out(indices, sorted_indices);
     return std::forward_as_tuple(values, indices);
@@ -217,7 +218,9 @@ std::tuple<at::Tensor&, at::Tensor&> kthvalue_values_vulkan(const at::Tensor& se
 {
     int64_t d = c10::maybe_wrap_dim(dim, self.dim(), /*wrap_scalar=*/true);
     int64_t n = self.dim() == 0 ? 1 : self.size(d);
+    TORCH_CHECK_INDEX(self.dim() == 0 || n > 0, "kthvalue(): Expected reduction dim ", d, " to have non-zero size.");
     TORCH_CHECK(k >= 1 && k <= n, "kthvalue(): selected number k out of range for dimension ", d);
+    at::assert_no_overlap(self, values);
     if (self.dim() == 0) {
         fill_out(values, self.clone());
         fill_out(indices, at::zeros({}, self.options().dtype(at::kLong)));
@@ -235,8 +238,9 @@ std::tuple<at::Tensor&, at::Tensor&> kthvalue_values_vulkan(const at::Tensor& se
 }
 
 // the most frequent value, the smallest on a tie, at the index of its last occurrence
-std::tuple<at::Tensor, at::Tensor> mode_vulkan(const at::Tensor& self, int64_t dim, bool keepdim)
+std::tuple<at::Tensor, at::Tensor> mode_vulkan(const at::Tensor& self_, int64_t dim, bool keepdim)
 {
+    at::Tensor self = normalize_bool(self_);
     if (self.dim() == 0) return std::make_tuple(self.clone(), at::zeros({}, self.options().dtype(at::kLong)));
     int64_t d = c10::maybe_wrap_dim(dim, self.dim());
     int64_t n = self.size(d);
@@ -267,6 +271,19 @@ std::tuple<at::Tensor, at::Tensor> mode_vulkan(const at::Tensor& self, int64_t d
     return std::make_tuple(values, indices);
 }
 
+std::tuple<at::Tensor&, at::Tensor&> mode_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& values, at::Tensor& indices)
+{
+    TORCH_CHECK(values.device() == self.device(), "expected device '", self.device(), "' but got '", values.device(), "' for values output");
+    TORCH_CHECK(indices.device() == self.device(), "expected device '", self.device(), "' but got '", indices.device(), "' for indices output");
+    TORCH_CHECK(values.scalar_type() == self.scalar_type(), "expected scalar type '", self.scalar_type(), "' but got '", values.scalar_type(),
+        "' for values output");
+    TORCH_CHECK(indices.scalar_type() == at::kLong, "expected scalar type 'Long' but got '", indices.scalar_type(), "' for indices output");
+    auto [v, idx] = mode_vulkan(self, dim, keepdim);
+    fill_out(values, v);
+    fill_out(indices, idx);
+    return std::forward_as_tuple(values, indices);
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -278,4 +295,5 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("nanmedian.dim_values", &nanmedian_dim_values_vulkan);
     m.impl("kthvalue.values", &kthvalue_values_vulkan);
     m.impl("mode", &mode_vulkan);
+    m.impl("mode.values", &mode_out_vulkan);
 }

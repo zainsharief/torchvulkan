@@ -72,6 +72,8 @@ void dispatch_pool_shader(
        .push(workgroupSizeX);
 
     PushConstantBuilder pcs{};
+    materialize_cow(output);
+    materialize_cow(indices);
     pcs.push(get_tensor_address(input))
        .push(get_tensor_address(output))
        .push(indices.defined() ? get_tensor_address(indices) : uint64_t(0))
@@ -141,6 +143,7 @@ PoolGeometry window_geometry(
     std::vector<int64_t> d = expand_param(dilation, dims, name, "dilation");
     std::vector<int64_t> o(dims);
     for (int64_t a = 0; a < dims; a++) {
+        TORCH_CHECK(s[a] != 0, "stride should not be zero");
         TORCH_CHECK(k[a] > 0 && s[a] > 0 && d[a] > 0, name, ": kernel size, stride and dilation should be greater than zero");
         o[a] = at::native::pooling_output_shape<int64_t>(spatial[a], k[a], p[a], s[a], d[a], ceil_mode);
     }
@@ -171,6 +174,12 @@ at::ScalarType pool_dtype(const at::Tensor& self)
     return (dtype == at::kBFloat16 || !is_dtype_supported(self, dtype)) ? at::kFloat : dtype;
 }
 
+// pooling results take the input's layout, as on the CPU and CUDA
+at::Tensor in_layout_of(const at::Tensor& result, const at::Tensor& self)
+{
+    return result.contiguous(self.suggest_memory_format());
+}
+
 int64_t planes_of(const at::Tensor& self, int64_t dims)
 {
     int64_t planes = 1;
@@ -194,7 +203,16 @@ std::tuple<at::Tensor, at::Tensor> run_max_pool(const at::Tensor& self, int64_t 
     int64_t planes = planes_of(self, dims);
     dispatch_pool_shader(self.to(dtype).contiguous(), output, indices, samples.defined() ? samples.to(dtype) : samples, g, mode,
         static_cast<uint64_t>(planes * outputs_per_plane(g)));
-    return std::make_tuple(output.to(self.scalar_type()), indices);
+    output = output.to(self.scalar_type());
+    // the CPU's 3D max pool reads an unbatched input's layout as if it had a batch dimension
+    if (mode == PoolMode::MAX && dims == 3 && self.dim() == 4) {
+        at::Tensor batched = self.unsqueeze(0);
+        if (!self.is_contiguous() && batched.is_contiguous(at::MemoryFormat::ChannelsLast3d)) {
+            auto cl3d = [](const at::Tensor& t) { return t.unsqueeze(0).contiguous(at::MemoryFormat::ChannelsLast3d).squeeze(0); };
+            return std::make_tuple(cl3d(output), cl3d(indices));
+        }
+    }
+    return std::make_tuple(in_layout_of(output, self), in_layout_of(indices, self));
 }
 
 at::Tensor max_pool_backward(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& indices, int64_t dims)
@@ -202,8 +220,9 @@ at::Tensor max_pool_backward(const at::Tensor& grad_output, const at::Tensor& se
     int64_t planes = planes_of(self, dims);
     int64_t inputs = self.numel() / std::max<int64_t>(planes, 1);
     at::Tensor grad_input = at::zeros({planes, inputs}, grad_output.options());
-    if (grad_output.numel() == 0 || planes == 0) return grad_input.view(self.sizes());
-    return grad_input.scatter_add_(1, indices.reshape({planes, -1}), grad_output.reshape({planes, -1})).view(self.sizes());
+    if (grad_output.numel() == 0 || planes == 0) return in_layout_of(grad_input.view(self.sizes()), self);
+    grad_input.scatter_add_(1, indices.reshape({planes, -1}), grad_output.reshape({planes, -1}));
+    return in_layout_of(grad_input.view(self.sizes()), self);
 }
 
 std::tuple<at::Tensor&, at::Tensor&> max_pool2d_with_indices_out_vulkan(
@@ -315,7 +334,7 @@ at::Tensor avg_pool_forward(const at::Tensor& self, int64_t dims, const PoolGeom
     at::ScalarType dtype = pool_dtype(self);
     at::Tensor output = at::empty(output_shape(self, dims, g), self.options().dtype(dtype));
     dispatch_pool_shader(self.to(dtype).contiguous(), output, at::Tensor(), at::Tensor(), g, PoolMode::AVG, static_cast<uint64_t>(planes_of(self, dims) * outputs_per_plane(g)));
-    return output.to(self.scalar_type());
+    return in_layout_of(output.to(self.scalar_type()), self);
 }
 
 at::Tensor avg_pool_backward(const at::Tensor& grad_output, const at::Tensor& self, int64_t dims, const PoolGeometry& g)
@@ -324,7 +343,7 @@ at::Tensor avg_pool_backward(const at::Tensor& grad_output, const at::Tensor& se
     at::Tensor grad_input = at::empty(self.sizes(), grad_output.options().dtype(dtype));
     dispatch_pool_shader(grad_output.to(dtype).contiguous(), grad_input, at::Tensor(), at::Tensor(), g, PoolMode::AVG_BACKWARD,
         static_cast<uint64_t>(planes_of(self, dims) * inputs_per_plane(g)));
-    return grad_input.to(grad_output.scalar_type());
+    return in_layout_of(grad_input.to(grad_output.scalar_type()), self);
 }
 
 at::Tensor& avg_pool2d_out_vulkan(
@@ -388,6 +407,7 @@ at::Tensor& avg_pool3d_backward_out_vulkan(
 PoolGeometry adaptive_geometry(const at::Tensor& self, int64_t dims, at::IntArrayRef output_size, const char* name)
 {
     auto [leading, spatial] = split_spatial(self, dims, name);
+    TORCH_CHECK_NOT_IMPLEMENTED(at::isFloatingType(self.scalar_type()), "\"", name, "\" not implemented for '", c10::toString(self.scalar_type()), "'");
     TORCH_CHECK(static_cast<int64_t>(output_size.size()) == dims, name, ": output_size must be ", dims);
     for (int64_t i = 1; i < self.dim(); i++) {
         TORCH_CHECK(self.size(i) > 0, name, "(): Expected input to have non-zero size for non-batch dimensions, but input has sizes ",
@@ -407,18 +427,29 @@ at::Tensor adaptive_avg_pool_forward(const at::Tensor& self, int64_t dims, at::I
     at::Tensor output = at::empty(output_shape(self, dims, g), self.options().dtype(dtype));
     dispatch_pool_shader(self.to(dtype).contiguous(), output, at::Tensor(), at::Tensor(), g, PoolMode::ADAPTIVE_AVG,
         static_cast<uint64_t>(planes_of(self, dims) * outputs_per_plane(g)));
-    return output.to(self.scalar_type());
+    return in_layout_of(output.to(self.scalar_type()), self);
+}
+
+// the CPU's checks on an adaptive pooling backward's grad_output
+void check_adaptive_grad_output(const at::Tensor& grad_output, const at::Tensor& self, const char* name)
+{
+    TORCH_CHECK(grad_output.dim() == self.dim(), name, ": Expected dimensions ", self.dim(), " for `grad_output` but got dimensions ", grad_output.dim());
+    for (int64_t i = 1; i < grad_output.dim(); i++) {
+        TORCH_CHECK(grad_output.size(i) > 0, name, "(): Expected grad_output to have non-zero size for non-batch dimensions, but grad_output has sizes ",
+            grad_output.sizes(), " with dimension ", i, " being empty");
+    }
 }
 
 at::Tensor adaptive_avg_pool_backward(const at::Tensor& grad_output, const at::Tensor& self, int64_t dims)
 {
+    check_adaptive_grad_output(grad_output, self, dims == 2 ? "adaptive_avg_pool2d_backward" : "adaptive_avg_pool3d_backward");
     std::vector<int64_t> output_size(grad_output.sizes().end() - dims, grad_output.sizes().end());
     PoolGeometry g = adaptive_geometry(self, dims, output_size, "adaptive_avg_pool_backward");
     at::ScalarType dtype = pool_dtype(grad_output);
     at::Tensor grad_input = at::empty(self.sizes(), grad_output.options().dtype(dtype));
     dispatch_pool_shader(grad_output.to(dtype).contiguous(), grad_input, at::Tensor(), at::Tensor(), g, PoolMode::ADAPTIVE_AVG_BACKWARD,
         static_cast<uint64_t>(planes_of(self, dims) * inputs_per_plane(g)));
-    return grad_input.to(grad_output.scalar_type());
+    return in_layout_of(grad_input.to(grad_output.scalar_type()), self);
 }
 
 at::Tensor adaptive_avg_pool2d_vulkan(const at::Tensor& self, c10::SymIntArrayRef output_size)
@@ -476,11 +507,13 @@ std::tuple<at::Tensor&, at::Tensor&> adaptive_max_pool3d_out_vulkan(const at::Te
 
 at::Tensor& adaptive_max_pool2d_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& indices, at::Tensor& grad_input)
 {
+    check_adaptive_grad_output(grad_output, self, "adaptive_max_pool2d_backward");
     return fill_out(grad_input, max_pool_backward(grad_output, self, indices, 2));
 }
 
 at::Tensor& adaptive_max_pool3d_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& indices, at::Tensor& grad_input)
 {
+    check_adaptive_grad_output(grad_output, self, "adaptive_max_pool3d_backward");
     return fill_out(grad_input, max_pool_backward(grad_output, self, indices, 3));
 }
 
@@ -576,8 +609,10 @@ at::Tensor& fractional_max_pool3d_backward_out_vulkan(
 
 at::Tensor max_unpool(const at::Tensor& self, const at::Tensor& indices, at::IntArrayRef output_size, int64_t dims, const char* name)
 {
+    at::globalContext().alertNotDeterministic(dims == 3 ? "max_unpooling3d_forward_out" : "max_unpooling2d_forward_out");
     TORCH_CHECK(indices.scalar_type() == at::kLong, "elements in indices should be type int64 but got: ", indices.scalar_type());
-    TORCH_CHECK(static_cast<int64_t>(output_size.size()) == dims, "There should be exactly ", dims, " elements (height, width) in output_size, but got ", output_size.size(), " elements.");
+    TORCH_CHECK(static_cast<int64_t>(output_size.size()) == dims, "There should be exactly ", dims == 2 ? "two elements (height, width)" : "three elements (depth, height, width)",
+        " in output_size, but got ", output_size.size(), " elements.");
     TORCH_CHECK(self.dim() == dims + 1 || self.dim() == dims + 2, "Input to ", name, " should be a ", dims + 1, "d or ", dims + 2, "d Tensor, but got a tensor with ", self.dim(), " dimensions.");
     TORCH_CHECK(self.sizes() == indices.sizes(), "Expected shape of indices to be same as that of the input tensor (", self.sizes(), ") but got indices tensor with shape: ", indices.sizes());
 
@@ -587,19 +622,19 @@ at::Tensor max_unpool(const at::Tensor& self, const at::Tensor& indices, at::Int
     std::vector<int64_t> shape(self.sizes().begin(), self.sizes().end() - dims);
     shape.insert(shape.end(), output_size.begin(), output_size.end());
 
-    at::Tensor flat_indices = indices.reshape({planes, -1});
+    at::Tensor flat_indices = indices.reshape({planes, planes == 0 ? 0 : indices.numel() / planes});
     if (flat_indices.numel() > 0) {
         bool invalid = at::logical_or(at::lt(flat_indices, 0), at::ge(flat_indices, outputs)).any().item<bool>();
         TORCH_CHECK(!invalid, "Found an invalid max index (output volumes are of size ", output_size, ")");
     }
     at::Tensor output = at::zeros({planes, outputs}, self.options());
-    if (flat_indices.numel() > 0) output.scatter_(1, flat_indices, self.reshape({planes, -1}));
-    return output.view(shape);
+    if (flat_indices.numel() > 0) output.scatter_(1, flat_indices, self.reshape(flat_indices.sizes()));
+    return unview(output.view(shape));
 }
 
 at::Tensor max_unpool2d_vulkan(const at::Tensor& self, const at::Tensor& indices, c10::SymIntArrayRef output_size)
 {
-    return max_unpool(self, indices, to_ints(output_size), 2, "max_unpool2d");
+    return max_unpool(self, indices, to_ints(output_size), 2, "max_unpooling2d");
 }
 
 at::Tensor& max_unpool2d_out_vulkan(const at::Tensor& self, const at::Tensor& indices, c10::SymIntArrayRef output_size, at::Tensor& out)
@@ -607,9 +642,13 @@ at::Tensor& max_unpool2d_out_vulkan(const at::Tensor& self, const at::Tensor& in
     return fill_out(out, max_unpool2d_vulkan(self, indices, output_size));
 }
 
-at::Tensor max_unpool3d_vulkan(const at::Tensor& self, const at::Tensor& indices, c10::SymIntArrayRef output_size, at::IntArrayRef /* stride */, at::IntArrayRef /* padding */)
+at::Tensor max_unpool3d_vulkan(const at::Tensor& self, const at::Tensor& indices, c10::SymIntArrayRef output_size, at::IntArrayRef stride, at::IntArrayRef padding)
 {
-    return max_unpool(self, indices, to_ints(output_size), 3, "max_unpool3d");
+    TORCH_CHECK(stride.size() == 3, "There should be exactly three elements (depth, height, width) in stride, but got: ", stride.size(), " elements.");
+    TORCH_CHECK(padding.size() == 3, "There should be exactly three elements (depth, height, width) in padding, but got: ", padding.size(), " elements.");
+    at::Tensor result = max_unpool(self, indices, to_ints(output_size), 3, "max_unpooling3d");
+    TORCH_CHECK(stride[0] > 0 && stride[1] > 0 && stride[2] > 0, "strides should be greater than zero, but got stride: ", stride);
+    return result;
 }
 
 at::Tensor& max_unpool3d_out_vulkan(

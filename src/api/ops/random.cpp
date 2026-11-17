@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <algorithm>
 #include <ATen/ExpandUtils.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/native/Resize.h>
@@ -72,6 +73,16 @@ void check_random_bounds(int64_t from, int64_t to_inc, const at::Tensor& self)
 
     TORCH_CHECK(from >= lowest && from <= highest, "from is out of bounds for ", self.dtype());
     TORCH_CHECK(to_inc >= lowest && to_inc <= highest, "to - 1 is out of bounds for ", self.dtype());
+    if (!at::isFloatingType(self.scalar_type())) return;
+    // torch's WARN_OUT_OF_BOUNDS: past 2^digits a float can't hold every integer of the range
+    int digits = get_dtype_digits(self.scalar_type());
+    for (auto [value, name] : {std::pair<int64_t, const char*>{from, "from"}, {to_inc, "to - 1"}}) {
+        if (value < -(int64_t(1) << digits) || value > (int64_t(1) << digits)) {
+            TORCH_WARN(name, " is out of bounds [-(2^", digits, "), 2^", digits, "]. Due to precision limitations ", self.dtype(),
+                " can support discrete uniform distribution only within this range. This warning will become an error in version 1.7 "
+                "release, please fix the code in advance");
+        }
+    }
 }
 
 void check_normal_std(const at::Tensor& std)
@@ -98,9 +109,17 @@ void dispatch_random_shader(
             dtype = random_proxy_dtype(dtype);
             TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", self.scalar_type(), ". Generating random values in ", dtype, " instead.");
         }
-        at::Tensor temp = at::empty(self.sizes(), self.options().dtype(dtype));
-        dispatch_random_shader(temp, op, params, generator);
-        self.copy_(temp);
+        // a flat temp the kernel can walk (it takes at most MAX_DIMS dims and 32-bit offsets), filled in chunks
+        at::Tensor temp = at::empty({self.numel()}, self.options().dtype(dtype));
+        at::Tensor probs = op == RandomOp::BERNOULLI_TENSOR ? params.probs.contiguous().view({-1}) : at::Tensor();
+        constexpr int64_t chunk = int64_t(1) << 30;
+        for (int64_t start = 0; start < temp.numel(); start += chunk) {
+            int64_t length = std::min(chunk, temp.numel() - start);
+            RandomParams part = params;
+            if (probs.defined()) part.probs = probs.narrow(0, start, length);
+            dispatch_random_shader(temp.narrow(0, start, length), op, part, generator);
+        }
+        self.copy_(temp.view(self.sizes()));
 
         // rounding to self's dtype can land on `to`, which [from, to) excludes
         if (op == RandomOp::UNIFORM && dtype != self.scalar_type()) self.masked_fill_(self == params.b, params.a);
@@ -316,7 +335,7 @@ at::Tensor& bernoulli_tensor_vulkan(at::Tensor& self, const at::Tensor& p, std::
 
 at::Tensor& bernoulli_out_vulkan(const at::Tensor& self, std::optional<at::Generator> generator, at::Tensor& out)
 {
-    out.resize_(self.sizes());
+    at::native::resize_output(out, self.sizes());
     return bernoulli_tensor_vulkan(out, self, generator);
 }
 

@@ -84,6 +84,19 @@ std::tuple<at::Tensor, at::Tensor> nll_loss_forward_vulkan(
     int64_t ignore_index)
 {
     TORCH_CHECK(self.dim() == 1 || self.dim() == 2, "torchvulkan [ERROR]: nll_loss only supports 1D (unbatched) or 2D input.");
+    // nll_loss_forward_meta's checks
+    TORCH_CHECK(target.dim() <= 1, "0D or 1D target tensor expected, multi-target not supported");
+    TORCH_CHECK(target.scalar_type() == at::kLong || target.scalar_type() == at::kByte, "expected target dtype to be Long or Byte, but got ",
+        target.scalar_type());
+    TORCH_CHECK(!(weight.has_value() && weight->defined()) || weight->scalar_type() == self.scalar_type(), "expected scalar type ", self.scalar_type(),
+        " but found ", weight->scalar_type());
+    TORCH_CHECK_VALUE(self.dim() != 1 || target.dim() != 1 || target.size(0) == 1, "For 1D input, 1D target must have size 1, but got target size: ",
+        target.size(0));
+    TORCH_CHECK(self.dim() == 1 || self.size(0) == target.size(0), "size mismatch (got input: ", self.sizes(), ", target: ", target.sizes(), ")");
+    int64_t classes = self.size(-1);
+    bool has_weight = weight.has_value() && weight->defined();
+    TORCH_CHECK(!has_weight || (weight->dim() <= 1 && weight->numel() == classes), "weight tensor should be defined either for all ", classes,
+        " classes or no classes but got weight tensor of shape: ", has_weight ? weight->sizes() : at::IntArrayRef());
 
     if (!is_dtype_supported(self, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
         TORCHVULKAN_FALLBACK("Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
@@ -107,7 +120,10 @@ std::tuple<at::Tensor, at::Tensor> nll_loss_forward_vulkan(
     at::Tensor total_weight = torchvulkan::sum_vulkan(gathered_weight, c10::nullopt);
 
     at::Tensor output;
-    if (reduction == 0) output = unbatched ? weighted_losses.squeeze(0) : weighted_losses;
+    if (reduction == 0) {
+        output = unbatched ? weighted_losses.squeeze(0) : weighted_losses;
+        if (!unbatched) total_weight = at::zeros({}, total_weight.options());  // unused without a reduction; torch reports 0
+    }
     else if (reduction == 1) output = torchvulkan::divide_vulkan(torchvulkan::sum_vulkan(weighted_losses, c10::nullopt), total_weight);
     else output = torchvulkan::sum_vulkan(weighted_losses, c10::nullopt);
 
