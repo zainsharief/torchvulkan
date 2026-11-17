@@ -6,11 +6,31 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 #include "api/fallback.h"
 
 namespace {
 
 enum class ScanOp { SUM = 0, PROD = 1, LOGADDEXP = 2 };
+
+// complex scans (ops/complex.cpp): a sum scans the (real, imag) pairs; a product or logcumsumexp combines
+// pairwise in log2(n) Hillis-Steele rounds
+at::Tensor complex_cumscan(const at::Tensor& x, int64_t d, ScanOp op)
+{
+    if (op == ScanOp::SUM) return unview(at::view_as_complex(at::cumsum(at::view_as_real(x.resolve_conj().resolve_neg()), d).contiguous()));
+    torchvulkan::ComplexParts z = torchvulkan::complex_parts(x);
+    int64_t n = x.size(d);
+    double identity_re = op == ScanOp::PROD ? 1.0 : -std::numeric_limits<double>::infinity();
+    for (int64_t offset = 1; offset < n; offset *= 2) {
+        std::vector<int64_t> pad_shape = z.re.sizes().vec();
+        pad_shape[d] = offset;
+        torchvulkan::ComplexParts shifted{
+            at::cat({at::full(pad_shape, identity_re, z.re.options()), z.re.narrow(d, 0, n - offset)}, d),
+            at::cat({at::zeros(pad_shape, z.im.options()), z.im.narrow(d, 0, n - offset)}, d)};
+        z = op == ScanOp::PROD ? torchvulkan::complex_mul(z, shifted) : torchvulkan::complex_logaddexp(shifted, z);
+    }
+    return torchvulkan::complex_from(z, x.scalar_type());
+}
 
 at::Tensor cumscan(
     const at::Tensor& self,
@@ -21,10 +41,11 @@ at::Tensor cumscan(
     c10::ScalarType out_dtype = reduce_compute_dtype(self, dtype);
     c10::ScalarType compute = reduce_accumulate_dtype(out_dtype);
 
+    int64_t d = c10::maybe_wrap_dim(dim, self.dim());
     at::Tensor x = self.to(compute);
     if (x.dim() == 0 || x.numel() == 0) return x.clone().to(out_dtype);
 
-    int64_t d = c10::maybe_wrap_dim(dim, x.dim());
+    if (x.is_complex()) return complex_cumscan(x, d, op).to(out_dtype);
     if (!is_dtype_supported(x, compute) || x.dim() > MAX_DIMS || !fits_32bit_indexing({x})) {
         TORCHVULKAN_FALLBACK("A ", compute, " cumulative op of this shape can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), d) : op == ScanOp::PROD ? at::cumprod(x.cpu(), d) : at::logcumsumexp(x.cpu(), d);
@@ -102,7 +123,7 @@ at::Tensor& cumprod_out_vulkan(
 
 at::Tensor logcumsumexp_vulkan(const at::Tensor& self, int64_t dim)
 {
-    check_floating(self, "logcumsumexp");
+    if (!self.is_complex()) check_floating(self, "logcumsumexp");
     return cumscan(self, dim, self.scalar_type(), ScanOp::LOGADDEXP);
 }
 
