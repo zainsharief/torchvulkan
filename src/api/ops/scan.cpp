@@ -134,6 +134,53 @@ at::Tensor& logcumsumexp_out_vulkan(const at::Tensor& self, int64_t dim, at::Ten
 
 enum class CumArgOp { MAX = 0, MIN = 1 };
 
+void cumscanarg(const at::Tensor& self, at::Tensor& values, at::Tensor& indices, int64_t dim, CumArgOp op);
+
+// past MAX_DIMS or 32-bit indexing: the scan dim moved last and the rest flattened into rows, scanned in pieces that fit.
+// A row longer than a piece carries the running value across with torch's step: the later element wins on NaN, or on
+// >= (<= for cummin) unless the running value is NaN
+void cumscanarg_in_pieces(const at::Tensor& self, at::Tensor& values, at::Tensor& indices, int64_t d, CumArgOp op)
+{
+    at::Tensor moved = self.movedim(d, -1).contiguous();
+    std::vector<int64_t> moved_shape = moved.sizes().vec();
+    int64_t n = moved.size(-1);
+    at::Tensor rows = moved.view({-1, n});
+    at::Tensor val = at::empty_like(rows);
+    at::Tensor idx = at::empty(rows.sizes(), rows.options().dtype(at::kLong));
+    constexpr int64_t piece = int64_t(1) << 30;
+    if (n <= piece) {
+        int64_t step = std::max<int64_t>(1, piece / n);
+        for (int64_t r = 0; r < rows.size(0); r += step) {
+            int64_t count = std::min(step, rows.size(0) - r);
+            at::Tensor v = val.narrow(0, r, count);
+            at::Tensor i = idx.narrow(0, r, count);
+            cumscanarg(rows.narrow(0, r, count), v, i, 1, op);
+        }
+    } else {
+        for (int64_t r = 0; r < rows.size(0); r++) {
+            at::Tensor carry_v;
+            at::Tensor carry_i;
+            for (int64_t start = 0; start < n; start += piece) {
+                int64_t length = std::min(piece, n - start);
+                at::Tensor v = val.select(0, r).narrow(0, start, length);
+                at::Tensor i = idx.select(0, r).narrow(0, start, length);
+                cumscanarg(rows.select(0, r).narrow(0, start, length), v, i, 0, op);
+                i.add_(start);
+                if (carry_v.defined()) {
+                    at::Tensor wins = op == CumArgOp::MAX ? at::ge(v, carry_v) : at::le(v, carry_v);
+                    at::Tensor later = at::logical_or(at::isnan(v), at::logical_and(at::logical_not(at::isnan(carry_v)), wins));
+                    v.copy_(at::where(later, v, carry_v));
+                    i.copy_(at::where(later, i, carry_i));
+                }
+                carry_v = v.narrow(0, length - 1, 1).clone();
+                carry_i = i.narrow(0, length - 1, 1).clone();
+            }
+        }
+    }
+    values.copy_(val.view(moved_shape).movedim(-1, d));
+    indices.copy_(idx.view(moved_shape).movedim(-1, d));
+}
+
 void cumscanarg(
     const at::Tensor& self,
     at::Tensor& values,
@@ -141,14 +188,20 @@ void cumscanarg(
     int64_t dim,
     CumArgOp op)
 {
+    TORCH_CHECK_NOT_IMPLEMENTED(!self.is_complex(), "\"", op == CumArgOp::MAX ? "cummax" : "cummin", "\" not implemented for '",
+        self.scalar_type(), "'");
     if (self.dim() == 0 || self.numel() == 0) {
         values.copy_(self);
         if (indices.numel() > 0) indices.zero_();
         return;
     }
     int64_t d = c10::maybe_wrap_dim(dim, self.dim());
-    if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
-        TORCHVULKAN_FALLBACK("A ", self.scalar_type(), op == CumArgOp::MAX ? " cummax" : " cummin", " of this shape can't run on the Vulkan device. Falling back to CPU.");
+    if (is_dtype_supported(self, self.scalar_type()) && (self.dim() > MAX_DIMS || !fits_32bit_indexing({self}))) {
+        cumscanarg_in_pieces(self, values, indices, d, op);
+        return;
+    }
+    if (!is_dtype_supported(self, self.scalar_type())) {
+        TORCHVULKAN_FALLBACK("A ", self.scalar_type(), op == CumArgOp::MAX ? " cummax" : " cummin", " can't run on the Vulkan device. Falling back to CPU.");
         auto r = op == CumArgOp::MAX ? at::cummax(self.cpu(), dim) : at::cummin(self.cpu(), dim);
         values.copy_(std::get<0>(r));
         indices.copy_(std::get<1>(r));
@@ -213,7 +266,7 @@ void cummax_helper_vulkan(
     at::Tensor& indices,
     int64_t dim)
 {
-    cumscanarg(self, values, indices, dim, CumArgOp::MAX);
+    cumscanarg(normalize_bool(self), values, indices, dim, CumArgOp::MAX);
 }
 
 void cummin_helper_vulkan(
@@ -222,7 +275,7 @@ void cummin_helper_vulkan(
     at::Tensor& indices,
     int64_t dim)
 {
-    cumscanarg(self, values, indices, dim, CumArgOp::MIN);
+    cumscanarg(normalize_bool(self), values, indices, dim, CumArgOp::MIN);
 }
 
 } // namespace
