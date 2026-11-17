@@ -232,11 +232,14 @@ void dispatch_householder_shader(HouseholderMode mode, const at::Tensor& a, cons
     });
 }
 
+// a complex a and v (SVD only) go to the shader as (re, im) pairs
 void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tensor& v)
 {
     int64_t n = a.size(2);
     int64_t pairs = (n + 1) / 2;
-    at::Tensor rotations = at::empty({a.size(0), std::max<int64_t>(pairs, 1), 2}, a.options());
+    at::ScalarType real = c10::toRealValueType(a.scalar_type());
+    // per pair: the rotation's cos and sin, and the phase it divides out
+    at::Tensor rotations = at::empty({a.size(0), std::max<int64_t>(pairs, 1), 4}, a.options().dtype(real));
     DeviceContext* device = get_device_context(a);
     uint32_t workgroupSizeX = matrix_workgroup(device);
     for_each_chunk(a.size(0), device, [&](int64_t start, int64_t count) {
@@ -246,7 +249,8 @@ void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tens
 
         SpecializationBuilder spd{};
         spd.push(static_cast<uint32_t>(mode))
-           .push(workgroupSizeX);
+           .push(workgroupSizeX)
+           .push(static_cast<uint32_t>(a.is_complex()));
 
         PushConstantBuilder pcs{};
         pcs.push(get_output_address(a_part))
@@ -257,7 +261,7 @@ void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tens
            .push(static_cast<uint32_t>(pairs));
 
         device->shader_manager->dispatchShader(
-            ShaderKey{torchvulkan::Kernel::JACOBI, a.scalar_type()},
+            ShaderKey{torchvulkan::Kernel::JACOBI, real},
             device->default_subgroup_size,
             spd.build(),
             pcs.build(),
@@ -973,17 +977,31 @@ std::tuple<at::Tensor&, at::Tensor&> linalg_qr_out_vulkan(const at::Tensor& A, c
 }
 
 // one-sided Jacobi
+std::tuple<at::Tensor, at::Tensor, at::Tensor> svd_impl(const at::Tensor& A, bool full_matrices, bool compute_uv);
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> svd_impl(const at::Tensor& A, bool full_matrices, bool compute_uv)
 {
     TORCH_CHECK(A.dim() >= 2, "linalg.svd: The input tensor A must have at least 2 dimensions.");
-    at::ScalarType dtype = linalg_dtype(A, "linalg.svd");
+    bool complex = A.is_complex();
+    at::ScalarType dtype = complex ? complex_compute_dtype(A.scalar_type()) : linalg_dtype(A, "linalg.svd");
     int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
     std::vector<int64_t> batch = batch_shape(A);
+    // a wide matrix through its (conjugate) transpose, A^H = V S U^H
     bool wide = m < n;
-    at::Tensor tall = wide ? A.mT() : A;
+    auto adjoint = [complex](const at::Tensor& t) { return complex ? t.mH() : t.mT(); };
+    at::Tensor tall = wide ? adjoint(A) : A;
     int64_t rows = std::max(m, n);
 
     at::Tensor g = batched_copy(tall, dtype);
+    // each matrix scaled by a power of two to largest entry ~1, as gesvd scales: the rotations square entries, which
+    // overflow or flush near 1e19 or 1e-19 in float32
+    at::Tensor scale;
+    if (g.numel() > 0) {
+        at::Tensor largest = at::amax(at::abs(g), {1, 2}, /*keepdim=*/true);
+        at::Tensor exponent = std::get<1>(at::frexp(at::where(at::isfinite(largest), largest, at::zeros_like(largest))));
+        scale = at::ldexp(at::ones_like(largest), at::neg(exponent));
+        g = at::mul(g, scale);
+    }
     at::Tensor v = at::empty({g.size(0), k, k}, g.options());
     if (g.numel() > 0) dispatch_jacobi_shader(JacobiMode::SVD, g, v);
 
@@ -992,18 +1010,21 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> svd_impl(const at::Tensor& A, boo
     s = at::gather(s, 1, order);
     std::vector<int64_t> s_shape = batch;
     s_shape.push_back(k);
-    at::Tensor S = s.view(s_shape).to(A.scalar_type());
+    at::Tensor S = (g.numel() > 0 ? at::div(s, scale.squeeze(2)) : s).view(s_shape).to(c10::toRealValueType(A.scalar_type()));
     if (!compute_uv) return std::make_tuple(at::empty({0}, A.options()), S, at::empty({0}, A.options()));
 
     at::Tensor column_order = order.unsqueeze(1);
     at::Tensor g_sorted = at::gather(g, 2, column_order.expand({g.size(0), rows, k}));
     at::Tensor v_sorted = at::gather(v, 2, column_order.expand({g.size(0), k, k}));
-    at::Tensor nonzero = at::gt(s, 0).unsqueeze(1);
+    // a singular value at rounding level of the largest is zero: its column of g is noise, which / s isn't orthogonal
+    double eps = dtype == at::kDouble || dtype == at::kComplexDouble ? 2.220446049250313e-16 : 1.1920928955078125e-07;
+    at::Tensor tolerance = s.numel() > 0 ? at::mul(s.narrow(1, 0, std::min<int64_t>(k, 1)), eps * static_cast<double>(rows)) : s;
+    at::Tensor nonzero = at::gt(s, tolerance).unsqueeze(1);
     at::Tensor u = at::where(nonzero, at::div(g_sorted, at::where(nonzero, s.unsqueeze(1), at::ones_like(s.unsqueeze(1)))), at::zeros_like(g_sorted));
 
     // zero singular values and full matrices take orthonormal columns from u's QR
     bool full = full_matrices && rows > k;
-    bool has_zero = s.numel() > 0 && at::eq(s, 0).any().item<bool>();
+    bool has_zero = s.numel() > 0 && at::logical_not(nonzero).any().item<bool>();
     if (u.numel() > 0 && (full || has_zero)) {
         auto [qr, tau] = geqrf_impl(u);
         at::Tensor padded = full ? at::cat({qr, at::zeros({u.size(0), rows, rows - k}, qr.options())}, -1) : qr;
@@ -1016,8 +1037,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> svd_impl(const at::Tensor& A, boo
     int64_t u_cols = full ? rows : k;
     at::Tensor U_tall = u.view(with_matrix(batch, rows, u_cols)).to(A.scalar_type());
     at::Tensor V = v_sorted.view(with_matrix(batch, k, k)).to(A.scalar_type());
-    if (!wide) return std::make_tuple(U_tall, S, V.mT().contiguous());
-    return std::make_tuple(V.contiguous(), S, U_tall.mT().contiguous());
+    if (!wide) return std::make_tuple(U_tall, S, adjoint(V).resolve_conj().contiguous());
+    return std::make_tuple(V.contiguous(), S, adjoint(U_tall).resolve_conj().contiguous());
 }
 
 std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_svd_out_vulkan(
