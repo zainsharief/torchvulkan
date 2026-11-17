@@ -1,6 +1,8 @@
 #include <torch/extension.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/ops/linalg_matrix_sqrth_native.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -11,6 +13,7 @@
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 #include "api/fallback.h"
 
 namespace {
@@ -43,9 +46,31 @@ void check_square(const at::Tensor& A, const char* name)
     TORCH_CHECK(A.size(-1) == A.size(-2), name, ": A must be batches of square matrices, but they are ", A.size(-2), " by ", A.size(-1), " matrices");
 }
 
+// a structured op's check on an out= tensor's dtype
+void check_out_dtype(const at::Tensor& out, at::ScalarType expected)
+{
+    TORCH_CHECK(out.scalar_type() == expected, "Expected out tensor to have dtype ", c10::scalarTypeToTypeMeta(expected), ", but got ",
+                out.dtype(), " instead");
+}
+
+// checkLinalgCompatibleDtype: an out= tensor must be able to take the result
+void check_castable(const char* fn, const char* name, const at::Tensor& out, at::ScalarType result)
+{
+    TORCH_CHECK(at::canCast(result, out.scalar_type()), fn, ": Expected ", name, " to be safely castable from ", result, " dtype, but got ", name,
+                " with dtype ", out.scalar_type());
+}
+
 std::vector<int64_t> batch_shape(const at::Tensor& A)
 {
     return std::vector<int64_t>(A.sizes().begin(), A.sizes().end() - 2);
+}
+
+// the number of matrices in a batch (a -1 reshape can't infer it when the batch is empty)
+int64_t batch_count(const at::Tensor& A)
+{
+    int64_t count = 1;
+    for (int64_t s : batch_shape(A)) count *= s;
+    return count;
 }
 
 std::vector<int64_t> with_matrix(std::vector<int64_t> batch, int64_t rows, int64_t cols)
@@ -320,14 +345,34 @@ std::tuple<at::Tensor, at::Tensor> broadcast_batches(const at::Tensor& A, const 
     return std::make_tuple(A.expand(with_matrix(batch, A.size(-2), A.size(-1))), B.expand(with_matrix(batch, B.size(-2), B.size(-1))));
 }
 
+// a complex matrix as the real one [[re, -im], [im, re]]: products, inverses and solutions carry over
+at::Tensor real_embedding(const torchvulkan::ComplexParts& a)
+{
+    return at::cat({at::cat({a.re, at::neg(a.im)}, -1), at::cat({a.im, a.re}, -1)}, -2);
+}
+
+// a complex A X = B through the real system [[Ar, -Ai], [Ai, Ar]] [Xr; Xi] = [Br; Bi]
+at::Tensor complex_solve_by_embedding(const at::Tensor& a, const at::Tensor& b, at::ScalarType complex_dtype)
+{
+    torchvulkan::ComplexParts ap = torchvulkan::complex_parts(a.to(complex_dtype)), bp = torchvulkan::complex_parts(b.to(complex_dtype));
+    // no error of its own: a singular A is the caller's to report (from its LU's info), in torch's words
+    at::Tensor x = std::get<0>(at::linalg_solve_ex(real_embedding(ap), at::cat({bp.re, bp.im}, -2), /*left=*/true, /*check_errors=*/false));
+    int64_t n = a.size(-1);
+    return torchvulkan::complex_from({x.narrow(-2, 0, n), x.narrow(-2, n, n)}, complex_dtype);
+}
+
 at::Tensor solve_triangular_left(const at::Tensor& A, const at::Tensor& B, bool upper, bool unit)
 {
     auto [a, b] = broadcast_batches(A, B);
     if (b.numel() == 0 || a.size(-1) == 0) return b.clone();
     if (a.is_complex() || b.is_complex()) {
-        TORCHVULKAN_FALLBACK("A complex triangular solve can't run on the Vulkan device. Falling back to CPU.");
         at::ScalarType type = at::promote_types(a.scalar_type(), b.scalar_type());
-        return at::linalg_solve_triangular(a.cpu().to(type), b.cpu().to(type), upper, /*left=*/true, unit).to(B.device());
+        at::Tensor t = upper ? at::triu(a) : at::tril(a);
+        if (unit) {
+            int64_t n = t.size(-1);
+            t = at::add(at::sub(t, at::diag_embed(at::diagonal(t, 0, -2, -1))), at::eye(n, t.options()));
+        }
+        return complex_solve_by_embedding(t, b, type);
     }
     at::ScalarType dtype = linalg_dtype(B, "linalg.solve_triangular");
     std::vector<int64_t> out_shape = b.sizes().vec();
@@ -357,14 +402,57 @@ at::Tensor permutation_from_pivots(const at::Tensor& pivots, int64_t m)
     return perm.view(batch);
 }
 
+// LU one column per step on the real and imaginary planes (real input uses the real one), with LAPACK's getrf pivoting
+// (the largest |re| + |im|) or none; a zero pivot leaves its column and sets info
+std::tuple<at::Tensor, at::Tensor, at::Tensor> complex_lu_factor(const at::Tensor& A, bool pivot = true)
+{
+    int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
+    std::vector<int64_t> batch = batch_shape(A);
+    at::ScalarType dtype = A.scalar_type() == at::kComplexHalf ? at::kComplexFloat : A.scalar_type();
+    torchvulkan::ComplexParts z = torchvulkan::complex_parts(A.to(dtype).reshape({batch_count(A), m, n}));
+    at::Tensor re = z.re.contiguous().clone(), im = z.im.contiguous().clone();
+    int64_t batches = re.size(0);
+    at::Tensor pivots = at::empty({batches, k}, A.options().dtype(at::kLong));
+    at::Tensor info = at::zeros({batches}, A.options().dtype(at::kLong));
+    at::Tensor rows = at::arange(m, pivots.options());
+    for (int64_t j = 0; j < k; j++) {
+        // LAPACK's izamax measures |re| + |im|
+        at::Tensor magnitude = at::add(at::abs(re.narrow(1, j, m - j).select(2, j)), at::abs(im.narrow(1, j, m - j).select(2, j)));
+        at::Tensor p = pivot ? at::add(at::argmax(magnitude, -1), j) : at::full({batches}, j, pivots.options());
+        pivots.select(1, j).copy_(at::add(p, 1));
+        // swap rows j and p
+        at::Tensor order = rows.expand({batches, m}).clone();
+        order.select(1, j).copy_(p);
+        order.scatter_(1, p.unsqueeze(1), j);
+        at::Tensor gather_index = order.unsqueeze(2).expand({batches, m, n});
+        re = at::gather(re, 1, gather_index);
+        im = at::gather(im, 1, gather_index);
+        torchvulkan::ComplexParts pivot{re.select(1, j).select(1, j), im.select(1, j).select(1, j)};
+        at::Tensor zero = at::logical_and(at::eq(pivot.re, 0), at::eq(pivot.im, 0));
+        info = at::where(at::logical_and(zero, at::eq(info, 0)), at::full_like(info, j + 1), info);
+        if (j + 1 >= m) continue;
+        torchvulkan::ComplexParts column{re.narrow(1, j + 1, m - j - 1).select(2, j), im.narrow(1, j + 1, m - j - 1).select(2, j)};
+        torchvulkan::ComplexParts l = torchvulkan::complex_div(column, {pivot.re.unsqueeze(1), pivot.im.unsqueeze(1)});
+        l.re = at::where(zero.unsqueeze(1), column.re, l.re);
+        l.im = at::where(zero.unsqueeze(1), column.im, l.im);
+        re.narrow(1, j + 1, m - j - 1).select(2, j).copy_(l.re);
+        im.narrow(1, j + 1, m - j - 1).select(2, j).copy_(l.im);
+        if (j + 1 >= n) continue;
+        torchvulkan::ComplexParts u{re.select(1, j).narrow(1, j + 1, n - j - 1).unsqueeze(1), im.select(1, j).narrow(1, j + 1, n - j - 1).unsqueeze(1)};
+        torchvulkan::ComplexParts outer = torchvulkan::complex_mul({l.re.unsqueeze(2), l.im.unsqueeze(2)}, u);
+        re.narrow(1, j + 1, m - j - 1).narrow(2, j + 1, n - j - 1).sub_(outer.re);
+        im.narrow(1, j + 1, m - j - 1).narrow(2, j + 1, n - j - 1).sub_(outer.im);
+    }
+    at::Tensor lu = (A.is_complex() ? torchvulkan::complex_from({re, im}, dtype) : re).to(A.scalar_type());
+    std::vector<int64_t> pivot_shape = batch;
+    pivot_shape.push_back(k);
+    return std::make_tuple(lu.view(with_matrix(batch, m, n)), pivots.to(at::kInt).view(pivot_shape), info.to(at::kInt).view(batch));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> lu_factor_impl(const at::Tensor& A, const char* name)
 {
     TORCH_CHECK(A.dim() >= 2, name, ": Expected tensor with 2 or more dimensions. Got size: ", A.sizes(), " instead");
-    if (A.is_complex()) {
-        TORCHVULKAN_FALLBACK("A complex LU factorization can't run on the Vulkan device. Falling back to CPU.");
-        auto [lu, pivots, info] = at::linalg_lu_factor_ex(A.cpu());
-        return std::make_tuple(lu.to(A.device()), pivots.to(A.device()), info.to(A.device()));
-    }
+    if (A.is_complex()) return complex_lu_factor(A);
     at::ScalarType dtype = linalg_dtype(A, name);
     int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
     std::vector<int64_t> batch = batch_shape(A);
@@ -391,8 +479,8 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_lu_factor_ex_out_vulkan
     at::Tensor& pivots,
     at::Tensor& info)
 {
-    TORCH_CHECK(pivot, "linalg.lu_factor: LU without pivoting is not implemented on the CPU");
-    auto [lu, piv, inf] = lu_factor_impl(A, "torch.linalg.lu_factor_ex");
+    // without pivoting (as CUDA allows): the column-by-column factorisation with identity pivots
+    auto [lu, piv, inf] = pivot ? lu_factor_impl(A, "torch.linalg.lu_factor_ex") : complex_lu_factor(A, false);
     fill_out(LU, lu);
     fill_out(pivots, piv);
     fill_out(info, inf);
@@ -423,9 +511,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> unpack_lu(const at::Tensor& LU, c
 
 std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_lu_out_vulkan(const at::Tensor& A, bool pivot, at::Tensor& P, at::Tensor& L, at::Tensor& U)
 {
-    TORCH_CHECK(pivot, "linalg.lu: LU without pivoting is not implemented on the CPU");
-    auto [lu, pivots, info] = lu_factor_impl(A, "torch.linalg.lu");
-    auto [p, l, u] = unpack_lu(lu, pivots, true, true);
+    auto [lu, pivots, info] = pivot ? lu_factor_impl(A, "torch.linalg.lu") : complex_lu_factor(A, false);
+    auto [p, l, u] = unpack_lu(lu, pivots, true, pivot);
     fill_out(P, p);
     fill_out(L, l);
     fill_out(U, u);
@@ -451,6 +538,14 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> lu_unpack_out_vulkan(
     fill_out(L, l);
     fill_out(U, u);
     return std::forward_as_tuple(P, L, U);
+}
+
+// LAPACK returns batched column-major matrices, and so do torch's meta functions, which FakeTensor and
+// torch.compile take strides from
+at::Tensor column_major(const at::Tensor& t)
+{
+    if (t.dim() < 2) return t;
+    return unview(t.mT().contiguous().mT());
 }
 
 at::Tensor lu_solve_impl(const at::Tensor& LU, const at::Tensor& pivots, const at::Tensor& B, bool left, bool adjoint)
@@ -479,6 +574,16 @@ at::Tensor lu_solve_impl(const at::Tensor& LU, const at::Tensor& pivots, const a
 at::Tensor& linalg_lu_solve_out_vulkan(const at::Tensor& LU, const at::Tensor& pivots, const at::Tensor& B, bool left, bool adjoint, at::Tensor& result)
 {
     return fill_out(result, lu_solve_impl(LU, pivots, B, left, adjoint));
+}
+
+// as the meta function: complex with left=False comes back as a conjugate view (same values)
+at::Tensor linalg_lu_solve_vulkan(const at::Tensor& LU, const at::Tensor& pivots, const at::Tensor& B, bool left, bool adjoint)
+{
+    // the meta function's layout: column-major, row-major for left=False
+    at::Tensor solved = lu_solve_impl(LU, pivots, B, left, adjoint);
+    at::Tensor result = left ? column_major(solved) : unview(solved.contiguous());
+    if (LU.is_complex() && !left && result.numel() > 0) return result.conj_physical().conj();
+    return result.resolve_conj();  // an empty B comes back as a clone of its conjugate view
 }
 
 bool is_vector_rhs(const at::Tensor& A, const at::Tensor& B)
@@ -557,16 +662,47 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_slogdet_ou
     check_square(A, "linalg.slogdet");
     auto [lu, piv, info] = lu_factor_impl(det_factor_input(A), "linalg.slogdet");
     at::Tensor diag = at::diagonal(lu, 0, -2, -1);
-    fill_out(sign, at::mul(at::prod(at::sign(diag), -1), permutation_sign(piv, lu.options())));
+    fill_out(sign, at::mul(at::prod(lu.is_complex() ? at::sgn(diag) : at::sign(diag), -1), permutation_sign(piv, lu.options())));
     fill_out(logabsdet, at::sum(at::log(at::abs(diag)), -1));
     fill_out(LU, lu);
     fill_out(pivots, piv);
     return std::forward_as_tuple(sign, logabsdet, LU, pivots);
 }
 
+// complex Cholesky, one column per step: L[j,j] = sqrt(A[j,j] - |L[j,:j]|^2), L[i,j] = (A[i,j] - L[i,:j] conj(L[j,:j])) / L[j,j]
+std::tuple<at::Tensor, at::Tensor> complex_cholesky(const at::Tensor& A, bool upper)
+{
+    int64_t n = A.size(-1);
+    std::vector<int64_t> batch = batch_shape(A);
+    at::ScalarType dtype = A.scalar_type() == at::kComplexHalf ? at::kComplexFloat : A.scalar_type();
+    torchvulkan::ComplexParts a = torchvulkan::complex_parts(A.to(dtype).reshape({batch_count(A), n, n}));
+    int64_t batches = a.re.size(0);
+    at::Tensor re = at::zeros({batches, n, n}, a.re.options()), im = at::zeros_like(re);
+    at::Tensor info = at::zeros({batches}, A.options().dtype(at::kLong));
+    for (int64_t j = 0; j < n; j++) {
+        at::Tensor row_re = re.select(1, j).narrow(1, 0, j), row_im = im.select(1, j).narrow(1, 0, j);
+        at::Tensor d = at::sub(a.re.select(1, j).select(1, j), at::sum(at::add(at::mul(row_re, row_re), at::mul(row_im, row_im)), -1));
+        info = at::where(at::logical_and(at::logical_not(at::gt(d, 0)), at::eq(info, 0)), at::full_like(info, j + 1), info);
+        at::Tensor diagonal = at::sqrt(d);
+        re.select(1, j).select(1, j).copy_(diagonal);
+        if (j + 1 >= n) continue;
+        // L[j+1:, :j] conj(L[j, :j])
+        at::Tensor below_re = re.narrow(1, j + 1, n - j - 1).narrow(2, 0, j), below_im = im.narrow(1, j + 1, n - j - 1).narrow(2, 0, j);
+        torchvulkan::ComplexParts dot = torchvulkan::complex_mul({below_re, below_im}, {row_re.unsqueeze(1), at::neg(row_im).unsqueeze(1)});
+        at::Tensor col_re = at::sub(a.re.narrow(1, j + 1, n - j - 1).select(2, j), at::sum(dot.re, -1));
+        at::Tensor col_im = at::sub(a.im.narrow(1, j + 1, n - j - 1).select(2, j), at::sum(dot.im, -1));
+        re.narrow(1, j + 1, n - j - 1).select(2, j).copy_(at::div(col_re, diagonal.unsqueeze(1)));
+        im.narrow(1, j + 1, n - j - 1).select(2, j).copy_(at::div(col_im, diagonal.unsqueeze(1)));
+    }
+    at::Tensor L = torchvulkan::complex_from({re, im}, dtype).view(A.sizes()).to(A.scalar_type());
+    if (upper) L = L.mH().resolve_conj().contiguous();
+    return std::make_tuple(L, info.to(at::kInt).view(batch));
+}
+
 std::tuple<at::Tensor, at::Tensor> cholesky_impl(const at::Tensor& A, bool upper, const char* name)
 {
     check_square(A, name);
+    if (A.is_complex()) return complex_cholesky(A, upper);
     at::ScalarType dtype = linalg_dtype(A, name);
     std::vector<int64_t> batch = batch_shape(A);
     at::Tensor l = batched_copy(A, dtype);
@@ -579,6 +715,7 @@ std::tuple<at::Tensor, at::Tensor> cholesky_impl(const at::Tensor& A, bool upper
 
 std::tuple<at::Tensor&, at::Tensor&> linalg_cholesky_ex_out_vulkan(const at::Tensor& A, bool upper, bool check_errors, at::Tensor& L, at::Tensor& info)
 {
+    check_out_dtype(L, A.scalar_type());
     auto [l, inf] = cholesky_impl(A, upper, "linalg.cholesky");
     fill_out(L, l);
     fill_out(info, inf);
@@ -600,14 +737,17 @@ at::Tensor& cholesky_out_vulkan(const at::Tensor& self, bool upper, at::Tensor& 
 
 at::Tensor cholesky_solve_helper_vulkan(const at::Tensor& self, const at::Tensor& A, bool upper)
 {
-    at::Tensor lower = upper ? A.mT() : A;
+    // conjugate transposes, which complex needs (for real they are transposes)
+    at::Tensor lower = upper ? A.mH() : A;
     at::Tensor y = solve_triangular_left(lower, self, /*upper=*/false, /*unit=*/false);
-    return solve_triangular_left(lower.mT(), y, /*upper=*/true, /*unit=*/false);
+    return column_major(solve_triangular_left(lower.mH(), y, /*upper=*/true, /*unit=*/false));
 }
 
 at::Tensor cholesky_inverse_vulkan(const at::Tensor& self, bool upper)
 {
-    TORCH_CHECK(self.dim() >= 2 && self.size(-1) == self.size(-2), "cholesky_inverse: A must be batches of square matrices");
+    TORCH_CHECK(self.dim() >= 2, "cholesky_inverse: The input tensor A must have at least 2 dimensions.");
+    TORCH_CHECK(self.size(-1) == self.size(-2), "cholesky_inverse: A must be batches of square matrices, but they are ", self.size(-2), " by ",
+                self.size(-1), " matrices");
     at::Tensor eye = at::eye(self.size(-1), self.options()).expand(self.sizes());
     return cholesky_solve_helper_vulkan(eye, self, upper);
 }
@@ -626,7 +766,8 @@ at::Tensor solve_triangular(const at::Tensor& A, const at::Tensor& B, bool upper
 at::Tensor linalg_solve_triangular_vulkan(const at::Tensor& A, const at::Tensor& B, bool upper, bool left, bool unitriangular)
 {
     TORCH_CHECK(A.dim() >= 2 && B.dim() >= 2, "linalg.solve_triangular: The input tensors must have at least 2 dimensions.");
-    return solve_triangular(A, B, upper, left, unitriangular);
+    // the result takes A's dtype, as on the CPU and in the meta function
+    return column_major(solve_triangular(A, B.to(A.scalar_type()), upper, left, unitriangular));
 }
 
 at::Tensor& linalg_solve_triangular_out_vulkan(const at::Tensor& A, const at::Tensor& B, bool upper, bool left, bool unitriangular, at::Tensor& out)
@@ -644,6 +785,8 @@ std::tuple<at::Tensor&, at::Tensor&> triangular_solve_out_vulkan(
     at::Tensor& M)
 {
     TORCH_CHECK(self.dim() >= 2 && A.dim() >= 2, "torch.triangular_solve: Expected b and A to have at least 2 dimensions");
+    check_out_dtype(X, at::promote_types(self.scalar_type(), A.scalar_type()));
+    check_out_dtype(M, at::promote_types(self.scalar_type(), A.scalar_type()));
     at::Tensor coefficient = transpose ? A.mT() : A;
     fill_out(X, solve_triangular_left(coefficient, self, transpose ? !upper : upper, unitriangular));
     auto [a, b] = broadcast_batches(A, self);
@@ -651,9 +794,66 @@ std::tuple<at::Tensor&, at::Tensor&> triangular_solve_out_vulkan(
     return std::forward_as_tuple(X, M);
 }
 
+at::ScalarType complex_compute_dtype(at::ScalarType t)
+{
+    return t == at::kComplexHalf ? at::kComplexFloat : t;
+}
+
+// LAPACK's zgeqrf, one column per step: beta = -sign(re(alpha)) |(alpha, x)|, tau = ((beta - re) / beta, -im / beta),
+// x /= alpha - beta, then H^H = I - conj(tau) v v^H on the trailing columns
+std::tuple<at::Tensor, at::Tensor> complex_geqrf(const at::Tensor& A)
+{
+    int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
+    at::ScalarType dtype = complex_compute_dtype(A.scalar_type());
+    at::Tensor q = A.to(dtype).reshape({batch_count(A), m, n}).clone();
+    int64_t batches = q.size(0);
+    at::Tensor tau = at::zeros({batches, k}, q.options());
+    for (int64_t j = 0; j < k; j++) {
+        at::Tensor alpha = q.select(1, j).select(1, j);
+        at::Tensor x = q.narrow(1, j + 1, m - j - 1).select(2, j);
+        at::Tensor xnorm = at::linalg_vector_norm(x, 2, {-1}, false);
+        at::Tensor re = at::real(alpha), im = at::imag(alpha);
+        at::Tensor beta = at::neg(at::copysign(at::sqrt(at::add(at::add(at::mul(re, re), at::mul(im, im)), at::mul(xnorm, xnorm))), re));
+        at::Tensor skip = at::logical_and(at::eq(xnorm, 0), at::eq(im, 0));
+        at::Tensor t = at::complex(at::div(at::sub(beta, re), beta), at::div(at::neg(im), beta));
+        at::Tensor scaled = at::div(x, at::sub(alpha, beta).unsqueeze(1));
+        at::Tensor v_tail = at::where(skip.unsqueeze(1), x, scaled);
+        t = at::where(skip, at::zeros_like(t), t);
+        q.narrow(1, j + 1, m - j - 1).select(2, j).copy_(v_tail);
+        q.select(1, j).select(1, j).copy_(at::where(skip, alpha, at::complex(beta, at::zeros_like(beta))));
+        tau.select(1, j).copy_(t);
+        if (j + 1 >= n) continue;
+        at::Tensor v = at::cat({at::ones({batches, 1}, q.options()), v_tail}, 1).unsqueeze(2);
+        at::Tensor c = q.narrow(1, j, m - j).narrow(2, j + 1, n - j - 1);
+        at::Tensor w = at::matmul(v.mH(), c);
+        c.sub_(at::mul(at::conj(t).view({batches, 1, 1}), at::matmul(v, w)).resolve_conj());
+    }
+    std::vector<int64_t> tau_shape = batch_shape(A);
+    tau_shape.push_back(k);
+    return std::make_tuple(q.view(A.sizes()).to(A.scalar_type()), tau.view(tau_shape).to(A.scalar_type()));
+}
+
+// the first `columns` columns of H_1 ... H_k (H_j = I - tau_j v_j v_j^H), applied backwards to the identity as zung2r does
+at::Tensor complex_householder_product(const at::Tensor& reflectors, const at::Tensor& tau, int64_t columns)
+{
+    int64_t m = reflectors.size(-2), k = tau.size(-1);
+    at::ScalarType dtype = complex_compute_dtype(reflectors.scalar_type());
+    at::Tensor r = reflectors.to(dtype).reshape({batch_count(reflectors), m, reflectors.size(-1)});
+    int64_t batches = r.size(0);
+    at::Tensor t = tau.to(dtype).reshape({batches, k});
+    at::Tensor q = at::eye(m, columns, r.options()).expand({batches, m, columns}).contiguous();
+    for (int64_t j = k - 1; j >= 0; j--) {
+        at::Tensor v = at::cat({at::ones({batches, 1}, r.options()), r.narrow(1, j + 1, m - j - 1).select(2, j)}, 1).unsqueeze(2);
+        at::Tensor rows = q.narrow(1, j, m - j);
+        rows.sub_(at::mul(t.select(1, j).view({batches, 1, 1}), at::matmul(v, at::matmul(v.mH(), rows))).resolve_conj());
+    }
+    return q;
+}
+
 std::tuple<at::Tensor, at::Tensor> geqrf_impl(const at::Tensor& A)
 {
     TORCH_CHECK(A.dim() >= 2, "torch.geqrf: input must have at least 2 dimensions.");
+    if (A.is_complex()) return complex_geqrf(A);
     at::ScalarType dtype = linalg_dtype(A, "torch.geqrf");
     int64_t m = A.size(-2), n = A.size(-1), k = std::min(m, n);
     std::vector<int64_t> batch = batch_shape(A);
@@ -675,13 +875,16 @@ std::tuple<at::Tensor&, at::Tensor&> geqrf_out_vulkan(const at::Tensor& self, at
 
 std::tuple<at::Tensor, at::Tensor> geqrf_vulkan(const at::Tensor& self)
 {
-    return geqrf_impl(self);
+    // column-major reflectors, as LAPACK's geqrf
+    auto [reflectors, tau] = geqrf_impl(self);
+    return std::make_tuple(reflectors.mT().contiguous().mT(), tau);
 }
 
 at::Tensor orgqr_impl(const at::Tensor& input, const at::Tensor& tau)
 {
     TORCH_CHECK(input.size(-2) >= input.size(-1), "torch.linalg.householder_product: input.shape[-2] must be greater than or equal to input.shape[-1]");
     TORCH_CHECK(input.size(-1) >= tau.size(-1), "torch.linalg.householder_product: input.shape[-1] must be greater than or equal to tau.shape[-1]");
+    if (input.is_complex()) return complex_householder_product(input, tau, input.size(-1)).view(input.sizes()).to(input.scalar_type());
     at::ScalarType dtype = linalg_dtype(input, "torch.linalg.householder_product");
     at::Tensor q = batched_copy(input, dtype);
     at::Tensor t = tau.to(dtype).reshape({q.size(0), tau.size(-1)}).contiguous();
@@ -693,7 +896,8 @@ at::Tensor orgqr_impl(const at::Tensor& input, const at::Tensor& tau)
 at::Tensor linalg_householder_product_vulkan(const at::Tensor& input, const at::Tensor& tau)
 {
     TORCH_CHECK(input.dim() >= 2, "torch.linalg.householder_product: input must have at least 2 dimensions.");
-    return orgqr_impl(input, tau);
+    // column-major matrices, as LAPACK's result (and the meta function's)
+    return orgqr_impl(input, tau).mT().contiguous().mT();
 }
 
 at::Tensor& linalg_householder_product_out_vulkan(const at::Tensor& input, const at::Tensor& tau, at::Tensor& out)
@@ -703,14 +907,40 @@ at::Tensor& linalg_householder_product_out_vulkan(const at::Tensor& input, const
 
 at::Tensor ormqr_vulkan(const at::Tensor& input, const at::Tensor& tau, const at::Tensor& other, bool left, bool transpose)
 {
-    TORCH_CHECK(input.dim() >= 2 && other.dim() >= 2, "torch.ormqr: input and other must have at least 2 dimensions.");
+    TORCH_CHECK(input.dim() >= 2, "torch.ormqr: input must have at least 2 dimensions.");
+    TORCH_CHECK(other.dim() >= 2, "torch.ormqr: other must have at least 2 dimensions.");
+    // torch's checks, in its order
+    int64_t side = left ? -2 : -1;
+    TORCH_CHECK(other.size(side) == input.size(-2), "torch.ormqr: other.shape[", side, "] must be equal to input.shape[-2]");
+    TORCH_CHECK(tau.size(-1) == std::min(other.size(side), input.size(-1)),
+        "torch.ormqr: tau.shape[-1] must be equal to min(other.shape[-2], input.shape[-1])");
+    TORCH_CHECK(input.dim() - tau.dim() == 1, "torch.ormqr: Expected tau to have one dimension less than input, but got tau.ndim equal to ",
+        tau.dim(), " and input.ndim is equal to ", input.dim());
+    TORCH_CHECK(input.dim() == other.dim(), "torch.ormqr: Expected other to have the same number of dimensions as input, but got other.ndim equal to ",
+        other.dim(), " and input.ndim is equal to ", input.dim());
+    if (input.dim() > 2) {
+        at::IntArrayRef batch = input.sizes().slice(0, input.dim() - 2);
+        TORCH_CHECK(tau.sizes().slice(0, tau.dim() - 1).equals(batch), "torch.ormqr: Expected batch dimensions of tau to be equal to input.shape[:-2], but got ",
+            tau.sizes().slice(0, tau.dim() - 1));
+        TORCH_CHECK(other.sizes().slice(0, other.dim() - 2).equals(batch), "torch.ormqr: Expected batch dimensions of other to be equal to input.shape[:-2], but got ",
+            other.sizes().slice(0, other.dim() - 2));
+    }
+    if (input.is_complex() || other.is_complex()) {
+        // through the explicit m x m Q
+        int64_t m = input.size(-2);
+        at::ScalarType dtype = at::promote_types(input.scalar_type(), other.scalar_type());
+        at::Tensor q = complex_householder_product(input, tau, m).view(with_matrix(batch_shape(input), m, m)).to(dtype);
+        at::Tensor op = transpose ? q.mH() : q;
+        at::Tensor c = other.to(dtype);
+        return column_major((left ? at::matmul(op, c) : at::matmul(c, op)).resolve_conj());
+    }
     at::ScalarType dtype = linalg_dtype(other, "torch.ormqr");
     int64_t batches = other.numel() / std::max<int64_t>(other.size(-1) * other.size(-2), 1);
     at::Tensor a = batched_copy(input.expand(with_matrix(batch_shape(other), input.size(-2), input.size(-1))), dtype);
     at::Tensor t = tau.to(dtype).unsqueeze(-2).expand(with_matrix(batch_shape(other), 1, tau.size(-1))).reshape({batches, tau.size(-1)}).contiguous();
     at::Tensor c = batched_copy(other, dtype);
     if (c.numel() > 0 && t.size(1) > 0) dispatch_householder_shader(HouseholderMode::ORMQR, a, t, c, left, transpose);
-    return c.view(other.sizes()).to(other.scalar_type());
+    return column_major(c.view(other.sizes()).to(other.scalar_type()));
 }
 
 at::Tensor& ormqr_out_vulkan(const at::Tensor& input, const at::Tensor& tau, const at::Tensor& other, bool left, bool transpose, at::Tensor& out)
@@ -805,12 +1035,32 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_svd_out_vulkan(
 // two-sided Jacobi
 std::tuple<at::Tensor&, at::Tensor&> linalg_eigh_out_vulkan(const at::Tensor& A, c10::string_view uplo, bool compute_v, at::Tensor& eigenvalues, at::Tensor& eigenvectors)
 {
+    check_out_dtype(eigenvalues, c10::toRealValueType(A.scalar_type()));
+    if (compute_v) check_out_dtype(eigenvectors, A.scalar_type());
     check_square(A, "linalg.eigh");
     TORCH_CHECK(uplo == "L" || uplo == "U" || uplo == "l" || uplo == "u", "Expected UPLO argument to be 'L' or 'U', but got ", uplo);
-    at::ScalarType dtype = linalg_dtype(A, "linalg.eigh");
+    at::ScalarType dtype = A.is_complex() ? at::kFloat : linalg_dtype(A, "linalg.eigh");  // complex goes through its real embedding
     int64_t n = A.size(-1);
     std::vector<int64_t> batch = batch_shape(A);
     bool lower = uplo == "L" || uplo == "l";
+    if (A.is_complex()) {
+        // the Hermitian matrix's real embedding is symmetric with every eigenvalue twice: every other eigenpair, its
+        // vector [x; y] read as x + iy
+        int64_t m = A.size(-1);
+        at::ScalarType dtype = A.scalar_type() == at::kComplexHalf ? at::kComplexFloat : A.scalar_type();
+        at::Tensor h = lower ? at::add(at::tril(A), at::tril(A, -1).mH()) : at::add(at::triu(A), at::triu(A, 1).mH());
+        torchvulkan::ComplexParts hp = torchvulkan::complex_parts(h.resolve_conj().to(dtype));
+        hp.im = at::sub(hp.im, at::diag_embed(at::diagonal(hp.im, 0, -2, -1)));  // a Hermitian diagonal is real (LAPACK ignores its imaginary part)
+        auto [w, vectors] = at::linalg_eigh(real_embedding(hp));
+        fill_out(eigenvalues, w.slice(-1, 0, 2 * m, 2).to(c10::toRealValueType(A.scalar_type())));
+        if (compute_v) {
+            at::Tensor v = vectors.slice(-1, 0, 2 * m, 2);
+            fill_out(eigenvectors, torchvulkan::complex_from({v.narrow(-2, 0, m), v.narrow(-2, m, m)}, dtype).to(A.scalar_type()));
+        } else {
+            fill_out(eigenvectors, at::empty({0}, A.options()));
+        }
+        return std::forward_as_tuple(eigenvalues, eigenvectors);
+    }
     at::Tensor symmetric = lower ? at::add(at::tril(A), at::tril(A, -1).mT()) : at::add(at::triu(A), at::triu(A, 1).mT());
 
     at::Tensor a = batched_copy(symmetric, dtype);
@@ -876,6 +1126,13 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_lstsq_out_
     at::Tensor& singular_values)
 {
     TORCH_CHECK(self.dim() >= 2, "torch.linalg.lstsq: input must have at least 2 dimensions.");
+    TORCH_CHECK(b.dim() >= 1, "torch.linalg.lstsq: other must have at least 1 dimension.");
+    int64_t dim_diff = self.dim() - b.dim();
+    TORCH_CHECK(dim_diff >= 0 && dim_diff <= 1,
+        "torch.linalg.lstsq: input.dim() must be greater or equal to other.dim() and (input.dim() - other.dim()) <= 1");
+    bool vector_rhs = b.dim() == 1 || (dim_diff == 1 && b.sizes().equals(self.sizes().slice(0, self.dim() - 1)));
+    TORCH_CHECK(self.size(-2) == (vector_rhs ? b.size(-1) : b.size(-2)),
+        vector_rhs ? "torch.linalg.lstsq: input.size(-2) should match other.size(-1)" : "torch.linalg.lstsq: input.size(-2) should match other.size(-2)");
     c10::string_view driver = driver_opt.value_or("gelsy");
     TORCH_CHECK(driver == "gels" || driver == "gelsy" || driver == "gelsd" || driver == "gelss",
         "torch.linalg.lstsq: parameter `driver` should be one of (gels, gelsy, gelsd, gelss)"
@@ -891,9 +1148,10 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_lstsq_out_
         at::Tensor qtb = ormqr_vulkan(qr, tau, bb, /*left=*/true, /*transpose=*/true).narrow(-2, 0, n);
         x = solve_triangular_left(qr.narrow(-2, 0, n), qtb, /*upper=*/true, /*unit=*/false);
     } else {
-        auto [qr, tau] = geqrf_impl(a.mT());
+        // A = R^H Q^H from the QR of A^H (conjugate transposes, which complex needs)
+        auto [qr, tau] = geqrf_impl(a.mH().resolve_conj());
         at::Tensor r = qr.narrow(-2, 0, m);
-        at::Tensor y = solve_triangular_left(r.mT(), bb, /*upper=*/false, /*unit=*/false);
+        at::Tensor y = solve_triangular_left(r.mH(), bb, /*upper=*/false, /*unit=*/false);
         at::Tensor padded = at::cat({y, at::zeros(with_matrix(batch_shape(y), n - m, y.size(-1)), y.options())}, -2);
         x = ormqr_vulkan(qr, tau, padded, /*left=*/true, /*transpose=*/false);
     }
@@ -902,11 +1160,11 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_lstsq_out_
     bool needs_svd = driver != "gels";
     at::Tensor sv = needs_svd ? std::get<1>(svd_impl(a, false, false)) : at::Tensor();
     if (driver == "gelsd" || driver == "gelss") fill_out(singular_values, sv);
-    else fill_out(singular_values, at::empty({0}, self.options()));
+    else fill_out(singular_values, at::empty({0}, self.options().dtype(c10::toRealValueType(self.scalar_type()))));
 
     if (needs_svd) {
         double eps = std::numeric_limits<float>::epsilon();
-        if (self.scalar_type() == at::kDouble) eps = std::numeric_limits<double>::epsilon();
+        if (self.scalar_type() == at::kDouble || self.scalar_type() == at::kComplexDouble) eps = std::numeric_limits<double>::epsilon();
         double threshold = rcond.has_value() && *rcond > 0 ? *rcond : eps * static_cast<double>(std::max(m, n));
         at::Tensor largest = sv.numel() > 0 ? std::get<0>(at::max(sv, -1, /*keepdim=*/true)) : sv;
         fill_out(rank, sv.numel() > 0 ? at::sum(at::gt(sv, at::mul(largest, threshold)), -1, false, at::kLong) : at::zeros(batch, self.options().dtype(at::kLong)));
@@ -915,8 +1173,9 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&> linalg_lstsq_out_
     }
 
     bool full_rank = needs_svd ? (rank.numel() == 0 || at::eq(rank, std::min(m, n)).all().item<bool>()) : true;
-    if (m > n && driver != "gelsy" && full_rank) fill_out(residuals, at::sum(at::square(at::sub(at::matmul(a, x), bb)), -2));
-    else fill_out(residuals, at::empty({0}, self.options()));
+    at::ScalarType real = c10::toRealValueType(self.scalar_type());
+    if (m > n && driver != "gelsy" && full_rank) fill_out(residuals, at::sum(at::square(at::abs(at::sub(at::matmul(a, x), bb))), -2));
+    else fill_out(residuals, at::empty({0}, self.options().dtype(real)));
 
     fill_out(solution, vector_case ? x.squeeze(-1) : x);
     return std::forward_as_tuple(solution, residuals, rank, singular_values);
@@ -1026,7 +1285,8 @@ at::Tensor linalg_matrix_exp_impl(const at::Tensor& self, bool is_float);
 at::Tensor linalg_matrix_exp_vulkan(const at::Tensor& self)
 {
     check_square(self, "linalg.matrix_exp");
-    TORCH_CHECK(at::isFloatingType(self.scalar_type()), "linalg.matrix_exp: Expected a floating point or complex tensor as input. Got ", self.scalar_type());
+    TORCH_CHECK(at::isFloatingType(self.scalar_type()) || at::isComplexType(self.scalar_type()),
+                "linalg.matrix_exp: Expected a floating point or complex tensor as input. Got ", self.scalar_type());
     int64_t n = self.size(-1);
     if (n == 0) return self.clone();
     if (n == 1) return at::exp(self);
@@ -1034,7 +1294,9 @@ at::Tensor linalg_matrix_exp_vulkan(const at::Tensor& self)
     if (is_low_prec(self.scalar_type())) {
         return linalg_matrix_exp_impl(self.to(at::kFloat), true).to(self.scalar_type());
     }
-    return linalg_matrix_exp_impl(self, self.scalar_type() != at::kDouble);
+    if (self.scalar_type() == at::kComplexHalf) return linalg_matrix_exp_impl(self.to(at::kComplexFloat), true).to(self.scalar_type());
+    bool double_precision = self.scalar_type() == at::kDouble || self.scalar_type() == at::kComplexDouble;
+    return linalg_matrix_exp_impl(self, !double_precision);
 }
 
 at::Tensor linalg_matrix_exp_impl(const at::Tensor& self, bool is_float)
@@ -1060,6 +1322,9 @@ at::Tensor linalg_matrix_exp_impl(const at::Tensor& self, bool is_float)
 
 at::Tensor& linalg_cross_out_vulkan(const at::Tensor& self, const at::Tensor& other, int64_t dim, at::Tensor& out)
 {
+    at::assert_no_internal_overlap(out);
+    at::assert_no_overlap(out, self);
+    at::assert_no_overlap(out, other);
     TORCH_CHECK(self.dim() == other.dim(), "linalg.cross: inputs must have the same number of dimensions.");
     std::vector<int64_t> shape = at::infer_size(self.sizes(), other.sizes());
     int64_t d = c10::maybe_wrap_dim(dim, static_cast<int64_t>(shape.size()));
@@ -1080,11 +1345,12 @@ at::Tensor linalg_pinv_vulkan(const at::Tensor& self, const c10::optional<at::Te
 
     at::Tensor U, S, Vh;
     if (hermitian) {
-        at::Tensor values = at::empty({0}, self.options()), vectors = at::empty({0}, self.options());
+        at::Tensor values = at::empty({0}, self.options().dtype(c10::toRealValueType(self.scalar_type())));
+        at::Tensor vectors = at::empty({0}, self.options());
         linalg_eigh_out_vulkan(self, "L", true, values, vectors);
         S = at::abs(values);
-        U = at::mul(vectors, at::sign(values).unsqueeze(-2));
-        Vh = vectors.mT();
+        U = at::mul(vectors, at::sign(values).unsqueeze(-2).to(vectors.scalar_type()));
+        Vh = vectors.mH();
     } else {
         std::tie(U, S, Vh) = svd_impl(self, false, true);
     }
@@ -1096,17 +1362,19 @@ at::Tensor linalg_pinv_vulkan(const at::Tensor& self, const c10::optional<at::Te
     at::Tensor threshold = at::mul(largest, r);
     if (has_atol) threshold = at::maximum(threshold, atol->unsqueeze(-1));
     at::Tensor inverse = at::where(at::gt(S, threshold), at::reciprocal(S), at::zeros_like(S));
-    return at::matmul(at::mul(Vh.mT(), inverse.unsqueeze(-2)), U.mT());
+    // V S^+ U^H: conjugate transposes for complex input
+    return at::matmul(at::mul(Vh.mH().resolve_conj(), inverse.unsqueeze(-2).to(Vh.scalar_type())), U.mH().resolve_conj());
 }
 
 at::Tensor& linalg_pinv_out_vulkan(const at::Tensor& self, const c10::optional<at::Tensor>& atol, const c10::optional<at::Tensor>& rtol, bool hermitian, at::Tensor& out)
 {
+    check_castable("linalg.pinv", "result", out, self.scalar_type());
     return fill_out(out, linalg_pinv_vulkan(self, atol, rtol, hermitian));
 }
 
 at::Tensor to_complex(const at::Tensor& real, const at::Tensor& imag, at::ScalarType dtype)
 {
-    return at::view_as_complex(at::stack({real, imag}, -1).contiguous()).to(dtype);
+    return unview(at::view_as_complex(at::stack({real, imag}, -1).contiguous())).to(dtype);
 }
 
 // JAMA's orthes and hqr2; vectors normalized as LAPACK's geev: unit length, largest component real
@@ -1177,9 +1445,24 @@ at::Tensor& linalg_eigvals_out_vulkan(const at::Tensor& self, at::Tensor& out)
     return fill_out(out, linalg_eigvals_vulkan(self));
 }
 
+// the polar decomposition A = U H from the SVD A = W S V^H: U = W V^H, H = V S V^H
+std::tuple<at::Tensor&, at::Tensor&> linalg_polar_out_vulkan(const at::Tensor& A, at::Tensor& U, at::Tensor& H)
+{
+    TORCH_CHECK(A.dim() >= 2, "linalg.polar: The input tensor A must have at least 2 dimensions.");
+    TORCH_CHECK(A.size(-2) >= A.size(-1), "linalg.polar: input must have at least as many rows as columns, but got ",
+        A.size(-2), " by ", A.size(-1), " matrices");
+    auto [w, s, vh] = svd_impl(A, /*full_matrices=*/false, /*compute_uv=*/true);
+    at::Tensor v = vh.mH();
+    fill_out(U, at::matmul(w, vh));
+    fill_out(H, at::matmul(at::mul(v, s.unsqueeze(-2).to(v.scalar_type())), vh).resolve_conj());
+    return std::forward_as_tuple(U, H);
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("linalg_matrix_sqrth", TORCH_FN(at::native::linalg_matrix_sqrth));
+    m.impl("linalg_polar.out", &linalg_polar_out_vulkan);
     m.impl("linalg_eig", &linalg_eig_vulkan);
     m.impl("linalg_eig.out", &linalg_eig_out_vulkan);
     m.impl("_linalg_eigvals", &linalg_eigvals_vulkan);
@@ -1189,6 +1472,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("lu_unpack", &lu_unpack_vulkan);
     m.impl("lu_unpack.out", &lu_unpack_out_vulkan);
     m.impl("linalg_lu_solve.out", &linalg_lu_solve_out_vulkan);
+    m.impl("linalg_lu_solve", &linalg_lu_solve_vulkan);
     m.impl("_linalg_solve_ex.result", &linalg_solve_ex_out_vulkan);
     m.impl("linalg_inv_ex.inverse", &linalg_inv_ex_out_vulkan);
     m.impl("_linalg_det.result", &linalg_det_out_vulkan);
