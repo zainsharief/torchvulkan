@@ -36,7 +36,7 @@ at::Tensor as_strided_vulkan(
     // kernels read through raw device addresses, so a view reaching past its storage would read other memory
     TORCH_CHECK(concrete_sizes.size() == concrete_strides.size(), "mismatch in length of strides and shape");
     for (int64_t stride : concrete_strides) {
-        TORCH_CHECK(stride >= 0, "as_strided: Negative strides are not supported at the moment, got strides: ", concrete_strides);
+        TORCH_CHECK(stride >= 0, "as_strided: Negative strides are not supported at the moment, got strides: ", at::IntArrayRef(concrete_strides));
     }
     TORCH_CHECK(offset >= 0, "Tensor: invalid storage offset ", offset);
     at::detail::check_size_nonnegative(concrete_sizes);
@@ -120,7 +120,7 @@ at::Tensor transpose_int_vulkan(const at::Tensor& self, int64_t dim0, int64_t di
 
 at::Tensor t_vulkan(const at::Tensor& self)
 {
-    TORCH_CHECK(self.dim() <= 2, "torchvulkan [ERROR]: t() expects a tensor with <= 2 dimensions.");
+    TORCH_CHECK(self.dim() <= 2, "t() expects a tensor with <= 2 dimensions, but self is ", self.dim(), "D");
     if (self.dim() < 2) return self.alias();
     return transpose_int_vulkan(self, 0, 1);
 }

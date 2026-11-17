@@ -16,8 +16,9 @@ at::Tensor flip_vulkan(const at::Tensor& self, at::IntArrayRef dims)
 {
     std::vector<int64_t> wrapped;
     for (int64_t d : dims) {
-        int64_t w = c10::maybe_wrap_dim(d, self.dim());
+        int64_t w = c10::maybe_wrap_dim(d, self.dim(), /*wrap_scalar=*/true);
         TORCH_CHECK(std::find(wrapped.begin(), wrapped.end(), w) == wrapped.end(), "dims has duplicates, original flip dims size=", dims.size());
+        if (self.dim() == 0) continue;
         wrapped.push_back(w);
     }
     at::Tensor result = self;
@@ -72,7 +73,10 @@ std::vector<int64_t> pad_source(int64_t input, int64_t before, int64_t after, bo
 void check_pad(const at::Tensor& self, at::IntArrayRef padding, int64_t dims, bool reflect, const char* name)
 {
     TORCH_CHECK(static_cast<int64_t>(padding.size()) == 2 * dims, name, ": padding size is expected to be ", 2 * dims, ", but got: ", padding.size());
-    TORCH_CHECK(self.dim() == dims + 1 || self.dim() == dims + 2, name, ": Expected ", dims + 1, "D or ", dims + 2,
+    // only the batch dimension (of a batched input) may be empty
+    bool nonzero_rest = true;
+    for (int64_t d = self.dim() == dims + 2 ? 1 : 0; d < self.dim(); d++) nonzero_rest = nonzero_rest && self.size(d) != 0;
+    TORCH_CHECK((self.dim() == dims + 1 || self.dim() == dims + 2) && nonzero_rest, "Expected ", dims + 1, "D or ", dims + 2,
         "D (batch mode) tensor with possibly 0 batch size and other non-zero dimensions for input, but got: ", self.sizes()
     );
     for (int64_t k = 0; k < dims; k++) {
@@ -96,11 +100,14 @@ at::Tensor pad_forward(const at::Tensor& self, at::IntArrayRef padding, int64_t 
         int64_t d = self.dim() - 1 - k;
         result = at::index_select(result, d, long_tensor(pad_source(self.size(d), padding[2 * k], padding[2 * k + 1], reflect), self));
     }
-    return result;
+    return result.contiguous(self.suggest_memory_format());  // channels_last in, channels_last out
 }
 
 at::Tensor pad_backward(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef padding, int64_t dims, bool reflect)
 {
+    int64_t channel = self.dim() - dims - 1;
+    TORCH_CHECK(grad_output.dim() == self.dim() && grad_output.size(channel) == self.size(channel), "grad_output channel unexpected. Expected: ",
+        self.size(channel), ", Got: ", grad_output.dim() == self.dim() ? grad_output.size(channel) : -1);
     at::Tensor grad = grad_output;
     for (int64_t k = dims - 1; k >= 0; k--) {
         int64_t d = self.dim() - 1 - k;
@@ -109,8 +116,15 @@ at::Tensor pad_backward(const at::Tensor& grad_output, const at::Tensor& self, a
         at::Tensor source = long_tensor(pad_source(self.size(d), padding[2 * k], padding[2 * k + 1], reflect), self);
         grad = at::zeros(shape, grad.options()).index_add_(d, source, grad);
     }
-    return grad;
+    return grad.contiguous(self.suggest_memory_format());
 }
+
+// functional variants, so the result keeps the input's memory format (torch's wrapper allocates a contiguous out)
+at::Tensor reflection_pad1d_vulkan(const at::Tensor& self, at::IntArrayRef padding) { return pad_forward(self, padding, 1, true, "reflection_pad1d"); }
+at::Tensor reflection_pad3d_vulkan(const at::Tensor& self, at::IntArrayRef padding) { return pad_forward(self, padding, 3, true, "reflection_pad3d"); }
+at::Tensor replication_pad1d_vulkan(const at::Tensor& self, at::IntArrayRef padding) { return pad_forward(self, padding, 1, false, "replication_pad1d"); }
+at::Tensor replication_pad2d_vulkan(const at::Tensor& self, at::IntArrayRef padding) { return pad_forward(self, padding, 2, false, "replication_pad2d"); }
+at::Tensor replication_pad3d_vulkan(const at::Tensor& self, at::IntArrayRef padding) { return pad_forward(self, padding, 3, false, "replication_pad3d"); }
 
 at::Tensor& reflection_pad1d_out_vulkan(const at::Tensor& self, at::IntArrayRef padding, at::Tensor& out)
 {
@@ -146,6 +160,10 @@ at::Tensor& replication_pad3d_out_vulkan(const at::Tensor& self, at::IntArrayRef
 {
     return fill_out(out, pad_forward(self, padding, 3, false, "replication_pad3d"));
 }
+
+at::Tensor reflection_pad1d_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef padding) { return pad_backward(grad_output, self, padding, 1, true); }
+at::Tensor reflection_pad3d_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef padding) { return pad_backward(grad_output, self, padding, 3, true); }
+at::Tensor replication_pad1d_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef padding) { return pad_backward(grad_output, self, padding, 1, false); }
 
 at::Tensor& reflection_pad1d_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, at::IntArrayRef padding, at::Tensor& grad_input)
 {
@@ -208,6 +226,8 @@ at::Tensor channel_shuffle_vulkan(const at::Tensor& self, c10::SymInt groups_)
 at::Tensor unfold_backward_vulkan(const at::Tensor& grad_in, c10::SymIntArrayRef input_sizes_, int64_t dim, int64_t size, int64_t step)
 {
     std::vector<int64_t> input_sizes;
+    TORCH_CHECK_VALUE(step > 0, "step is ", step, " but must be > 0");
+    TORCH_CHECK(size >= 0, "size is ", size, " but must be >= 0");
     for (const c10::SymInt& s : input_sizes_) input_sizes.push_back(s.guard_int(__FILE__, __LINE__));
     int64_t d = c10::maybe_wrap_dim(dim, static_cast<int64_t>(input_sizes.size()), /*wrap_scalar=*/true);
     at::Tensor grad_input = at::zeros(input_sizes, grad_in.options());
@@ -220,6 +240,10 @@ at::Tensor unfold_backward_vulkan(const at::Tensor& grad_in, c10::SymIntArrayRef
     merged[d] = windows * size;
     merged.erase(merged.begin() + d + 1);
     stacked = stacked.reshape(merged);
+    // the CPU broadcasts grad over the other dimensions (istft passes a batch of 1)
+    std::vector<int64_t> target = input_sizes;
+    target[d] = windows * size;
+    stacked = stacked.expand(target);
 
     at::Tensor starts = at::mul(at::arange(windows, grad_in.options().dtype(at::kLong)), step).view({windows, 1});
     at::Tensor positions = at::add(starts, at::arange(size, grad_in.options().dtype(at::kLong)).view({1, size})).reshape({-1});
@@ -245,13 +269,21 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("tril.out", &tril_out_vulkan);
     m.impl("triu.out", &triu_out_vulkan);
     m.impl("reflection_pad1d.out", &reflection_pad1d_out_vulkan);
+    m.impl("reflection_pad1d", &reflection_pad1d_vulkan);
+    m.impl("reflection_pad3d", &reflection_pad3d_vulkan);
+    m.impl("replication_pad1d", &replication_pad1d_vulkan);
+    m.impl("replication_pad2d", &replication_pad2d_vulkan);
+    m.impl("replication_pad3d", &replication_pad3d_vulkan);
     m.impl("reflection_pad2d", &reflection_pad2d_vulkan);
     m.impl("reflection_pad2d.out", &reflection_pad2d_out_vulkan);
     m.impl("reflection_pad3d.out", &reflection_pad3d_out_vulkan);
     m.impl("replication_pad1d.out", &replication_pad1d_out_vulkan);
     m.impl("replication_pad2d.out", &replication_pad2d_out_vulkan);
     m.impl("replication_pad3d.out", &replication_pad3d_out_vulkan);
+    m.impl("reflection_pad1d_backward", &reflection_pad1d_backward_vulkan);
     m.impl("reflection_pad1d_backward.grad_input", &reflection_pad1d_backward_out_vulkan);
+    m.impl("reflection_pad3d_backward", &reflection_pad3d_backward_vulkan);
+    m.impl("replication_pad1d_backward", &replication_pad1d_backward_vulkan);
     m.impl("reflection_pad2d_backward", &reflection_pad2d_backward_vulkan);
     m.impl("reflection_pad2d_backward.grad_input", &reflection_pad2d_backward_out_vulkan);
     m.impl("reflection_pad3d_backward.grad_input", &reflection_pad3d_backward_out_vulkan);

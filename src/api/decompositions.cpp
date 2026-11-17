@@ -1,4 +1,8 @@
 #include <torch/extension.h>
+#include <ATen/native/Resize.h>
+#include <ATen/native/TypeProperties.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/ops/addr_native.h>
 #include <ATen/SDPBackend.h>
 #include <ATen/WrapDimUtils.h>
 #include <ATen/ops/_native_multi_head_attention_native.h>
@@ -255,25 +259,76 @@ at::Tensor& heaviside_out_vulkan(const at::Tensor& self, const at::Tensor& value
     return out;
 }
 
-at::Tensor& cat_out_vulkan(const at::ITensorListRef& tensors, int64_t dim, at::Tensor& out)
+// torch's cat checks and output shape (legacy empty 1-D inputs are skipped), then each input copied into its slice
+at::Tensor& cat_out_vulkan(const at::ITensorListRef& tensors_ref, int64_t dim, at::Tensor& out)
 {
-    int64_t d = c10::maybe_wrap_dim(dim, out.dim());
+    std::vector<at::Tensor> tensors(tensors_ref.begin(), tensors_ref.end());
+    TORCH_CHECK(!tensors.empty(), "torch.cat(): expected a non-empty list of Tensors");
+    auto skipped = [](const at::Tensor& t) { return t.dim() == 1 && t.size(0) == 0; };
+    at::native::ResultTypeState state{};
+    const at::Tensor* ref = nullptr;
+    for (const at::Tensor& t : tensors) {
+        state = at::native::update_result_type_state(t, state);
+        TORCH_CHECK(t.device() == out.device(), "Expected all tensors to be on the same device, but found at least two devices, ",
+            out.device(), " and ", t.device(), "!");
+        if (ref == nullptr && !skipped(t)) ref = &t;
+    }
+    at::ScalarType dtype = at::native::result_type(state);
+    if (!at::canCast(dtype, out.scalar_type())) {
+        throw c10::TypeError({__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
+            c10::str("torch.cat(): input types can't be cast to the desired output type ", out.scalar_type()));
+    }
+    if (ref == nullptr) {
+        at::native::resize_output(out, {0});
+        return out;
+    }
+    int64_t d = c10::maybe_wrap_dim(dim, ref->dim());
+    std::vector<int64_t> shape = ref->sizes().vec();
+    shape[d] = 0;
+    for (size_t k = 0; k < tensors.size(); k++) {
+        const at::Tensor& t = tensors[k];
+        at::assert_no_overlap(out, t);  // a skipped input too: out may be that very tensor
+        if (skipped(t)) continue;
+        TORCH_CHECK(t.dim() == ref->dim(), "Tensors must have same number of dimensions: got ", ref->dim(), " and ", t.dim());
+        for (int64_t i = 0; i < t.dim(); i++) {
+            TORCH_CHECK(i == d || t.size(i) == ref->size(i), "Sizes of tensors must match except in dimension ", d, ". Expected size ",
+                ref->size(i), " but got size ", t.size(i), " for tensor number ", k, " in the list.");
+        }
+        shape[d] += t.size(d);
+    }
+    // a resized out takes the inputs' memory format when they all share one, as torch's cat
+    if (at::native::resize_output_check(out, shape)) {
+        at::native::resize_output(out, shape);
+        std::optional<at::MemoryFormat> format;
+        for (const at::Tensor& t : tensors) {
+            if (skipped(t)) continue;
+            at::MemoryFormat f = t.suggest_memory_format();
+            if (format.has_value() && *format != f) {
+                format = at::MemoryFormat::Contiguous;
+                break;
+            }
+            format = f;
+        }
+        if (format.has_value() && *format != at::MemoryFormat::Contiguous) out.resize_(shape, *format);
+    }
+    at::assert_no_internal_overlap(out);
     int64_t offset = 0;
     for (const at::Tensor& t : tensors) {
-        if (t.numel() == 0) continue;
-        int64_t n = t.size(d);
-        out.narrow(d, offset, n).copy_(t);
-        offset += n;
+        if (skipped(t) || t.size(d) == 0) continue;
+        out.narrow(d, offset, t.size(d)).copy_(t);
+        offset += t.size(d);
     }
     return out;
 }
 
 at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntArrayRef dims)
 {
-    if (dims.empty()) {
+    TORCH_CHECK(!shifts.empty(), "`shifts` required");
+    if (dims.empty() && shifts.size() == 1) {
         at::Tensor flat = self.contiguous().view({-1});
-        return roll_vulkan(flat, shifts, {0}).view(self.sizes());
+        return unview(roll_vulkan(flat, shifts, {0}).view(self.sizes()));
     }
+    TORCH_CHECK(shifts.size() == dims.size(), "shifts and dimensions must align. shifts: ", shifts.size(), ", dims:", dims.size());
     at::Tensor result = self;
     for (size_t i = 0; i < dims.size(); i++) {
         int64_t d = c10::maybe_wrap_dim(dims[i], result.dim());
@@ -285,7 +340,7 @@ at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntAr
         at::Tensor back = result.narrow(d, 0, size - shift);
         result = at::cat({front, back}, d);
     }
-    return result;
+    return result.is_same(self) ? self.clone() : result;
 }
 
 at::Tensor silu_vulkan(const at::Tensor& self)
@@ -501,6 +556,15 @@ std::tuple<at::Tensor, at::Tensor> std_mean_correction_vulkan(
     return std::make_tuple(at::sqrt(var), mean);
 }
 
+// as torch's arange/linspace/logspace/range out=: an out of the right numel keeps its shape (and its strides, when it's a
+// view), filled in its logical order; otherwise it's resized to 1-D
+at::Tensor& write_sequence(at::Tensor& out, const at::Tensor& values)
+{
+    if (out.numel() != values.numel()) out.resize_(values.sizes());
+    out.copy_(values.view(out.sizes()));
+    return out;
+}
+
 at::Tensor& arange_start_out_vulkan(
     const at::Scalar& start, 
     const at::Scalar& end, 
@@ -508,9 +572,12 @@ at::Tensor& arange_start_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::arange(start, end, step, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    if (out.numel() > 0 && out.numel() != cpu.numel()) {
+        TORCH_WARN("The number of elements in the out tensor of shape ", out.sizes(), " is ", out.numel(),
+            " which does not match the computed number of elements ", cpu.numel(), ". Note that this may occur as a result of rounding "
+            "error. The out tensor will be resized to a tensor of shape (", cpu.numel(), ",).");
+    }
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& linspace_out_vulkan(
@@ -520,9 +587,7 @@ at::Tensor& linspace_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::linspace(start, end, steps, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& logspace_out_vulkan(
@@ -533,9 +598,7 @@ at::Tensor& logspace_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::logspace(start, end, steps, base, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& eye_m_out_vulkan(
@@ -1116,9 +1179,7 @@ at::Tensor& narrow_copy_out_vulkan(const at::Tensor& self, int64_t dim, int64_t 
 at::Tensor& range_out_vulkan(const at::Scalar& start, const at::Scalar& end, const at::Scalar& step, at::Tensor& out)
 {
     at::Tensor cpu = at::range(start, end, step, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 bool is_set_to_vulkan(const at::Tensor& self, const at::Tensor& src)

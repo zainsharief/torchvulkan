@@ -709,7 +709,23 @@ at::Tensor& addcdiv_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const a
 }
 
 // as torch computes it: from whichever end is nearer, so weight 1 gives exactly `end`
+// the CPU's lerp iterator puts self first, so a dense self of the result's shape sets its layout
+at::Tensor in_layout_of(const at::Tensor& self, const at::Tensor& result)
+{
+    if (self.sizes() != result.sizes() || !self.is_non_overlapping_and_dense() || self.strides() == result.strides()) return result;
+    return at::empty_strided(self.sizes(), self.strides(), result.options()).copy_(result);
+}
+
+at::Tensor lerp_scalar_layout(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight);
+
 at::Tensor lerp_scalar_vulkan(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+    return in_layout_of(self, lerp_scalar_layout(self, end, weight));
+}
+
+at::Tensor lerp_scalar_layout(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
+    if (is_low_prec(self.scalar_type())) {
+        return lerp_scalar_vulkan(self.to(at::kFloat), end.to(at::kFloat), weight).to(self.scalar_type());  // in float32, as the CPU
+    }
     at::Tensor diff = subtract_vulkan(end, self, (int)1);
     
     if (weight.isComplex()) 
@@ -720,7 +736,7 @@ at::Tensor lerp_scalar_vulkan(const at::Tensor& self, const at::Tensor& end, con
     }
 
     double w = weight.toDouble();
-    if (w < 0.5) return torchvulkan::add_vulkan(self, diff, weight);
+    if (std::abs(w) < 0.5) return torchvulkan::add_vulkan(self, diff, weight);
     return subtract_vulkan(end, diff, 1.0 - w);
 }
 
@@ -758,7 +774,8 @@ at::Tensor rsub_tensor_vulkan(const at::Tensor& self, const at::Tensor& other, c
 at::Tensor lerp_tensor_vulkan(const at::Tensor& self, const at::Tensor& end, const at::Tensor& weight) {
     at::ScalarType dtype = self.scalar_type();
     TORCH_CHECK(dtype == end.scalar_type(), "expected dtype ", dtype, " for `end` but got dtype ", end.scalar_type());
-    TORCH_CHECK(dtype == weight.scalar_type(), "expected dtype ", dtype, " for `weight` but got dtype ", weight.scalar_type());
+    // a 0-dim weight is promoted like a scalar
+    TORCH_CHECK(weight.dim() == 0 || dtype == weight.scalar_type(), "expected dtype ", dtype, " for `weight` but got dtype ", weight.scalar_type());
     bool low = is_low_prec(dtype);
     at::Tensor s = low ? self.to(at::kFloat) : self;
     at::Tensor e = low ? end.to(at::kFloat) : end;
@@ -767,7 +784,7 @@ at::Tensor lerp_tensor_vulkan(const at::Tensor& self, const at::Tensor& end, con
     at::Tensor near_self = torchvulkan::add_vulkan(s, torchvulkan::multiply_vulkan(w, diff), (int)1);
     at::Tensor near_end = subtract_vulkan(e, torchvulkan::multiply_vulkan(diff, rsub_scalar_vulkan(w, 1, 1)), (int)1);
     at::Tensor r = at::where(at::lt(at::abs(w), 0.5), near_self, near_end);
-    return low ? r.to(dtype) : r;
+    return in_layout_of(self, low ? r.to(dtype) : r);
 }
 
 at::Tensor& lerp_tensor_vulkan_out(const at::Tensor& self, const at::Tensor& end, const at::Tensor& weight, at::Tensor& out) {
