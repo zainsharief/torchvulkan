@@ -119,6 +119,48 @@ at::Tensor scatter_into(const at::Tensor& self, const at::Tensor& keys, const at
                         bool in_place = false)
 {
     at::ScalarType dtype = self.scalar_type();
+    // complex sums and means are linear: each of the real and imaginary planes on its own
+    if (self.is_complex() && (mode == ScatterMode::SUM || mode == ScatterMode::MEAN)) {
+        torchvulkan::ComplexParts a = torchvulkan::complex_parts(self), b = torchvulkan::complex_parts(src.to(dtype));
+        at::Tensor re = scatter_into(a.re.contiguous(), keys, b.re.contiguous(), mode, include_self);
+        at::Tensor im = scatter_into(a.im.contiguous(), keys, b.im.contiguous(), mode, include_self);
+        at::Tensor result = torchvulkan::complex_from({re, im}, dtype);
+        return in_place ? const_cast<at::Tensor&>(self).copy_(result) : result;
+    }
+    // complex products as the CPU's: each key's values multiplied in source order, in rounds of one value per key
+    // (the r-th value of every key at once, so no round has a duplicate key)
+    if (self.is_complex() && mode == ScatterMode::PROD) {
+        at::Tensor result = self.contiguous().clone().view({-1});
+        at::Tensor flat_keys = keys.reshape({-1}).to(at::kLong);
+        at::Tensor values = src.to(dtype).reshape({-1});
+        if (flat_keys.numel() == 0) return result.view(self.sizes());
+        auto [sorted, order] = at::sort(flat_keys, /*stable=*/true, /*dim=*/0, /*descending=*/false);
+        int64_t n = sorted.numel();
+        at::Tensor position = at::arange(n, sorted.options());
+        at::Tensor starts = at::ones({n}, sorted.options().dtype(at::kBool));
+        if (n > 1) starts.narrow(0, 1, n - 1).copy_(at::ne(sorted.narrow(0, 1, n - 1), sorted.narrow(0, 0, n - 1)));
+        at::Tensor rank = at::sub(position, std::get<0>(at::cummax(at::where(starts, position, at::zeros_like(position)), 0)));
+        int64_t rounds = at::amax(rank).item<int64_t>() + 1;
+        for (int64_t r = 0; r < rounds; r++) {
+            at::Tensor pick = at::nonzero(at::eq(rank, r)).squeeze(1);
+            at::Tensor round_keys = at::index_select(sorted, 0, pick);
+            at::Tensor round_values = at::index_select(values, 0, at::index_select(order, 0, pick));
+            at::Tensor current = at::index_select(result, 0, round_keys);
+            at::Tensor next = (r == 0 && !include_self) ? round_values : at::mul(current, round_values);
+            result.index_put_({round_keys}, next);
+        }
+        return in_place ? const_cast<at::Tensor&>(self).copy_(result.view(self.sizes())) : result.view(self.sizes());
+    }
+    // a 16-byte element (complex128) copies as its two 8-byte halves: keys 2k and 2k + 1
+    if (is_copy(mode) && c10::elementSize(dtype) == 16) {
+        at::Tensor halves = self.contiguous().reshape({-1}).view(at::kLong);
+        at::Tensor k = keys.reshape({-1}).to(at::kLong);
+        at::Tensor pair_keys = at::stack({at::mul(k, 2), at::add(at::mul(k, 2), 1)}, 1).reshape({-1});
+        at::Tensor pair_values = src.to(dtype).contiguous().reshape({-1}).view(at::kLong);
+        at::Tensor result = scatter_into(halves, pair_keys, pair_values, mode, include_self, in_place && self.is_contiguous());
+        if (in_place && self.is_contiguous()) return self;
+        return result.view(dtype).view(self.sizes());
+    }
     at::ScalarType kernel = scatter_kernel_dtype(self, mode);
     at::Tensor base = as_kernel_dtype(self.contiguous(), kernel, mode);
     bool direct = in_place && self.is_contiguous() && (kernel == dtype || is_copy(mode));
@@ -321,7 +363,8 @@ at::Tensor index_along_dim(const at::Tensor& self, int64_t dim, const at::Tensor
 
 at::Tensor& index_add_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& source, const at::Scalar& alpha, at::Tensor& out)
 {
-    at::Tensor scaled = alpha.toDouble() == 1.0 ? source : at::mul(source, alpha);
+    bool unit = alpha.isComplex() ? alpha.toComplexDouble() == c10::complex<double>(1.0) : alpha.toDouble() == 1.0;
+    at::Tensor scaled = unit ? source : at::mul(source, alpha);
     return fill_out(out, index_along_dim(self, dim, index, scaled, ScatterMode::SUM, true, false));
 }
 
