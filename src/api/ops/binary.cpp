@@ -1011,9 +1011,69 @@ at::Tensor& addcdiv_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1
     return fill_out(out, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/true));
 }
 
+// torch's foreach ops with a scalar tensor run its slow kernels here, so make the checks its accelerator kernels make
+// (mul and div also take a CPU scalar tensor)
+void check_foreach_scalar_tensor(at::TensorList tensors, const at::Tensor& scalar, bool cpu_ok)
+{
+    TORCH_CHECK(scalar.dim() == 0 && scalar.numel() == 1, "scalar tensor expected to be 0 dim but it has ", scalar.dim(), " dimensions and ",
+        scalar.numel(), " elements.");
+    bool one_device = std::all_of(tensors.begin(), tensors.end(), [&](const at::Tensor& t) { return t.device() == tensors[0].device(); });
+    if (!tensors.empty() && one_device && tensors[0].is_privateuseone() && !(cpu_ok && scalar.is_cpu())) {
+        TORCH_CHECK(scalar.device() == tensors[0].device(), "scalar tensor expected to be on ", tensors[0].device(), " but is on ", scalar.device());
+    }
+}
+
+std::vector<at::Tensor> foreach_add_tensor_vulkan(at::TensorList tensors, const at::Tensor& scalar, const at::Scalar& alpha)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/false);
+    return at::native::foreach_tensor_add_tensor_kernel_slow(tensors, scalar, alpha);
+}
+
+void foreach_add_tensor_vulkan_(at::TensorList tensors, const at::Tensor& scalar, const at::Scalar& alpha)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/false);
+    at::native::foreach_tensor_add_tensor_kernel_slow_(tensors, scalar, alpha);
+}
+
+std::vector<at::Tensor> foreach_mul_tensor_vulkan(at::TensorList tensors, const at::Tensor& scalar)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/true);
+    return at::native::foreach_tensor_mul_tensor_kernel_slow(tensors, scalar);
+}
+
+void foreach_mul_tensor_vulkan_(at::TensorList tensors, const at::Tensor& scalar)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/true);
+    at::native::foreach_tensor_mul_tensor_kernel_slow_(tensors, scalar);
+}
+
+void ldexp_vulkan_kernel(at::TensorIteratorBase& iter)
+{
+    at::Tensor out = iter.tensor(0);
+    const at::Tensor& self = iter.tensor(1);
+    bool wide = self.scalar_type() == at::kDouble;
+    int64_t limit = wide ? 2200 : 300;
+    at::Tensor x = self.to(wide ? at::kDouble : at::kFloat);
+    at::Tensor e = at::clamp(iter.tensor(2).to(at::kLong), -limit, limit);
+    at::Tensor first = at::div(e, 3, "trunc");
+    at::Tensor second = at::div(at::sub(e, first), 2, "trunc");
+    at::Tensor third = at::sub(at::sub(e, first), second);
+    at::Tensor two = at::scalar_tensor(2.0, x.options());
+    at::Tensor result = at::mul(at::mul(at::mul(x, at::pow(two, first)), at::pow(two, second)), at::pow(two, third));
+    out.copy_(result);
+}
+
 } // namespace
 
+namespace at::native {
+REGISTER_PRIVATEUSE1_DISPATCH(ldexp_stub, &ldexp_vulkan_kernel)
+} // namespace at::native
+
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("_foreach_add.Tensor", &foreach_add_tensor_vulkan);
+    m.impl("_foreach_add_.Tensor", &foreach_add_tensor_vulkan_);
+    m.impl("_foreach_mul.Tensor", &foreach_mul_tensor_vulkan);
+    m.impl("_foreach_mul_.Tensor", &foreach_mul_tensor_vulkan_);
     m.impl("add.Tensor", &torchvulkan::add_vulkan);
     m.impl("add.Scalar", &add_scalar_vulkan);
     m.impl("add_.Tensor", &add_vulkan_);
