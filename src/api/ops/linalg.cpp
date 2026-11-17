@@ -318,7 +318,8 @@ void dispatch_ldl_shader(LdlMode mode, const at::Tensor& a, const at::Tensor& pi
 void dispatch_eig_shader(const at::Tensor& h, const at::Tensor& v, const at::Tensor& d, const at::Tensor& e)
 {
     if (h.size(0) == 0 || h.size(1) == 0) return;
-    at::Tensor ort = at::empty({h.size(0), h.size(1)}, h.options());
+    // per matrix: Householder scalars, gebal's scaling, and two elements of swap scratch
+    at::Tensor ort = at::empty({h.size(0), 2 * h.size(1) + 2}, h.options());
     DeviceContext* device = get_device_context(h);
     for_each_chunk(h.size(0), device, [&](int64_t start, int64_t count) {
         auto part = [&](const at::Tensor& t) { return t.narrow(0, start, count); };
@@ -1410,9 +1411,40 @@ at::Tensor to_complex(const at::Tensor& real, const at::Tensor& imag, at::Scalar
 }
 
 // JAMA's orthes and hqr2; vectors normalized as LAPACK's geev: unit length, largest component real
+std::tuple<at::Tensor, at::Tensor> eig_impl(const at::Tensor& A, bool compute_v);
+
+// eigenvectors are defined up to a scalar: one convention on every device, unit norm with the largest entry real and positive
+at::Tensor canonical_eigenvectors(const at::Tensor& v)
+{
+    if (v.size(-2) == 0) return v;
+    at::Tensor unit = at::div(v, at::linalg_vector_norm(v, 2, {-2}, true));
+    at::Tensor largest = at::gather(unit, -2, at::argmax(at::abs(unit), -2, /*keepdim=*/true));
+    return at::mul(unit, at::div(at::abs(largest), largest));
+}
+
+// a complex eig from the real embedding's, which has every eigenvalue of A and its conjugate: A's are the ones whose
+// eigenvector has the form [p; -i p], and p is A's eigenvector (an eigenvalue that is exactly real is ambiguous)
+std::tuple<at::Tensor, at::Tensor> complex_eig(const at::Tensor& A, bool compute_v)
+{
+    int64_t n = A.size(-1);
+    std::vector<int64_t> batch = batch_shape(A);
+    at::ScalarType dtype = complex_compute_dtype(A.scalar_type());
+    auto [w, vectors] = eig_impl(real_embedding(torchvulkan::complex_parts(A.to(dtype).reshape({batch_count(A), n, n}))), true);
+    at::Tensor p = vectors.narrow(-2, 0, n), q = vectors.narrow(-2, n, n);
+    at::Tensor score = at::linalg_vector_norm(at::add(q, at::mul(p, c10::complex<double>(0.0, 1.0))), 2, {-2}, false);
+    at::Tensor chosen = std::get<0>(at::sort(std::get<1>(at::topk(score, n, -1, /*largest=*/false)), -1));
+    std::vector<int64_t> value_shape = batch;
+    value_shape.push_back(n);
+    at::Tensor values = at::gather(w, -1, chosen).view(value_shape).to(A.scalar_type());
+    if (!compute_v) return std::make_tuple(values, at::empty({0}, A.options()));
+    at::Tensor v = at::gather(p, -1, chosen.unsqueeze(-2).expand({p.size(0), n, n}));
+    return std::make_tuple(values, canonical_eigenvectors(v).view(with_matrix(batch, n, n)).to(A.scalar_type()));
+}
+
 std::tuple<at::Tensor, at::Tensor> eig_impl(const at::Tensor& A, bool compute_v)
 {
     check_square(A, "linalg.eig");
+    if (A.is_complex()) return complex_eig(A, compute_v);
     at::ScalarType dtype = linalg_dtype(A, "linalg.eig");
     at::ScalarType out_dtype = get_dtype_complex(A.scalar_type());
     int64_t n = A.size(-1);
@@ -1423,7 +1455,7 @@ std::tuple<at::Tensor, at::Tensor> eig_impl(const at::Tensor& A, bool compute_v)
     at::Tensor e = at::zeros({h.size(0), n}, h.options());
     if (h.numel() > 0) {
         bool finite = at::isfinite(h).all().item<bool>();
-        TORCH_CHECK(finite, "linalg.eig: input tensor should not contain infs or NaNs.");
+        TORCH_CHECK(finite, "torch.linalg.eig: input tensor should not contain infs or NaNs.");
         dispatch_eig_shader(h, v, d, e);
     }
     std::vector<int64_t> value_shape = batch;
@@ -1448,6 +1480,7 @@ std::tuple<at::Tensor, at::Tensor> eig_impl(const at::Tensor& A, bool compute_v)
     at::Tensor pr = at::gather(real, 1, largest), pi = at::gather(imag, 1, largest);
     at::Tensor scale = at::sqrt(at::add(at::mul(pr, pr), at::mul(pi, pi)));
     at::Tensor cr = at::div(pr, scale), ci = at::neg(at::div(pi, scale));
+    // eigenvectors are defined up to a scalar: one convention on every device, the largest entry real and positive
     at::Tensor rotated_real = at::sub(at::mul(real, cr), at::mul(imag, ci));
     at::Tensor rotated_imag = at::add(at::mul(real, ci), at::mul(imag, cr));
     at::Tensor vectors = to_complex(rotated_real, rotated_imag, out_dtype).view(with_matrix(batch, n, n));
@@ -1456,11 +1489,14 @@ std::tuple<at::Tensor, at::Tensor> eig_impl(const at::Tensor& A, bool compute_v)
 
 std::tuple<at::Tensor, at::Tensor> linalg_eig_vulkan(const at::Tensor& self)
 {
-    return eig_impl(self, true);
+    auto [values, vectors] = eig_impl(self, true);
+    return std::make_tuple(values, column_major(vectors));
 }
 
 std::tuple<at::Tensor&, at::Tensor&> linalg_eig_out_vulkan(const at::Tensor& self, at::Tensor& eigenvalues, at::Tensor& eigenvectors)
 {
+    check_castable("torch.linalg.eig", "eigenvalues", eigenvalues, get_dtype_complex(self.scalar_type()));
+    check_castable("torch.linalg.eig", "eigenvectors", eigenvectors, get_dtype_complex(self.scalar_type()));
     auto [values, vectors] = eig_impl(self, true);
     fill_out(eigenvalues, values);
     fill_out(eigenvectors, vectors);
@@ -1474,6 +1510,7 @@ at::Tensor linalg_eigvals_vulkan(const at::Tensor& self)
 
 at::Tensor& linalg_eigvals_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    check_castable("torch.linalg.eigvals", "eigenvalues", out, get_dtype_complex(self.scalar_type()));
     return fill_out(out, linalg_eigvals_vulkan(self));
 }
 
