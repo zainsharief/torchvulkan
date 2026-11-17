@@ -1,12 +1,16 @@
 #include <torch/extension.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/native/IndexingUtils.h>
+#include <algorithm>
 #include <string>
 #include <tuple>
 #include <vector>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 #include "api/fallback.h"
 
 namespace {
@@ -110,12 +114,15 @@ at::Tensor as_kernel_dtype(const at::Tensor& t, at::ScalarType kernel, ScatterMo
     return is_copy(mode) ? t.view(kernel) : t.to(kernel);
 }
 
-at::Tensor scatter_into(const at::Tensor& self, const at::Tensor& keys, const at::Tensor& src, ScatterMode mode, bool include_self)
+// in_place writes into a contiguous self of the kernel's dtype: the kernel touches only the keyed elements
+at::Tensor scatter_into(const at::Tensor& self, const at::Tensor& keys, const at::Tensor& src, ScatterMode mode, bool include_self,
+                        bool in_place = false)
 {
     at::ScalarType dtype = self.scalar_type();
     at::ScalarType kernel = scatter_kernel_dtype(self, mode);
     at::Tensor base = as_kernel_dtype(self.contiguous(), kernel, mode);
-    at::Tensor result = base.clone();
+    bool direct = in_place && self.is_contiguous() && (kernel == dtype || is_copy(mode));
+    at::Tensor result = direct ? base : base.clone();
     at::Tensor flat_keys = keys.reshape({-1}).to(at::kLong).contiguous();
     at::Tensor values = as_kernel_dtype(src.to(dtype).reshape({-1}).contiguous(), kernel, mode);
     if (flat_keys.numel() > 0) {
@@ -127,8 +134,9 @@ at::Tensor scatter_into(const at::Tensor& self, const at::Tensor& keys, const at
             dispatch_scatter_shader(result, base, values, sorted.contiguous(), order.contiguous(), mode, include_self, round_bf16);
         }
     }
-    if (kernel == dtype) return result;
-    return is_copy(mode) ? result.view(dtype) : result.to(dtype);
+    if (direct) return self;
+    at::Tensor typed = kernel == dtype ? result : (is_copy(mode) ? result.view(dtype) : result.to(dtype));
+    return in_place ? const_cast<at::Tensor&>(self).copy_(typed.view(self.sizes())) : typed;
 }
 
 at::Tensor scatter_keys(const at::Tensor& index, int64_t dim, c10::IntArrayRef shape)
@@ -144,9 +152,14 @@ at::Tensor scatter_keys(const at::Tensor& index, int64_t dim, c10::IntArrayRef s
     return keys;
 }
 
-void check_in_range(const at::Tensor& index, int64_t size, const char* message)
+void check_in_range(const at::Tensor& index_in, int64_t size, const char* message)
 {
-    if (index.numel() == 0) return;
+    if (index_in.numel() == 0) return;
+    // only the distinct elements: an expanded index (stride 0) repeats them
+    at::Tensor index = index_in;
+    for (int64_t d = 0; d < index.dim(); d++) {
+        if (index.stride(d) == 0) index = index.narrow(d, 0, 1);
+    }
     bool out_of_range = at::logical_or(at::lt(index, 0), at::ge(index, size)).any().item<bool>();
     TORCH_CHECK_INDEX(!out_of_range, message);
 }
@@ -156,7 +169,9 @@ at::Tensor wrap_negative(const at::Tensor& index, int64_t size)
     return at::where(at::lt(index, 0), at::add(index, size), index);
 }
 
-at::Tensor scatter_along_dim(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& src, ScatterMode mode, bool include_self)
+// write_self scatters into a contiguous self in place (the in-place ops), instead of into a copy
+at::Tensor scatter_along_dim(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& src, ScatterMode mode, bool include_self,
+                             bool write_self = false)
 {
     TORCH_CHECK_INDEX(at::isIntegralType(index.scalar_type(), /*includeBool=*/false), "scatter(): Expected dtype int64 for index");
     int64_t ndim = std::max<int64_t>(self.dim(), 1);
@@ -190,8 +205,37 @@ at::Tensor scatter_along_dim(const at::Tensor& self, int64_t dim, const at::Tens
         return cpu.to(self.device()).view(self.sizes());
     }
 
-    at::Tensor result = scatter_into(s, scatter_keys(idx, dim, s.sizes()), values.contiguous(), mode, include_self);
+    // a large scatter in slices along another dim: an int64 key per element and its sort would take ~24 bytes each.
+    // The slices hit disjoint outputs (an output's key holds that dim's coordinate), so every mode composes exactly
+    constexpr int64_t chunk = int64_t(1) << 25;
+    int64_t split = -1;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d != dim && idx.size(d) > 1 && (split < 0 || idx.size(d) > idx.size(split))) split = d;
+    }
+    if (idx.numel() > chunk && split >= 0) {
+        int64_t per = std::max<int64_t>(1, chunk / (idx.numel() / idx.size(split)));
+        int64_t split_stride = c10::contiguous_strides(s.sizes())[split];
+        at::Tensor result = write_self ? s : s.contiguous().clone();
+        for (int64_t start = 0; start < idx.size(split); start += per) {
+            int64_t length = std::min(per, idx.size(split) - start);
+            at::Tensor part = idx.narrow(split, start, length);
+            at::Tensor keys = at::add(scatter_keys(part, dim, s.sizes()), start * split_stride);
+            result = scatter_into(result, keys, values.narrow(split, start, length).contiguous(), mode, include_self, /*in_place=*/true);
+            // submitted per slice: one command buffer holding every slice's keys and sort exceeds Metal's working set
+            get_device_context(result)->flush();
+        }
+        return result.view(self.sizes());
+    }
+
+    at::Tensor result = scatter_into(s, scatter_keys(idx, dim, s.sizes()), values.contiguous(), mode, include_self, write_self);
     return result.view(self.sizes());
+}
+
+// out= that is self: scattered in place when the kernel can write it directly
+bool writes_self(const at::Tensor& self, const at::Tensor& out)
+{
+    return out.is_same(self) && self.is_contiguous() && self.dim() > 0 && at::has_internal_overlap(self) == at::MemOverlap::No &&
+           !self.is_complex() && self.scalar_type() != at::kBFloat16 && self.scalar_type() != at::kBool;
 }
 
 at::Tensor value_tensor(const at::Scalar& value, const at::Tensor& like)
@@ -201,6 +245,11 @@ at::Tensor value_tensor(const at::Scalar& value, const at::Tensor& like)
 
 at::Tensor& scatter_src_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& src, at::Tensor& out)
 {
+    if (writes_self(self, out)) {
+        at::Tensor result = scatter_along_dim(self, dim, index, src, ScatterMode::LAST, true, /*write_self=*/true);
+        if (!result.storage().is_alias_of(out.storage())) out.copy_(result);
+        return out;
+    }
     return fill_out(out, scatter_along_dim(self, dim, index, src, ScatterMode::LAST, true));
 }
 
@@ -211,6 +260,11 @@ at::Tensor& scatter_value_out_vulkan(const at::Tensor& self, int64_t dim, const 
 
 at::Tensor& scatter_reduce_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& src, c10::string_view reduce, at::Tensor& out)
 {
+    if (writes_self(self, out)) {
+        at::Tensor result = scatter_along_dim(self, dim, index, src, scatter_mode_from_name(reduce), true, /*write_self=*/true);
+        if (!result.storage().is_alias_of(out.storage())) out.copy_(result);
+        return out;
+    }
     return fill_out(out, scatter_along_dim(self, dim, index, src, scatter_mode_from_name(reduce), true));
 }
 
@@ -221,6 +275,11 @@ at::Tensor& scatter_value_reduce_out_vulkan(const at::Tensor& self, int64_t dim,
 
 at::Tensor& scatter_add_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& src, at::Tensor& out)
 {
+    if (writes_self(self, out)) {
+        at::Tensor result = scatter_along_dim(self, dim, index, src, ScatterMode::SUM, true, /*write_self=*/true);
+        if (!result.storage().is_alias_of(out.storage())) out.copy_(result);
+        return out;
+    }
     return fill_out(out, scatter_along_dim(self, dim, index, src, ScatterMode::SUM, true));
 }
 
@@ -279,6 +338,8 @@ at::Tensor& index_reduce_out_vulkan(const at::Tensor& self, int64_t dim, const a
     return fill_out(out, index_along_dim(self, dim, index, source, scatter_mode_from_name(reduce), include_self, false));
 }
 
+at::Tensor& write_through_aliases(at::Tensor& self, const at::Tensor& result);
+
 at::Tensor& index_fill_scalar_vulkan_(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value)
 {
     return self.copy_(index_along_dim(self, dim, index, value_tensor(value, self), ScatterMode::LAST, true, true));
@@ -290,9 +351,67 @@ at::Tensor& index_fill_tensor_vulkan_(at::Tensor& self, int64_t dim, const at::T
     return index_fill_scalar_vulkan_(self, dim, index, value.item());
 }
 
-at::Tensor element_offsets(const at::Tensor& self)
+// the row-major offsets of a contiguous self's elements that indices select, laid out as advanced indexing lays out
+// its result: indexed dims add index * stride, the others an arange at their place. Past 2^24 elements this avoids an
+// offset per element of self (16 GiB for a 2^31-element tensor)
+at::Tensor indexed_offsets(const at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices)
 {
-    return at::arange(self.numel(), self.options().dtype(at::kLong)).view(self.sizes());
+    at::TensorOptions options = self.options().dtype(at::kLong);
+    if (self.numel() <= (int64_t(1) << 24) || !self.is_contiguous()) {
+        return at::index(at::arange(self.numel(), options).view(self.sizes()), indices);
+    }
+    c10::List<std::optional<at::Tensor>> masks;
+    for (const std::optional<at::Tensor>& index : indices) {
+        bool byte = index.has_value() && index->defined() && index->scalar_type() == at::kByte;
+        masks.push_back(byte ? std::optional<at::Tensor>(index->to(at::kBool)) : index);
+    }
+    std::vector<at::Tensor> idx = at::native::expandTensors(self, masks, /*ensure_same_device=*/true);
+    idx = at::expand_outplace(idx);
+    while (idx.size() < static_cast<size_t>(self.dim())) idx.emplace_back();
+    at::Tensor src = self;
+    if (!at::native::hasContiguousSubspace(idx)) std::tie(src, idx) = at::native::transposeToFront(self, idx);
+
+    int64_t before = 0, after = 0, indexed = 0;
+    std::vector<int64_t> replacement;
+    for (size_t d = 0; d < idx.size(); d++) {
+        if (idx[d].defined()) { indexed++; replacement = idx[d].sizes().vec(); }
+        else if (indexed == 0) before++;
+        else after++;
+    }
+    int64_t rank = before + static_cast<int64_t>(replacement.size()) + after;
+    at::Tensor keys;
+    auto add = [&keys](const at::Tensor& term) { keys = keys.defined() ? at::add(keys, term) : term; };
+    int64_t position = 0;
+    for (size_t d = 0; d < idx.size(); d++) {
+        int64_t size = src.size(static_cast<int64_t>(d)), stride = src.stride(static_cast<int64_t>(d));
+        if (idx[d].defined()) {
+            std::vector<int64_t> shape(before, 1);
+            shape.insert(shape.end(), replacement.begin(), replacement.end());
+            shape.insert(shape.end(), after, 1);
+            at::Tensor i = idx[d].to(at::kLong);
+            add(at::mul(at::where(at::lt(i, 0), at::add(i, size), i), stride).reshape(shape));
+            if (position == before) position += static_cast<int64_t>(replacement.size());
+            continue;
+        }
+        std::vector<int64_t> shape(rank, 1);
+        shape[position++] = size;
+        add(at::mul(at::arange(size, options), stride).view(shape));
+    }
+    return keys;
+}
+
+// an expanded self (as the CPU's kernel writes it): the last of each set of aliased elements is what remains
+at::Tensor& write_through_aliases(at::Tensor& self, const at::Tensor& result)
+{
+    at::Tensor dst = self, src = result;
+    for (int64_t d = 0; d < self.dim(); d++) {
+        if (self.stride(d) == 0 && self.size(d) > 1) {
+            dst = dst.narrow(d, self.size(d) - 1, 1);
+            src = src.narrow(d, self.size(d) - 1, 1);
+        }
+    }
+    dst.copy_(src);
+    return self;
 }
 
 at::Tensor& index_put_impl_vulkan_(at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices, const at::Tensor& values, bool accumulate, bool /* unsafe */)
@@ -305,13 +424,25 @@ at::Tensor& index_put_impl_vulkan_(at::Tensor& self, const c10::List<std::option
         TORCH_CHECK_INDEX(!out_of_range, "index out of bounds for dimension ", i, " with size ", size);
     }
 
-    at::Tensor keys = at::index(element_offsets(self), indices);
+    at::Tensor keys = indexed_offsets(self, indices);
     if (keys.numel() == 0) return self;
     TORCH_CHECK(at::is_expandable_to(values.sizes(), keys.sizes()), "shape mismatch: value tensor of shape ", values.sizes(),
         " cannot be broadcast to indexing result of shape ", keys.sizes()
     );
-    at::Tensor expanded = values.to(self.device(), self.scalar_type()).expand(keys.sizes());
-    return self.copy_(scatter_into(self, keys, expanded.contiguous(), accumulate ? ScatterMode::SUM : ScatterMode::LAST, true).view(self.sizes()));
+    if (accumulate && self.scalar_type() == at::kBool) {
+        // bool accumulation is an or: sum as int32 and test for nonzero
+        at::Tensor sums = normalize_bool(self).to(at::kInt);
+        index_put_impl_vulkan_(sums, indices, normalize_bool(values.to(self.device())).to(at::kInt), true, false);
+        return self.copy_(at::ne(sums, 0));
+    }
+    at::Tensor expanded = values.to(self.device(), self.scalar_type()).expand(keys.sizes()).contiguous();
+    ScatterMode mode = accumulate ? ScatterMode::SUM : ScatterMode::LAST;
+    if (self.is_contiguous() && at::has_internal_overlap(self) == at::MemOverlap::No) {
+        scatter_into(self, keys, expanded, mode, true, /*in_place=*/true);
+        return self;
+    }
+    at::Tensor result = scatter_into(self.contiguous(), keys, expanded, mode, true).view(self.sizes());
+    return at::has_internal_overlap(self) == at::MemOverlap::Yes ? write_through_aliases(self, result) : self.copy_(result);
 }
 
 at::Tensor& put_vulkan_(at::Tensor& self, const at::Tensor& index, const at::Tensor& source, bool accumulate)
