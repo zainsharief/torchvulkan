@@ -59,7 +59,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_forward(
         TORCH_CHECK(running_mean.defined() && running_var.defined(), "running_mean and running_var must be defined in evaluation mode");
         at::Tensor invstd = at::rsqrt(at::add(running_var.to(x.scalar_type()), eps));
         at::Tensor y = batch_norm_apply(x, running_mean.to(x.scalar_type()), invstd, weight, bias);
-        return std::make_tuple(y.to(dtype), running_mean.to(x.scalar_type(), /*non_blocking=*/false, /*copy=*/true), invstd);
+        at::Tensor empty = at::empty({0}, input.options());
+        return std::make_tuple(y.to(dtype), empty, empty.clone());
     }
 
     int64_t count = input.numel() / std::max<int64_t>(input.size(1), 1);
