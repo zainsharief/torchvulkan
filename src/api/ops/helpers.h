@@ -301,6 +301,20 @@ inline at::Tensor promote_to_float(const at::Tensor& self)
     return self.to(c10::typeMetaToScalarType(at::get_default_dtype()));
 }
 
+inline void check_out_device(const at::Tensor& out, const at::Tensor& input)
+{
+    TORCH_CHECK(!input.is_privateuseone() || out.device() == input.device(), "Expected out tensor to have device ", input.device(), ", but got ",
+        out.device(), " instead");
+}
+
+// an out= that is also an input (mul_out(self, self, x), as torch's composites do in place) can't grow to the broadcast shape
+inline void check_inplace_broadcast(const at::Tensor& out, const at::Tensor& self, const at::Tensor& other)
+{
+    if (!out.is_alias_of(self) && !out.is_alias_of(other)) return;
+    std::vector<int64_t> shape = at::infer_size(self.sizes(), other.sizes());
+    TORCH_CHECK(out.sizes().equals(shape), "output with shape ", out.sizes(), " doesn't match the broadcast shape ", at::IntArrayRef(shape));
+}
+
 // copies an op result into an out= tensor, resizing it first when the shapes differ
 inline at::Tensor& fill_out(at::Tensor& out, const at::Tensor& res)
 {

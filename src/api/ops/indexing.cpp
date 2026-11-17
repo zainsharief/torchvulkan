@@ -105,7 +105,12 @@ at::Tensor restride_for_dim(const at::Tensor& self, int64_t dim, c10::IntArrayRe
 at::Tensor& gather_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, bool /* sparse_grad */, at::Tensor& out)
 {
     TORCH_CHECK_INDEX(at::isIntegralType(index.scalar_type(), /*includeBool=*/false), "gather(): Expected dtype int64 for index");
-    if (out.sizes() != index.sizes()) out.resize_(index.sizes());
+    TORCH_CHECK(out.scalar_type() == self.scalar_type(), "Expected out tensor to have dtype ", self.scalar_type(), ", but got ", out.scalar_type(), " instead");
+    check_out_device(out, self);
+    at::native::resize_output(out, index.sizes());
+    at::assert_no_internal_overlap(out);
+    at::assert_no_overlap(out, self);
+    at::assert_no_partial_overlap(out, index);
     if (index.numel() == 0) return out;
 
     int64_t ndim = std::max<int64_t>(self.dim(), 1);
@@ -175,6 +180,9 @@ at::Tensor index_select_vulkan(const at::Tensor& self, int64_t dim, const at::Te
 
 at::Tensor& index_select_out_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, at::Tensor& out)
 {
+    at::assert_no_internal_overlap(out);
+    at::assert_no_overlap(out, self);
+    at::assert_no_overlap(out, index);
     return fill_out(out, index_select_vulkan(self, dim, index));
 }
 
@@ -371,6 +379,11 @@ std::tuple<at::Tensor&, at::Tensor&> extremum_dim_out(
     at::Tensor& values,
     at::Tensor& indices)
 {
+    for (const at::Tensor* out : {&values, &indices}) {
+        TORCH_CHECK(out->device() == self.device(), "Expected out tensor to have device ", self.device(), ", but got ", out->device(), " instead");
+    }
+    TORCH_CHECK(values.scalar_type() == self.scalar_type(), "Expected out tensor to have dtype ", self.dtype(), ", but got ", values.dtype(), " instead");
+    TORCH_CHECK(indices.scalar_type() == at::kLong, "Expected out tensor to have dtype long int, but got ", indices.dtype(), " instead");
     // argmax has no bool kernel; uint8 orders false before true the same way
     at::Tensor key = self.scalar_type() == at::kBool ? self.to(at::kByte) : self;
     at::Tensor idx = is_max ? at::argmax(key, dim, /*keepdim=*/true) : at::argmin(key, dim, /*keepdim=*/true);

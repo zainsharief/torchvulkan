@@ -385,7 +385,16 @@ at::Tensor& write_through_aliases(at::Tensor& self, const at::Tensor& result);
 
 at::Tensor& index_fill_scalar_vulkan_(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Scalar& value)
 {
-    return self.copy_(index_along_dim(self, dim, index, value_tensor(value, self), ScatterMode::LAST, true, true));
+    TORCH_CHECK(!value.isComplex() || self.is_complex(), "index_fill_(): Converting complex Scalar to non-complex type is not supported");
+    // torch's index_fill_ checks
+    bool expanded = at::has_internal_overlap(self) == at::MemOverlap::Yes;
+    if (expanded) {
+        TORCH_WARN("Use of index_fill_ on expanded tensors is deprecated. Please clone() the tensor before performing this operation. "
+                   "This also applies to advanced indexing e.g. tensor[mask] = scalar");
+    }
+    at::assert_no_overlap(self, index);
+    at::Tensor result = index_along_dim(self, dim, index, value_tensor(value, self), ScatterMode::LAST, true, true);
+    return expanded ? write_through_aliases(self, result) : self.copy_(result);
 }
 
 at::Tensor& index_fill_tensor_vulkan_(at::Tensor& self, int64_t dim, const at::Tensor& index, const at::Tensor& value)
@@ -459,6 +468,23 @@ at::Tensor& write_through_aliases(at::Tensor& self, const at::Tensor& result)
 
 at::Tensor& index_put_impl_vulkan_(at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices, const at::Tensor& values, bool accumulate, bool /* unsafe */)
 {
+    // torch's _index_put_impl_ checks
+    if (at::has_internal_overlap(self) == at::MemOverlap::Yes) {
+        TORCH_WARN("Use of index_put_ on expanded tensors is deprecated. Please clone() the tensor before performing this operation. "
+                   "This also applies to advanced indexing e.g. tensor[indices] = tensor");
+    }
+    at::assert_no_overlap(self, values);
+    for (const std::optional<at::Tensor>& index : indices) {
+        if (index.has_value() && index->defined()) at::assert_no_overlap(self, *index);
+    }
+    TORCH_CHECK(values.device() == self.device() || (values.is_cpu() && values.dim() == 0), "Expected all tensors to be on the same device, but found at least two devices, ",
+        self.device(), " and ", values.device(), "!");
+    if (indices.size() == 0) {
+        // no indices index the whole tensor
+        TORCH_CHECK(at::is_expandable_to(values.sizes(), self.sizes()), "shape mismatch: value tensor of shape ", values.sizes(),
+            " cannot be broadcast to indexing result of shape ", self.sizes());
+        return accumulate ? self.add_(values) : self.copy_(values);
+    }
     for (size_t i = 0; i < indices.size(); i++) {
         const std::optional<at::Tensor>& index = indices.get(i);
         if (!index.has_value() || !index->defined() || index->scalar_type() == at::kBool || index->scalar_type() == at::kByte) continue;
@@ -490,6 +516,10 @@ at::Tensor& index_put_impl_vulkan_(at::Tensor& self, const c10::List<std::option
 
 at::Tensor& put_vulkan_(at::Tensor& self, const at::Tensor& index, const at::Tensor& source, bool accumulate)
 {
+    at::assert_no_internal_overlap(self);
+    at::assert_no_overlap(self, index);
+    at::assert_no_overlap(self, source);
+    if (!accumulate) at::globalContext().alertNotDeterministic("put_");
     TORCH_CHECK_INDEX(index.scalar_type() == at::kLong, "put_(): Expected a long tensor for index, but got ", index.scalar_type());
     TORCH_CHECK(index.numel() == source.numel(), "put_(): Expected source and index to have the same number of elements, but got source.numel() = ",
         source.numel(), ", index.numel() = ", index.numel()
@@ -515,6 +545,9 @@ at::Tensor take_vulkan(const at::Tensor& self, const at::Tensor& index)
 
 at::Tensor& take_out_vulkan(const at::Tensor& self, const at::Tensor& index, at::Tensor& out)
 {
+    at::assert_no_internal_overlap(out);
+    at::assert_no_overlap(out, index);
+    at::assert_no_overlap(out, self);
     return fill_out(out, take_vulkan(self, index));
 }
 
@@ -528,7 +561,7 @@ std::tuple<at::Tensor, int64_t> compaction_keys(const at::Tensor& mask)
 
 at::Tensor masked_select_vulkan(const at::Tensor& self, const at::Tensor& mask)
 {
-    TORCH_CHECK(mask.scalar_type() == at::kBool || mask.scalar_type() == at::kByte, "masked_select: expected BoolTensor or ByteTensor for mask");
+    TORCH_CHECK(mask.scalar_type() == at::kBool, "masked_select: expected BoolTensor for mask");
     std::vector<int64_t> shape = at::infer_size(self.sizes(), mask.sizes());
     at::Tensor values = self.expand(shape).contiguous();
     auto [keys, count] = compaction_keys(mask.to(self.device(), at::kBool).expand(shape));
@@ -537,6 +570,9 @@ at::Tensor masked_select_vulkan(const at::Tensor& self, const at::Tensor& mask)
 
 at::Tensor& masked_select_out_vulkan(const at::Tensor& self, const at::Tensor& mask, at::Tensor& out)
 {
+    at::assert_no_internal_overlap(out);
+    at::assert_no_overlap(out, self);
+    at::assert_no_overlap(out, mask);
     return fill_out(out, masked_select_vulkan(self, mask));
 }
 
@@ -569,11 +605,15 @@ at::Tensor nonzero_vulkan(const at::Tensor& self)
         rest = at::floor_divide(rest, self.size(d));
     }
     if (ndim == 0) return at::empty({count, 0}, self.options().dtype(at::kLong));
-    return at::stack(coords, 1);
+    // column-major, as the CPU returns it: nonzero().t() (COO indices) is contiguous
+    return at::stack(coords, 0).t();
 }
 
 at::Tensor& nonzero_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    TORCH_CHECK(out.scalar_type() == at::kLong, "nonzero: Expected out tensor to have scalar type Long but got scalar type", out.scalar_type());
+    TORCH_CHECK(self.device() == out.device(), "nonzero: Expected out tensor to be on the same device as input, but got input on ",
+        self.device(), " and out on ", out.device());
     return fill_out(out, nonzero_vulkan(self));
 }
 
@@ -582,14 +622,17 @@ at::Tensor nonzero_static_vulkan(const at::Tensor& self, c10::SymInt size_, int6
     int64_t size = size_.guard_int(__FILE__, __LINE__);
     TORCH_CHECK(size >= 0, "nonzero_static: 'size' must be an non-negative integer");
     at::Tensor found = nonzero_vulkan(self);
-    int64_t count = found.size(0);
-    if (count >= size) return found.narrow(0, 0, size).contiguous();
-    at::Tensor padding = at::full({size - count, self.dim()}, fill_value, found.options());
-    return at::cat({found, padding}, 0);
+    int64_t count = std::min(found.size(0), size);
+    // column-major like torch's meta function gives every device but the CPU, MPS and XPU
+    at::Tensor result = at::empty_strided({size, self.dim()}, {1, size}, found.options());
+    if (count > 0) result.narrow(0, 0, count).copy_(found.narrow(0, 0, count));
+    if (count < size) result.narrow(0, count, size - count).fill_(fill_value);
+    return result;
 }
 
 at::Tensor& nonzero_static_out_vulkan(const at::Tensor& self, c10::SymInt size, int64_t fill_value, at::Tensor& out)
 {
+    TORCH_CHECK(out.scalar_type() == at::kLong, "nonzero_static: Expected out tensor to have scalar type Long but got scalar type", out.scalar_type());
     return fill_out(out, nonzero_static_vulkan(self, size, fill_value));
 }
 
