@@ -6,13 +6,17 @@ worker threads outlived the unloaded driver. Each script runs in a fresh interpr
 """
 import subprocess
 import sys
+import tempfile
 import textwrap
 
 import pytest
 
 
 def run_script(source):
-    return subprocess.run([sys.executable, "-c", textwrap.dedent(source)], capture_output=True, text=True, timeout=300)
+    # `python -c` puts the working directory first on sys.path; run from the temp directory so the child
+    # imports the installed torchvulkan, not the source tree's package (which has no compiled _C)
+    return subprocess.run([sys.executable, "-c", textwrap.dedent(source)], capture_output=True, text=True, timeout=300,
+                          cwd=tempfile.gettempdir())
 
 
 SCRIPTS = {

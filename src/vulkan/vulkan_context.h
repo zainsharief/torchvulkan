@@ -31,6 +31,9 @@ public:
     static bool IsInBadFork();
     static bool IsShutDown();
     static bool IsInitialized();
+    // schedules the teardown at exit, late enough to run before any layer's own cleanup (torchvulkan
+    // calls it from Python's atexit); no-op on Windows
+    static void Shutdown();
 
 private:
     VulkanContext();

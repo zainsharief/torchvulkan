@@ -100,11 +100,11 @@ static int deviceTypeRank(VkPhysicalDeviceType type)
 // a forked child shares the parent's driver state, which is not valid in the child
 static void markForkedChild() { inBadFork = contextInitialized.load(); }
 
-// Destroys the devices and the instance at process exit. Registered with atexit once the context
-// exists, so it runs after Python has finalised (tensors are freed by then) and before the shared
-// libraries are unloaded. Without it the VkDevice outlives the process: NVIDIA's Linux driver keeps
-// worker threads running while a device exists ("[vkps] Update"), and they crash once exit unloads
-// the driver underneath them. A forked child leaves the parent's driver state alone.
+// Destroys the devices and the instance at process exit, from C's atexit: after Python has
+// finalised (tensors are freed by then) and before the shared libraries are unloaded. Without it the
+// VkDevice outlives the process: NVIDIA's Linux driver keeps worker threads running while a device
+// exists ("[vkps] Update"), and they crash once exit unloads the driver underneath them. A forked
+// child leaves the parent's driver state alone.
 void VulkanContext::ShutdownAtExit()
 {
     if (inBadFork) return;
@@ -646,6 +646,21 @@ bool VulkanContext::IsShutDown()
 bool VulkanContext::IsInitialized()
 {
     return contextInitialized;
+}
+
+// Called from Python's atexit, while the interpreter is finalising: registers ShutdownAtExit with C's
+// atexit again, now that every layer has built its state. C runs exit handlers newest first, so the
+// teardown then runs before anything a layer registered for its own cleanup, and still after Python
+// has freed the tensors. The registration made when the context was created runs too late on its
+// own: the validation layer builds its device state after it, so exit destroyed that state first and
+// vkDeviceWaitIdle crashed inside the layer. It stays as a fallback and then finds nothing to do.
+void VulkanContext::Shutdown()
+{
+#ifndef _WIN32
+    static bool scheduled = false;
+    if (!scheduled) std::atexit(ShutdownAtExit);
+    scheduled = true;
+#endif
 }
 
 void VulkanContext::createGenerators()
