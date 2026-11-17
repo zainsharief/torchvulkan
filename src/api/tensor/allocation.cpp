@@ -141,8 +141,13 @@ void torchvulkan::resize_bytes_vulkan(c10::StorageImpl* storage, size_t nbytes)
 {
     TORCH_CHECK(storage->resizable(), "torchvulkan [ERROR]: Trying to resize storage that is not resizable.");
 
+    // allocate on the storage's own device, not the current one. An empty storage (an out= tensor
+    // before its first resize, as arange.out and most *_out ops start) has no data, but its DataPtr
+    // still records the device: without the guard a tensor on vulkan:1 got a buffer on vulkan:0, which
+    // read back fine but which vulkan:1's kernels saw as garbage.
     c10::OptionalDeviceGuard guard;
-    if (storage->data() != nullptr) guard.reset_device(storage->data_ptr().device());
+    const c10::Device device = storage->data_ptr().device();
+    if (device.type() == c10::DeviceType::PrivateUse1 && device.has_index()) guard.reset_device(device);
 
     at::DataPtr new_data = storage->allocator()->allocate(nbytes);
 
