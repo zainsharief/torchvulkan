@@ -86,6 +86,9 @@ private:
     };
     BufferPool deviceBufferPool;
     BufferPool stagingBufferPool;
+    // bytes of staging (host) buffers in the cache, kept under stagingCacheCap() (see deleteBuffer)
+    size_t cached_staging_bytes = 0;
+    bool releaseOldestLocked(BufferPool& pool);
     std::atomic<size_t> cached_device_bytes{0};
     void countCached(const VulkanBuffer* buffer, bool added);
     BufferPool& poolFor(MemoryUsage usage);

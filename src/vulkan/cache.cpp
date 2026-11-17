@@ -93,9 +93,26 @@ VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
 
 void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
 {
-    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) return;
+    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) {
+        if (added) cached_staging_bytes += buffer->size();
+        else cached_staging_bytes -= buffer->size();
+        return;
+    }
     if (added) cached_device_bytes.fetch_add(buffer->size());
     else cached_device_bytes.fetch_sub(buffer->size());
+}
+
+// Staging buffers live in host memory, and nothing else trims their pool (the device pool is trimmed
+// under VRAM pressure). Without a cap, uploading a model leaves one cached staging buffer per weight
+// size in flight: moving an 8 GB text encoder to the GPU left ~7.5 GB of them, charged to the
+// process's commit, and later downloads crawled. TORCHVULKAN_STAGING_CACHE_MB sets the cap.
+static size_t stagingCacheCap()
+{
+    static const size_t cap = [] {
+        const char* env = std::getenv("TORCHVULKAN_STAGING_CACHE_MB");
+        return (env && env[0] ? static_cast<size_t>(std::strtoull(env, nullptr, 10)) : size_t(256)) << 20;
+    }();
+    return cap;
 }
 
 VulkanBuffer* VulkanCache::allocateBuffer(size_t size, MemoryUsage usage)
@@ -125,12 +142,21 @@ void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
     pool.lru.push_back(buffer);
     pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
     countCached(buffer, true);
+
+    // keep the staging pool under its cap, oldest buffers first (a buffer bigger than the cap goes too)
+    if (&pool == &stagingBufferPool) {
+        while (cached_staging_bytes > stagingCacheCap() && releaseOldestLocked(pool)) {}
+    }
 }
 
 bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    BufferPool& pool = poolFor(usage);
+    return releaseOldestLocked(poolFor(usage));
+}
+
+bool VulkanCache::releaseOldestLocked(BufferPool& pool)
+{
     if (pool.lru.empty()) return false;
 
     VulkanBuffer* buffer = pool.lru.front();
