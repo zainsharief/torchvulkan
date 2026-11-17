@@ -107,6 +107,9 @@ KERNELS = [
     Kernel('where', 'ops/where.slang', [
         Entry('where_main', DTYPES),
     ]),
+    Kernel('addc', 'ops/addc.slang', [
+        Entry('addc_main', DTYPES),
+    ]),
     Kernel('reduce', 'ops/reduce.slang', [
         Entry('reduce_main', DTYPES),
     ]),

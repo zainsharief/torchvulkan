@@ -601,10 +601,55 @@ at::Tensor& addmm_activation_out_vulkan(const at::Tensor& input, const at::Tenso
     return fill_out(out, addmm_activation_vulkan(input, mat1, mat2, beta, alpha, use_gelu));
 }
 
+// torch's _scaled_mm_out_cpu_emulated: float8 operands upcast and scaled (one scale each, or a row of A by a column of B),
+// multiplied in float32
+at::Tensor& scaled_mm_out_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, const at::Tensor& scale_a, const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias, const std::optional<at::Tensor>& scale_result, std::optional<at::ScalarType> out_dtype,
+    bool /* use_fast_accum */, at::Tensor& out)
+{
+    TORCH_CHECK_VALUE(!out_dtype || *out_dtype == out.scalar_type(), "out_dtype must match output matrix type");
+    TORCH_CHECK(mat1.dim() == 2, "mat1 must be a matrix");
+    TORCH_CHECK(mat2.dim() == 2, "mat2 must be a matrix");
+    TORCH_CHECK(mat1.size(1) == mat2.size(0), "mat_a and mat_b shapes cannot be multiplied (", mat1.size(0), "x", mat1.size(1), " and ",
+        mat2.size(0), "x", mat2.size(1), ")");
+    TORCH_CHECK_VALUE(at::isFloat8Type(mat1.scalar_type()) && at::isFloat8Type(mat2.scalar_type()), "mat1 and mat2 must be fp8 types, got: ",
+        mat1.scalar_type(), mat2.scalar_type());
+    bool tensorwise = scale_a.numel() == 1 && scale_b.numel() == 1;
+    bool rowwise = scale_a.dim() == 2 && scale_b.dim() == 2 && scale_a.size(0) == mat1.size(0) && scale_a.size(1) == 1 &&
+        scale_b.size(0) == 1 && scale_b.size(1) == mat2.size(1);
+    TORCH_CHECK_VALUE(tensorwise || rowwise, "Invalid scaling configuration");
+    TORCH_CHECK_VALUE(scale_a.scalar_type() == at::kFloat, "scale_a must have Float elements");
+    TORCH_CHECK_VALUE(scale_b.scalar_type() == at::kFloat, "scale_b must have Float elements");
+    TORCH_CHECK(!scale_result || (scale_result->numel() == 1 && scale_result->scalar_type() == at::kFloat), "scale_result must be a float scalar");
+    TORCH_CHECK(!bias || bias->numel() == mat2.size(1), "Bias must be size ", mat2.size(1), " but got ", bias->numel());
+
+    at::native::resize_output(out, {mat1.size(0), mat2.size(1)});
+    at::ScalarType target = out_dtype.value_or(at::kBFloat16);
+    at::Tensor a = at::mul(mat1.contiguous().to(at::kFloat), tensorwise ? scale_a.reshape({}) : scale_a);
+    at::Tensor b = at::mul(mat2.contiguous().to(at::kFloat), tensorwise ? scale_b.reshape({}) : scale_b);
+    at::Tensor product = at::matmul(a, b);
+    if (bias) product.add_(*bias);
+    if (scale_result && (target == at::kFloat8_e4m3fn || target == at::kFloat8_e5m2)) {
+        product = at::mul(product, at::reciprocal(scale_result->reshape({})));
+    }
+    out.copy_(product.to(out.scalar_type()));
+    return out;
+}
+
+at::Tensor scaled_mm_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, const at::Tensor& scale_a, const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias, const std::optional<at::Tensor>& scale_result, std::optional<at::ScalarType> out_dtype,
+    bool use_fast_accum)
+{
+    at::Tensor out = at::empty({0}, mat1.options().dtype(out_dtype.value_or(mat1.scalar_type())));
+    return scaled_mm_out_vulkan(mat1, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mm", &mm_vulkan);
+    m.impl("_scaled_mm", &scaled_mm_vulkan);
+    m.impl("_scaled_mm.out", &scaled_mm_out_vulkan);
     m.impl("bmm", &bmm_vulkan);
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);
