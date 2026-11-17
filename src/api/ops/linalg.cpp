@@ -268,19 +268,23 @@ void dispatch_jacobi_shader(JacobiMode mode, const at::Tensor& a, const at::Tens
     });
 }
 
-void dispatch_ldl_shader(LdlMode mode, const at::Tensor& a, const at::Tensor& pivots, const at::Tensor& info, const at::Tensor& b)
+// a complex a and b go to the shader as (re, im) pairs
+void dispatch_ldl_shader(LdlMode mode, const at::Tensor& a, const at::Tensor& pivots, const at::Tensor& info, const at::Tensor& b, bool hermitian)
 {
+    at::ScalarType real = c10::toRealValueType(a.scalar_type());
     int64_t n = a.size(1);
     int64_t k = b.defined() ? b.size(2) : 1;
     uint64_t count = static_cast<uint64_t>(mode == LdlMode::FACTOR ? a.size(0) : b.size(0) * k);
     if (count == 0 || n == 0) return;
     DeviceContext* device = get_device_context(a);
-    uint32_t workgroupSizeX = get_dtype_workgroup_size(a.scalar_type(), 1, device);
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(real, 1, device);
 
     SpecializationBuilder spd{};
     spd.push(static_cast<uint32_t>(mode))
-       .push(workgroupSizeX);
-    at::Tensor scratch = at::empty({static_cast<int64_t>(count), 2}, a.options());
+       .push(workgroupSizeX)
+       .push(static_cast<uint32_t>(a.is_complex()))
+       .push(static_cast<uint32_t>(hermitian));
+    at::Tensor scratch = at::empty({static_cast<int64_t>(count), 4}, a.options().dtype(real));
 
     PushConstantBuilder pcs{};
     pcs.push(get_tensor_address(a))
@@ -296,7 +300,7 @@ void dispatch_ldl_shader(LdlMode mode, const at::Tensor& a, const at::Tensor& pi
     else writes.push_back(b);
 
     device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::LDL, a.scalar_type()},
+        ShaderKey{torchvulkan::Kernel::LDL, real},
         device->default_subgroup_size,
         spd.build(),
         pcs.build(),
@@ -1076,22 +1080,29 @@ std::tuple<at::Tensor&, at::Tensor&> linalg_eigh_out_vulkan(const at::Tensor& A,
     return std::forward_as_tuple(eigenvalues, eigenvectors);
 }
 
+// LAPACK's sytrf/hetrf take float, double and their complex types
+at::ScalarType ldl_dtype(const at::Tensor& t, const char* name)
+{
+    if (!t.is_complex()) return linalg_dtype(t, name);
+    return (t.scalar_type() == at::kComplexDouble && is_dtype_supported(t, at::kDouble)) ? at::kComplexDouble : at::kComplexFloat;
+}
+
 std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_ldl_factor_ex_out_vulkan(
     const at::Tensor& self,
-    bool /* hermitian */,
+    bool hermitian,
     bool check_errors,
     at::Tensor& LD,
     at::Tensor& pivots,
     at::Tensor& info)
 {
     check_square(self, "torch.linalg.ldl_factor_ex");
-    at::ScalarType dtype = linalg_dtype(self, "torch.linalg.ldl_factor_ex");
+    at::ScalarType dtype = ldl_dtype(self, "torch.linalg.ldl_factor_ex");
     std::vector<int64_t> batch = batch_shape(self);
     int64_t n = self.size(-1);
     at::Tensor a = batched_copy(self, dtype);
     at::Tensor piv = at::zeros({a.size(0), n}, self.options().dtype(at::kInt));
     at::Tensor inf = at::zeros({a.size(0)}, self.options().dtype(at::kInt));
-    if (a.numel() > 0) dispatch_ldl_shader(LdlMode::FACTOR, a, piv, inf, at::Tensor());
+    if (a.numel() > 0) dispatch_ldl_shader(LdlMode::FACTOR, a, piv, inf, at::Tensor(), hermitian);
     std::vector<int64_t> pivot_shape = batch;
     pivot_shape.push_back(n);
     fill_out(LD, at::tril(a).view(self.sizes()).to(self.scalar_type()));
@@ -1101,17 +1112,17 @@ std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_ldl_factor_ex_out_vulka
     return std::forward_as_tuple(LD, pivots, info);
 }
 
-at::Tensor& linalg_ldl_solve_out_vulkan(const at::Tensor& LD, const at::Tensor& pivots, const at::Tensor& B, bool /* hermitian */, at::Tensor& result)
+at::Tensor& linalg_ldl_solve_out_vulkan(const at::Tensor& LD, const at::Tensor& pivots, const at::Tensor& B, bool hermitian, at::Tensor& result)
 {
     TORCH_CHECK(LD.dim() >= 2 && B.dim() >= 2, "torch.linalg.ldl_solve: LD and B must have at least 2 dimensions");
-    at::ScalarType dtype = linalg_dtype(B, "torch.linalg.ldl_solve");
+    at::ScalarType dtype = ldl_dtype(B, "torch.linalg.ldl_solve");
     auto [ld, b] = broadcast_batches(LD, B);
     std::vector<int64_t> pivot_batch(b.sizes().begin(), b.sizes().end() - 2);
     pivot_batch.push_back(pivots.size(-1));
     at::Tensor a = batched_copy(ld, dtype);
     at::Tensor piv = pivots.expand(pivot_batch).reshape({a.size(0), pivots.size(-1)}).contiguous();
     at::Tensor x = batched_copy(b, dtype);
-    if (x.numel() > 0) dispatch_ldl_shader(LdlMode::SOLVE, a, piv, at::Tensor(), x);
+    if (x.numel() > 0) dispatch_ldl_shader(LdlMode::SOLVE, a, piv, at::Tensor(), x, hermitian);
     return fill_out(result, x.view(b.sizes()).to(B.scalar_type()));
 }
 
