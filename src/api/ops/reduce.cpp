@@ -344,12 +344,50 @@ enum class ArgOp
     ARGMIN = 1 
 };
 
+at::Tensor argreduce(const at::Tensor& self, c10::optional<int64_t> dim, bool keepdim, ArgOp op);
+
+// past 32-bit indexing: reduce chunks of the dim and pick the winning chunk (the first on a tie), or split a kept dim
+at::Tensor argreduce_chunked(const at::Tensor& x, int64_t d, ArgOp op)
+{
+    constexpr int64_t chunk = int64_t(1) << 30;
+    int64_t n = x.size(d);
+    if (n > chunk) {
+        std::vector<at::Tensor> values;
+        std::vector<at::Tensor> indices;
+        for (int64_t start = 0; start < n; start += chunk) {
+            at::Tensor part = x.narrow(d, start, std::min(chunk, n - start));
+            at::Tensor i = argreduce(part, d, /*keepdim=*/true, op);
+            values.push_back(at::gather(part, d, i));
+            indices.push_back(at::add(i, start));
+        }
+        at::Tensor pick = argreduce(at::cat(values, d), d, /*keepdim=*/true, op);
+        return at::gather(at::cat(indices, d), d, pick);
+    }
+
+    if (x.numel() <= chunk) return argreduce(x.contiguous(), d, /*keepdim=*/true, op);
+    int64_t k = d == 0 ? 1 : 0;
+    for (int64_t i = 0; i < x.dim(); i++) {
+        if (i != d && x.size(i) > x.size(k)) k = i;
+    }
+    int64_t step = std::max<int64_t>(1, x.size(k) * chunk / x.numel());
+    std::vector<at::Tensor> parts;
+    for (int64_t start = 0; start < x.size(k); start += step) {
+        parts.push_back(argreduce(x.narrow(k, start, std::min(step, x.size(k) - start)), d, /*keepdim=*/true, op));
+    }
+    return at::cat(parts, k);
+}
+
 at::Tensor argreduce(
     const at::Tensor& self,
     c10::optional<int64_t> dim,
     bool keepdim,
     ArgOp op)
 {
+    // no dim with keepdim: every dim kept, at size 1
+    if (!dim.has_value() && keepdim && self.dim() > 0) {
+        std::vector<int64_t> ones(self.dim(), 1);
+        return argreduce(self, dim, false, op).reshape(ones);
+    }
     at::Tensor x = self;
     bool flatten = !dim.has_value();
     int64_t d = 0;
@@ -360,7 +398,18 @@ at::Tensor argreduce(
         d = c10::maybe_wrap_dim(*dim, x.dim());
     }
 
-    if (!is_dtype_supported(x, x.scalar_type()) || x.dim() == 0 || x.dim() > MAX_DIMS || x.numel() == 0 || !fits_32bit_indexing({x})) {
+    // a 0-dim or empty input: the meta kernel raises torch's error or gives the shape, and every index is 0
+    if (self.dim() == 0 || self.numel() == 0) {
+        at::Tensor meta = self.to(at::kMeta);
+        at::Tensor shape = op == ArgOp::ARGMAX ? at::argmax(meta, dim, keepdim) : at::argmin(meta, dim, keepdim);
+        return at::zeros(shape.sizes(), self.options().dtype(at::kLong));
+    }
+
+    if (is_dtype_supported(x, x.scalar_type()) && x.dim() <= MAX_DIMS && !fits_32bit_indexing({x})) {
+        at::Tensor idx = argreduce_chunked(x, d, op);
+        return keepdim ? idx : idx.squeeze(d);
+    }
+    if (!is_dtype_supported(x, x.scalar_type()) || x.dim() > MAX_DIMS) {
         TORCHVULKAN_FALLBACK("This ", op == ArgOp::ARGMAX ? "argmax" : "argmin", " on ", x.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ArgOp::ARGMAX ? at::argmax(self.cpu(), dim, keepdim) : at::argmin(self.cpu(), dim, keepdim);
         return cpu.to(self.device());
@@ -414,8 +463,7 @@ at::Tensor& argmax_out_vulkan(
     bool keepdim,
     at::Tensor& out)
 {
-    out.copy_(argreduce(self, dim, keepdim, ArgOp::ARGMAX));
-    return out;
+    return fill_out(out, argreduce(self, dim, keepdim, ArgOp::ARGMAX));
 }
 
 at::Tensor& argmin_out_vulkan(
@@ -424,8 +472,7 @@ at::Tensor& argmin_out_vulkan(
     bool keepdim,
     at::Tensor& out)
 {
-    out.copy_(argreduce(self, dim, keepdim, ArgOp::ARGMIN));
-    return out;
+    return fill_out(out, argreduce(self, dim, keepdim, ArgOp::ARGMIN));
 }
 
 // NaN counts as nonzero

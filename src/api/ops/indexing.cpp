@@ -1,4 +1,6 @@
 #include <torch/extension.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/core/op_registration/adaption.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/WrapDimUtils.h>
 #include <ATen/native/IndexingUtils.h>
@@ -39,7 +41,7 @@ bool dispatch_index_gather_shader(
     if (out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) return false;
 
     for (size_t k = 0; k < num_indices; k++) {
-        if (index_sizes[k] > std::numeric_limits<int32_t>::max() || index_strides[k] > std::numeric_limits<uint32_t>::max()) return false;
+        if (index_sizes[k] > std::numeric_limits<uint32_t>::max() || index_strides[k] > std::numeric_limits<uint32_t>::max()) return false;
     }
 
     DeviceContext* device = get_device_context(out);
@@ -128,14 +130,27 @@ at::Tensor& gather_out_vulkan(const at::Tensor& self, int64_t dim, const at::Ten
     return out;
 }
 
+// its own kernel, not torch's structured wrapper around gather.out: that one records a second aten::gather in traces
+at::Tensor gather_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index, bool sparse_grad)
+{
+    std::optional<c10::Device> common_device;
+    c10::impl::check_and_update_common_device(common_device, self, "wrapper_PrivateUse1_gather", "self");
+    c10::impl::check_and_update_common_device(common_device, index, "wrapper_PrivateUse1_gather", "index");
+    at::Tensor out = at::empty({0}, self.options());
+    return gather_out_vulkan(self, dim, index, sparse_grad, out);
+}
+
 at::Tensor index_select_vulkan(const at::Tensor& self, int64_t dim, const at::Tensor& index)
 {
     TORCH_CHECK_INDEX(index.dim() <= 1, "index_select(): Index is supposed to be a vector");
     TORCH_CHECK_INDEX(index.scalar_type() == at::kLong || index.scalar_type() == at::kInt, "index_select(): Expected dtype int32 or int64 for index");
 
+    // a 0-dim self: the only valid index is 0, and the result is self
     if (self.dim() == 0) {
-        TORCHVULKAN_FALLBACK("index_select on a 0-dim tensor runs on the CPU.");
-        return at::index_select(self.cpu(), dim, index.cpu()).to(self.device());
+        c10::maybe_wrap_dim(dim, 0);
+        TORCH_CHECK(index.numel() == 1, "index_select(): Index to scalar can have only 1 value, got ", index.numel(), " value(s)");
+        TORCH_CHECK_INDEX(index.reshape({}).item<int64_t>() == 0, "index out of range in self");
+        return self.clone();
     }
 
     dim = c10::maybe_wrap_dim(dim, self.dim());
@@ -174,7 +189,13 @@ AdvancedIndexPlan plan_advanced_index(const at::Tensor& self_in, const c10::List
 {
     at::native::checkIndexTensorTypes(orig, /*allow_int=*/true);
     at::Tensor self = self_in;
-    std::vector<at::Tensor> indices = at::native::expandTensors(self, orig, /*ensure_same_device=*/true);
+    // torch has already warned about uint8 masks before reaching this kernel: as bools they don't warn twice
+    c10::List<std::optional<at::Tensor>> masks;
+    for (const std::optional<at::Tensor>& index : orig) {
+        bool byte = index.has_value() && index->defined() && index->scalar_type() == at::kByte;
+        masks.push_back(byte ? std::optional<at::Tensor>(index->to(at::kBool)) : index);
+    }
+    std::vector<at::Tensor> indices = at::native::expandTensors(self, masks, /*ensure_same_device=*/true);
     try {
         indices = at::expand_outplace(indices);
     } catch (std::exception&) {
@@ -222,11 +243,37 @@ AdvancedIndexPlan plan_advanced_index(const at::Tensor& self_in, const c10::List
     return plan;
 }
 
+// the kernel takes four index tensors: the ones past the third fold into one of their combined offsets, after the
+// bounds check the kernel would otherwise make
+void fold_extra_indices(AdvancedIndexPlan& plan)
+{
+    constexpr size_t kept = 3;
+    if (plan.indices.size() <= kept + 1) return;
+    at::Tensor combined;
+    int64_t extent = 1;
+    for (size_t k = kept; k < plan.indices.size(); k++) {
+        const at::Tensor& index = plan.indices[k];
+        int64_t size = plan.index_sizes[k];
+        TORCH_CHECK_INDEX(!at::logical_or(at::lt(index, -size), at::ge(index, size)).any().item<bool>(),
+            "index out of range for dimension with size ", size);
+        at::Tensor term = at::mul(at::where(at::lt(index, 0), at::add(index, size), index), plan.index_strides[k]);
+        combined = combined.defined() ? at::add(combined, term) : term;
+        extent += (size - 1) * plan.index_strides[k];
+    }
+    plan.indices.resize(kept);
+    plan.index_sizes.resize(kept);
+    plan.index_strides.resize(kept);
+    plan.indices.push_back(combined);
+    plan.index_sizes.push_back(extent);
+    plan.index_strides.push_back(1);
+}
+
 at::Tensor& index_out_vulkan(const at::Tensor& self, const c10::List<std::optional<at::Tensor>>& indices, at::Tensor& out)
 {
     AdvancedIndexPlan plan = plan_advanced_index(self, indices);
-    if (out.sizes() != plan.src.sizes()) out.resize_(plan.src.sizes());
+    at::native::resize_output(out, plan.src.sizes());
     if (out.numel() == 0) return out;
+    fold_extra_indices(plan);
 
     if (!is_dtype_copyable(self, self.scalar_type()) ||
         !dispatch_index_gather_shader(out, plan.src, plan.indices, plan.index_sizes, plan.index_strides, /*wrap_negative=*/true))
@@ -351,6 +398,7 @@ std::tuple<at::Tensor&, at::Tensor&> min_dim_out_vulkan(const at::Tensor& self, 
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("gather", &gather_vulkan);
     m.impl("gather.out", &gather_out_vulkan);
     m.impl("index_select", &index_select_vulkan);
     m.impl("index_select.out", &index_select_out_vulkan);
