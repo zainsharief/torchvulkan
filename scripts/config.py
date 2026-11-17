@@ -179,6 +179,9 @@ KERNELS = [
     Kernel('eig', 'ops/eig.slang', [
         Entry('eig_main', [F64, F32]),
     ]),
+    Kernel('complex_arc', 'ops/complex_arc.slang', [
+        Entry('complex_arc_main', [F32]),
+    ]),
     Kernel('fft', 'ops/fft.slang', [
         Entry('fft_main', [F64, F32]),
     ]),
