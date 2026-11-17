@@ -50,7 +50,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     });
 
     m.def("empty_cache", []() {
-        for (DeviceContext* device : VulkanContext::Instance().devices) device->releaseCachedBuffers(SIZE_MAX, MemoryUsage::DEVICE_ONLY);
+        for (DeviceContext* device : VulkanContext::Instance().devices) {
+            device->releaseCachedBuffers(SIZE_MAX, MemoryUsage::DEVICE_ONLY);
+            device->cache.releaseStagingBuffers();  // the host memory of cached upload and download buffers too
+        }
     }, py::call_guard<py::gil_scoped_release>());
 
     m.def("_save_pipeline_caches", []() {
@@ -72,6 +75,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("_memory_reserved", [](int64_t device_index) -> uint64_t {
         return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->reservedBytes();
+    });
+
+    // host memory held by cached staging buffers (uploads and downloads), not part of reserved
+    m.def("_staging_cached_bytes", [](int64_t device_index) -> uint64_t {
+        return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->cache.cachedStagingBytes();
     });
 
     m.def("_mem_get_info", [](int64_t device_index) -> std::pair<uint64_t, uint64_t> {

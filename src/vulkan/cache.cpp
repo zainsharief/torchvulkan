@@ -176,6 +176,21 @@ bool VulkanCache::releaseOldestLocked(BufferPool& pool)
     return true;
 }
 
+size_t VulkanCache::cachedStagingBytes()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return uploadBufferPool.bytes + downloadBufferPool.bytes;
+}
+
+void VulkanCache::releaseStagingBuffers()
+{
+    // buffers still in flight are not in the pools yet (they return after their copy's flush)
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (BufferPool* pool : {&uploadBufferPool, &downloadBufferPool}) {
+        while (releaseOldestLocked(*pool)) {}
+    }
+}
+
 void VulkanCache::releaseBuffers()
 {
     std::lock_guard<std::mutex> lock(mutex_);

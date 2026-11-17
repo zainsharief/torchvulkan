@@ -56,6 +56,8 @@ public:
     bool releaseOldestBuffer(MemoryUsage usage);
     void releaseBuffers();
     size_t cachedDeviceBytes() const { return cached_device_bytes.load(); }
+    size_t cachedStagingBytes();
+    void releaseStagingBuffers();
 
     void clear();
 
