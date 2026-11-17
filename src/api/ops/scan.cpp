@@ -107,8 +107,7 @@ at::Tensor& cumsum_out_vulkan(
     c10::optional<at::ScalarType> dtype,
     at::Tensor& out)
 {
-    out.copy_(cumscan(self, dim, dtype, ScanOp::SUM));
-    return out;
+    return fill_out(out, cumscan(self, dim, dtype, ScanOp::SUM));
 }
 
 at::Tensor& cumprod_out_vulkan(
@@ -117,8 +116,7 @@ at::Tensor& cumprod_out_vulkan(
     c10::optional<at::ScalarType> dtype,
     at::Tensor& out)
 {
-    out.copy_(cumscan(self, dim, dtype, ScanOp::PROD));
-    return out;
+    return fill_out(out, cumscan(self, dim, dtype, ScanOp::PROD));
 }
 
 at::Tensor logcumsumexp_vulkan(const at::Tensor& self, int64_t dim)

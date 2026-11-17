@@ -119,8 +119,10 @@ MatmulShape get_matmul_shape(const at::Tensor& self_, const at::Tensor& other_)
         shape.other_unsqueezed = true;
     }
 
-    TORCH_CHECK(shape.self.size(-1) == shape.other.size(-2), "torchvulkan [ERROR]: matmul inner dimensions must match, got ",
-        shape.self.sizes(), " and ", shape.other.sizes(), ".");
+    TORCH_CHECK(shape.self.scalar_type() == shape.other.scalar_type(), "expected m1 and m2 to have the same dtype, but got: ",
+        shape.self.dtype().name(), " != ", shape.other.dtype().name());
+    TORCH_CHECK(shape.self.size(-1) == shape.other.size(-2), "mat1 and mat2 shapes cannot be multiplied (", shape.self.size(-2), "x", shape.self.size(-1),
+        " and ", shape.other.size(-2), "x", shape.other.size(-1), ")");
 
     shape.M = static_cast<uint32_t>(shape.self.size(-2));
     shape.K = static_cast<uint32_t>(shape.self.size(-1));
@@ -246,6 +248,7 @@ at::Tensor dispatch_matmul_simd_shader(
     for (int64_t b0 = 0; b0 < B; b0 += max_batch)
     {
         int64_t batch = std::min(max_batch, B - b0);
+        materialize_cow(out);
         auto address_at = [&](const at::Tensor& t) { return get_tensor_address(t) + b0 * t.stride(0) * t.element_size(); };
 
         PushConstantBuilder pcs{};
@@ -438,6 +441,7 @@ at::Tensor dispatch_matmul_coop_shader(
     for (int64_t b0 = 0; b0 < B; b0 += max_batch)
     {
         int64_t batch = std::min(max_batch, B - b0);
+        materialize_cow(out);
         auto address_at = [&](const at::Tensor& t) { return get_tensor_address(t) + b0 * t.stride(0) * t.element_size(); };
 
         PushConstantBuilder pcs{};
@@ -490,10 +494,20 @@ at::Tensor dispatch_matmul_shader(
     return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, activation, cpu_fallback);
 }
 
+// the CPU's mm / addmm checks (mat1 is "self" in its messages)
+void check_matrix_product(const char* name, const at::Tensor& mat1, const at::Tensor& mat2)
+{
+    TORCH_CHECK(mat1.dim() == 2, name, ": self must be a matrix, got ", mat1.dim(), "-D tensor");
+    TORCH_CHECK(mat2.dim() == 2, name, ": mat2 must be a matrix, got ", mat2.dim(), "-D tensor");
+    TORCH_CHECK(mat1.size(1) == mat2.size(0), name, ": mat1 and mat2 shapes cannot be multiplied (", mat1.size(0), "x", mat1.size(1), " and ",
+        mat2.size(0), "x", mat2.size(1), ")");
+}
+
 at::Tensor mm_vulkan(
     const at::Tensor& self,
     const at::Tensor& other)
 {
+    check_matrix_product("mm", self, other);
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
         [&]() { return at::mm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
@@ -504,6 +518,14 @@ at::Tensor bmm_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
+    // the structured meta function's checks
+    TORCH_CHECK(self.dim() == 3, "batch1 must be a 3D tensor");
+    TORCH_CHECK(other.dim() == 3, "batch2 must be a 3D tensor");
+    TORCH_CHECK(self.device() == other.device(), "Expected all tensors to be on the same device, but found at least two devices, ", self.device(),
+        " and ", other.device(), "!");
+    TORCH_CHECK(self.scalar_type() == other.scalar_type(), "expected scalar type ", self.scalar_type(), " but found ", other.scalar_type());
+    TORCH_CHECK(other.size(0) == self.size(0) && other.size(1) == self.size(2), "Expected size for first two dimensions of batch2 tensor to be: [",
+        self.size(0), ", ", self.size(2), "] but got: [", other.size(0), ", ", other.size(1), "].");
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
         [&]() { return at::bmm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
@@ -517,6 +539,11 @@ at::Tensor addmm_vulkan(
     const at::Scalar& beta, 
     const at::Scalar& alpha) 
 {
+    for (const at::Tensor* t : {&mat1, &mat2}) {
+        TORCH_CHECK(t->device() == input.device(), "Expected all tensors to be on the same device, but found at least two devices, ", input.device(),
+            " and ", t->device(), "!");
+    }
+    check_matrix_product("addmm", mat1, mat2);
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
         [&]() { return at::addmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
@@ -530,6 +557,8 @@ at::Tensor baddbmm_vulkan(
     const at::Scalar& beta, 
     const at::Scalar& alpha)
 {
+    TORCH_CHECK(input.scalar_type() == mat1.scalar_type() && mat1.scalar_type() == mat2.scalar_type(), "Input dtypes must be the same, got: input ",
+        input.dtype().name(), ", batch1: ", mat1.dtype().name(), ", batch2: ", mat2.dtype().name());
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
         [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
@@ -553,6 +582,7 @@ at::Tensor addmm_activation_vulkan(
 
 at::Tensor& bmm_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out)
 {
+    check_out_device(out, self);
     return fill_out(out, bmm_vulkan(self, other));
 }
 

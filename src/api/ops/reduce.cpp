@@ -212,8 +212,32 @@ at::Tensor reduce_dims_vulkan(
     double empty_value,
     bool has_subgroup)
 {
+    // torch's dim checks: at most 64 dims, none repeated
+    if (dims.has_value() && dims->size() > 0) at::dim_list_to_bitset(*dims, self.dim());
     std::optional<at::Tensor> complex = complex_reduce(self, dims, keepdim, operation);
     if (complex.has_value()) return *complex;
+    // more dims than the kernel takes: the kept dims and the reduced ones each flattened into one, reduced, and shaped back
+    if (self.dim() > MAX_DIMS && is_dtype_supported(self, self.scalar_type())) {
+        std::vector<bool> reduced(self.dim(), !(dims.has_value() && dims->size() > 0));
+        if (dims.has_value()) for (int64_t d : *dims) reduced[c10::maybe_wrap_dim(d, self.dim())] = true;
+        std::vector<int64_t> order, kept_sizes, out_sizes;
+        int64_t kept = 1, folded = 1;
+        for (int64_t d = 0; d < self.dim(); d++) {
+            if (reduced[d]) continue;
+            order.push_back(d);
+            kept_sizes.push_back(self.size(d));
+            kept *= self.size(d);
+        }
+        for (int64_t d = 0; d < self.dim(); d++) {
+            if (!reduced[d]) continue;
+            order.push_back(d);
+            folded *= self.size(d);
+        }
+        for (int64_t d = 0; d < self.dim(); d++) out_sizes.push_back(reduced[d] ? 1 : self.size(d));
+        at::Tensor flat = self.permute(order).reshape({kept, folded});
+        at::Tensor r = reduce_dims_vulkan(flat, at::IntArrayRef{1}, /*keepdim=*/false, operation, empty_value, has_subgroup);
+        return unview(r.reshape(keepdim ? out_sizes : kept_sizes));
+    }
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());
@@ -235,7 +259,7 @@ at::Tensor reduce_dims_vulkan(
     for (int64_t d : dim_list) {
         result = dispatch_reduce_shader(result, d, keepdim, operation, empty_value, has_subgroup);
     }
-    return result;
+    return unview(result);  // the shader's output reshaped (a full reduction's [1] as []) is still a new tensor
 }
 
 // the sum in its accumulation dtype (float32 for half and bfloat16), before it's cast to the output dtype
@@ -270,11 +294,27 @@ at::Tensor torchvulkan::sum_vulkan(
 
 namespace {
 
+// max and min have no identity: torch refuses to reduce over an empty dimension
+void check_extremum_dims(const at::Tensor& self, at::IntArrayRef dim, const char* name)
+{
+    at::dim_list_to_bitset(dim, self.dim());  // repeated dims, more than 64 dims
+    if (dim.empty()) {
+        TORCH_CHECK(self.numel() > 0, name, "(): Expected reduction dim to be specified for input.numel() == 0. ",
+            "Specify the reduction dim with the 'dim' argument.");
+        return;
+    }
+    for (int64_t d : dim) {
+        int64_t wrapped = c10::maybe_wrap_dim(d, self.dim());
+        TORCH_CHECK_INDEX(self.dim() == 0 || self.size(wrapped) != 0, name, "(): Expected reduction dim ", d, " to have non-zero size.");
+    }
+}
+
 at::Tensor amax_vulkan(
     const at::Tensor& self,
     at::IntArrayRef dim,
     bool keepdim)
 {
+    check_extremum_dims(self, dim, "amax");
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMAX, -std::numeric_limits<double>::infinity(), true);
 }
 
@@ -283,6 +323,7 @@ at::Tensor amin_vulkan(
     at::IntArrayRef dim,
     bool keepdim)
 {
+    check_extremum_dims(self, dim, "amin");
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMIN, std::numeric_limits<double>::infinity(), true);
 }
 
@@ -321,7 +362,7 @@ at::Tensor mean_dim_vulkan(
         "mean(): could not infer output dtype. ", (dtype.has_value() ? "Optional" : "Input"),
         " dtype must be either a floating point or complex dtype. Got: ", out_dtype
     );
-    if (self.dim() == 0) return self.to(out_dtype);
+    if (self.dim() == 0) return self.to(out_dtype, /*non_blocking=*/false, /*copy=*/true);  // a new tensor, never self
 
     int64_t count = 1;
     if (dim.has_value() && dim->size() > 0) {

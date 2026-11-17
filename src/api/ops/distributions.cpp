@@ -101,9 +101,13 @@ at::Tensor sample_dirichlet_vulkan(const at::Tensor& alpha, std::optional<at::Ge
 {
     check_floating(alpha, "_sample_dirichlet");
     at::ScalarType real = random_real_dtype(alpha.scalar_type());
-    at::Tensor gamma = dispatch_distribution_shader(DistributionOp::GAMMA, alpha.to(real), at::Tensor(), generator);
-
-    at::Tensor result = gamma / gamma.sum(-1, /*keepdim=*/true);
+    // small shapes underflow float32 gamma samples to 0 (the CPU works in float64): in log space instead, from
+    // Gamma(a) = Gamma(a + 1) U^(1/a), and the softmax of the log samples
+    at::Tensor a = alpha.to(real);
+    at::Tensor boosted = dispatch_distribution_shader(DistributionOp::GAMMA, at::add(a, 1), at::Tensor(), generator);
+    at::Tensor uniform = at::rand_like(a, generator);
+    at::Tensor log_gamma = at::add(at::log(boosted), at::div(at::log(uniform), a));
+    at::Tensor result = at::softmax(log_gamma, -1);
     // torch keeps each value in [smallest normal, the largest value below 1]
     double below_one = alpha.scalar_type() == at::kDouble ? std::nextafter(1.0, 0.0) : static_cast<double>(std::nextafter(1.0f, 0.0f));
     return result.clamp(get_dtype_smallest_normal(alpha.scalar_type()), below_one).to(alpha.scalar_type());

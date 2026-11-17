@@ -59,7 +59,8 @@ void dispatch_multinomial_shader(
 
 at::Tensor& multinomial_out_vulkan(const at::Tensor& self, int64_t n_sample, bool with_replacement, std::optional<at::Generator> generator, at::Tensor& result)
 {
-    TORCH_CHECK(result.device() == self.device(), "multinomial arguments must have the same device");
+    TORCH_CHECK(result.device() == self.device(), "Expected all tensors to be on the same device, but found at least two devices, ",
+        self.device(), " and ", result.device(), "!");
     TORCH_CHECK(self.dim() > 0 && self.dim() <= 2, "prob_dist must be 1 or 2 dim");
     TORCH_CHECK(at::isFloatingType(self.scalar_type()), "multinomial only supports floating-point dtypes for input, got: ", self.scalar_type());
     TORCH_CHECK(result.scalar_type() == at::kLong, "multinomial expects Long tensor out, got: ", result.scalar_type());
@@ -71,18 +72,19 @@ at::Tensor& multinomial_out_vulkan(const at::Tensor& self, int64_t n_sample, boo
     TORCH_CHECK(n_categories <= FLOAT32_MAX_CONSECUTIVE_INT, "number of categories cannot exceed 2^24");
 
     if (self.dim() == 1) {
-        result.resize_({n_sample});
+        at::native::resize_output(result, {n_sample});
     } else {
-        result.resize_({self.size(0), n_sample});
+        at::native::resize_output(result, {self.size(0), n_sample});
     }
     if (result.numel() == 0) return result;
 
-    double total = self.sum().item<double>();
-    TORCH_CHECK(at::amin(self).item<double>() >= 0 && at::amax(self).item<double>() < INFINITY && !std::isnan(total),
-        "probability tensor contains either `inf`, `nan` or element < 0"
-    );
-    int64_t zero_rows = (self.sum(-1) == 0).sum().item<int64_t>();
-    TORCH_CHECK(zero_rows == 0, "invalid multinomial distribution (sum of probabilities <= 0)");
+    // both checks in one read back: a draw is often too small for its syncs not to dominate
+    at::Tensor invalid = at::logical_or(at::lt(self, 0), at::logical_not(at::isfinite(self))).any();
+    at::Tensor zero_row = at::eq(self.sum(-1), 0).any();
+    at::Tensor flags = at::stack({invalid, zero_row}).cpu();
+    const bool* flag = flags.const_data_ptr<bool>();
+    TORCH_CHECK(!flag[0], "probability tensor contains either `inf`, `nan` or element < 0");
+    TORCH_CHECK(!flag[1], "invalid multinomial distribution (sum of probabilities <= 0)");
 
     if (with_replacement && n_sample > 1) {
         dispatch_multinomial_shader(self, n_sample, generator, result);
@@ -107,24 +109,31 @@ at::Tensor multinomial_vulkan(const at::Tensor& self, int64_t n_sample, bool wit
     return result;
 }
 
+// torch's check_supported_max_int_with_precision: n - 1 must fit the dtype, and a float must hold every integer up to it
 void check_randperm_fits(int64_t n, const at::Tensor& result)
 {
     at::ScalarType dtype = result.scalar_type();
-    if (dtype == at::kLong || dtype == at::kUInt64 || dtype == at::kBool) return;
-
-    int64_t limit = int64_t(1) << get_dtype_digits(dtype);
-    TORCH_CHECK(n <= limit, "n cannot be greater than ", limit, " for ", dtype, ", got ", n);
+    if (dtype == at::kBool) return;
+    check_scalar_convertible(n > 0 ? n - 1 : n, dtype);
+    if (!at::isFloatingType(dtype)) return;
+    int digits = get_dtype_digits(dtype);
+    TORCH_CHECK(n <= (int64_t(1) << digits) + 1, "n cannot be greater than 2^", digits, "+1 for ", dtype);
 }
 
 at::Tensor& randperm_out_vulkan(int64_t n, std::optional<at::Generator> generator, at::Tensor& result)
 {
     TORCH_CHECK(n >= 0, "n must be non-negative, got", n);
+    // n = 0 draws nothing, so any generator goes
+    if (n == 0) {
+        at::native::resize_output(result, {0});
+        return result;
+    }
     TORCH_CHECK(!generator.has_value() || !generator->defined() || result.device().type() == generator->device().type(),
-        "Expected a '", result.device(), "' generator device but found '", generator->device(), "'"
+        "Expected a '", result.device().type(), "' device type for generator but found '", generator->device().type(), "'"
     );
     check_randperm_fits(n, result);
 
-    result.resize_({n});
+    at::native::resize_output(result, {n});
     if (n == 0) return result;
 
     at::ScalarType key_dtype = random_proxy_dtype(at::kLong);
