@@ -83,11 +83,14 @@ private:
     {
         std::list<VulkanBuffer*> lru; // oldest first
         std::unordered_map<size_t, std::deque<std::list<VulkanBuffer*>::iterator>> by_size; // keyed by the rounded buffer size, oldest first
+        size_t bytes = 0; // host pools only: kept under stagingCacheCap() (see deleteBuffer)
     };
     BufferPool deviceBufferPool;
-    BufferPool stagingBufferPool;
-    // bytes of staging (host) buffers in the cache, kept under stagingCacheCap() (see deleteBuffer)
-    size_t cached_staging_bytes = 0;
+    // Uploads and downloads use different host memory (write-combined for uploads, cached for
+    // downloads), so they must not share a pool: reading a download out of a reused upload buffer
+    // ran at 0.24 GB/s instead of ~12.
+    BufferPool uploadBufferPool;
+    BufferPool downloadBufferPool;
     bool releaseOldestLocked(BufferPool& pool);
     std::atomic<size_t> cached_device_bytes{0};
     void countCached(const VulkanBuffer* buffer, bool added);

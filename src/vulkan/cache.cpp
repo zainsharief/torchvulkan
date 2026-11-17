@@ -88,14 +88,19 @@ size_t VulkanCache::roundBufferSize(size_t size)
 
 VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
 {
-    return usage == MemoryUsage::DEVICE_ONLY ? deviceBufferPool : stagingBufferPool;
+    switch (usage) {
+    case MemoryUsage::DEVICE_ONLY: return deviceBufferPool;
+    case MemoryUsage::HOST_TO_DEVICE: return uploadBufferPool;
+    default: return downloadBufferPool;
+    }
 }
 
 void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
 {
     if (buffer->usage() != MemoryUsage::DEVICE_ONLY) {
-        if (added) cached_staging_bytes += buffer->size();
-        else cached_staging_bytes -= buffer->size();
+        BufferPool& pool = poolFor(buffer->usage());
+        if (added) pool.bytes += buffer->size();
+        else pool.bytes -= buffer->size();
         return;
     }
     if (added) cached_device_bytes.fetch_add(buffer->size());
@@ -143,9 +148,9 @@ void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
     pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
     countCached(buffer, true);
 
-    // keep the staging pool under its cap, oldest buffers first (a buffer bigger than the cap goes too)
-    if (&pool == &stagingBufferPool) {
-        while (cached_staging_bytes > stagingCacheCap() && releaseOldestLocked(pool)) {}
+    // keep each host pool under its cap, oldest buffers first (a buffer bigger than the cap goes too)
+    if (&pool != &deviceBufferPool) {
+        while (pool.bytes > stagingCacheCap() && releaseOldestLocked(pool)) {}
     }
 }
 
@@ -174,7 +179,7 @@ bool VulkanCache::releaseOldestLocked(BufferPool& pool)
 void VulkanCache::releaseBuffers()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (BufferPool* pool : {&deviceBufferPool, &stagingBufferPool}) {
+    for (BufferPool* pool : {&deviceBufferPool, &uploadBufferPool, &downloadBufferPool}) {
         for (VulkanBuffer* buffer : pool->lru) 
         {
             countCached(buffer, false);
