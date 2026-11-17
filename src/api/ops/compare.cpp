@@ -5,6 +5,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 #include "api/fallback.h"
 
 namespace {
@@ -43,6 +44,29 @@ at::Tensor cpu_compare_scalar(const at::Tensor& a, const at::Scalar& b, CompareO
     return cpu_compare(a, at::scalar_tensor(b, a.options()), op);
 }
 
+bool compare_complex(const at::Tensor& self, const at::Tensor* other, const at::Scalar& scalar_value, at::Tensor& out, CompareOp op, c10::ScalarType promoted)
+{
+    at::ScalarType real = c10::toRealValueType(promoted == at::kComplexHalf ? at::kComplexFloat : promoted);
+    auto parts_of = [real](const at::Tensor& t) {
+        torchvulkan::ComplexParts p = torchvulkan::complex_parts(t);
+        return torchvulkan::ComplexParts{p.re.to(real), p.im.to(real)};
+    };
+    torchvulkan::ComplexParts a = parts_of(self);
+    torchvulkan::ComplexParts b = other == nullptr ? torchvulkan::complex_scalar_parts(scalar_value, a.re) : parts_of(*other);
+    auto truthy = [](const torchvulkan::ComplexParts& z) { return at::logical_or(at::ne(z.re, 0), at::ne(z.im, 0)); };
+    at::Tensor result;
+    switch (op) {
+        case CompareOp::EQ: result = at::logical_and(at::eq(a.re, b.re), at::eq(a.im, b.im)); break;
+        case CompareOp::NE: result = at::logical_or(at::ne(a.re, b.re), at::ne(a.im, b.im)); break;
+        case CompareOp::LAND: result = at::logical_and(truthy(a), truthy(b)); break;
+        case CompareOp::LOR: result = at::logical_or(truthy(a), truthy(b)); break;
+        case CompareOp::LXOR: result = at::logical_xor(truthy(a), truthy(b)); break;
+        default: return false;
+    }
+    out.copy_(result.expand(out.sizes()));
+    return true;
+}
+
 bool dispatch_compare_shader(
     const at::Tensor& self, 
     const at::Tensor* other, 
@@ -51,6 +75,7 @@ bool dispatch_compare_shader(
     CompareOp op, 
     c10::ScalarType promoted)
 {
+    if (at::isComplexType(promoted)) return compare_complex(self, other, scalar_value, out, op, promoted);
     DeviceContext* device = get_device_context(self);
     if (!is_dtype_supported(device, promoted)) return false;
     bool use_scalar = (other == nullptr);
@@ -114,6 +139,16 @@ at::Tensor where_vulkan(
     c10::ScalarType promoted = at::result_type(self, other);
     c10::Device device = condition.device().type() == c10::DeviceType::PrivateUse1 ? condition.device()
         : self.device().type() == c10::DeviceType::PrivateUse1 ? self.device() : other.device();
+
+    // complex values are moved as integer pairs of their width
+    if (at::isComplexType(promoted)) 
+    {
+        at::ScalarType real = c10::toRealValueType(promoted);
+        at::ScalarType bits = real == at::kHalf ? at::kShort : real == at::kFloat ? at::kInt : at::kLong;
+        auto as_bits = [&](const at::Tensor& t) { return at::view_as_real(t.to(device, promoted).resolve_conj().resolve_neg()).view(bits); };
+        at::Tensor picked = at::where(condition.to(device, at::kBool).unsqueeze(-1), as_bits(self), as_bits(other));
+        return unview(at::view_as_complex(picked.view(real)));
+    }
 
     // 0-dim CPU tensors (from scalars) join the vulkan tensors' device
     at::Tensor c = condition.to(device, at::kBool);

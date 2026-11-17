@@ -112,6 +112,75 @@ std::optional<at::Tensor> dispatch_binary_shader(
     return out;
 }
 
+torchvulkan::ComplexParts complex_pow(const torchvulkan::ComplexParts& base, const torchvulkan::ComplexParts& exponent)
+{
+    return torchvulkan::complex_exp(torchvulkan::complex_mul(torchvulkan::complex_log(base), exponent));  // base first: broadcast errors name it as a
+}
+
+std::optional<torchvulkan::ComplexParts> complex_pow_scalar(const torchvulkan::ComplexParts& z, const at::Scalar& exponent)
+{
+    if (exponent.isComplex() && exponent.toComplexDouble().imag() != 0) return std::nullopt;
+    double e = exponent.isComplex() ? exponent.toComplexDouble().real() : exponent.toDouble();
+    torchvulkan::ComplexParts one{at::ones_like(z.re), at::zeros_like(z.im)};
+    if (e == 0.5) return torchvulkan::complex_sqrt(z);
+    if (e == 2.0) return torchvulkan::complex_mul(z, z);
+    if (e == 3.0) return torchvulkan::complex_mul(torchvulkan::complex_mul(z, z), z);
+    if (e == -0.5) return torchvulkan::complex_div(one, torchvulkan::complex_sqrt(z));
+    if (e == -1.0) return torchvulkan::complex_div(one, z);
+    if (e == -2.0) return torchvulkan::complex_div(one, torchvulkan::complex_mul(z, z));
+    return std::nullopt;
+}
+
+std::optional<at::Tensor> complex_binary(
+    const at::Tensor& self,
+    const at::Tensor& other,
+    const at::Scalar* scalar,
+    const at::Scalar& alpha,
+    BinaryOp op,
+    at::ScalarType promoted)
+{
+    if (!at::isComplexType(promoted)) return std::nullopt;
+    bool supported = op == BinaryOp::ADD || op == BinaryOp::SUB || op == BinaryOp::RSUB || op == BinaryOp::MUL || op == BinaryOp::DIV ||
+                     op == BinaryOp::POW || op == BinaryOp::RPOW || op == BinaryOp::LOGADDEXP;
+    if (!supported) return std::nullopt;
+
+    at::ScalarType real = c10::toRealValueType(promoted == at::kComplexHalf ? at::kComplexFloat : promoted);
+    auto parts_of = [real](const at::Tensor& t) {
+        torchvulkan::ComplexParts p = torchvulkan::complex_parts(t);
+        return torchvulkan::ComplexParts{p.re.to(real), p.im.to(real)};
+    };
+    torchvulkan::ComplexParts a = parts_of(self);
+    torchvulkan::ComplexParts b = scalar != nullptr ? torchvulkan::complex_scalar_parts(*scalar, a.re) : parts_of(other);
+    bool scaled = op == BinaryOp::SUB || op == BinaryOp::RSUB ||
+                  (alpha.isComplex() ? alpha.toComplexDouble() != c10::complex<double>(1.0) : alpha.toDouble() != 1.0);
+    torchvulkan::ComplexParts alpha_parts = scaled ? torchvulkan::complex_scalar_parts(alpha, a.re) : torchvulkan::ComplexParts{};
+
+    torchvulkan::ComplexParts r;
+    switch (op) {
+        case BinaryOp::ADD:
+        case BinaryOp::SUB: {
+            if (scaled) b = torchvulkan::complex_mul(b, alpha_parts);
+            r = op == BinaryOp::ADD ? torchvulkan::ComplexParts{at::add(a.re, b.re), at::add(a.im, b.im)} : torchvulkan::ComplexParts{at::sub(a.re, b.re), at::sub(a.im, b.im)};
+            break;
+        }
+        case BinaryOp::RSUB: {
+            if (scaled) a = torchvulkan::complex_mul(a, alpha_parts);
+            r = {at::sub(b.re, a.re), at::sub(b.im, a.im)};
+            break;
+        }
+        case BinaryOp::MUL: r = torchvulkan::complex_mul(a, b); break;
+        case BinaryOp::DIV: r = torchvulkan::complex_div(a, b); break;
+        case BinaryOp::POW: {
+            std::optional<torchvulkan::ComplexParts> shortcut = scalar != nullptr ? complex_pow_scalar(a, *scalar) : std::nullopt;
+            r = shortcut.has_value() ? *shortcut : complex_pow(a, b);
+            break;
+        }
+        case BinaryOp::LOGADDEXP: r = torchvulkan::complex_logaddexp(a, b); break;
+        default: r = complex_pow(b, a); break;  // RPOW: scalar ** self
+    }
+    return torchvulkan::complex_from(r, promoted);
+}
+
 at::Tensor binary_op_vulkan(
     const at::Tensor& self, 
     const at::Scalar& other, 
@@ -119,7 +188,9 @@ at::Tensor binary_op_vulkan(
     BinaryOp operation, 
     const std::function<at::Tensor(const at::Tensor&, const at::Scalar&)>& fallback)
 {
-    std::optional<at::Tensor> out = dispatch_binary_shader(self, at::Tensor(), other, alpha, operation, at::result_type(self, other));
+    at::ScalarType promoted = at::result_type(self, other);
+    std::optional<at::Tensor> out = complex_binary(self, at::Tensor(), &other, alpha, operation, promoted);
+    if (!out.has_value()) out = dispatch_binary_shader(self, at::Tensor(), other, alpha, operation, promoted);
     if (out.has_value()) return *out;
 
     TORCHVULKAN_FALLBACK("A binary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
@@ -144,7 +215,8 @@ at::Tensor binary_op_vulkan(
     at::Tensor lhs = is_cpu_scalar(self) ? self.to(other.device()) : self;
     at::Tensor rhs = other.device() == lhs.device() ? other : other.to(lhs.device());
 
-    std::optional<at::Tensor> out = dispatch_binary_shader(lhs, rhs, at::Scalar(0), alpha, operation, at::result_type(self, other));
+    std::optional<at::Tensor> out = complex_binary(lhs, rhs, nullptr, alpha, operation, at::result_type(self, other));
+    if (!out.has_value()) out = dispatch_binary_shader(lhs, rhs, at::Scalar(0), alpha, operation, at::result_type(self, other));
     if (out.has_value()) return *out;
 
     TORCHVULKAN_FALLBACK("A binary op on ", at::result_type(self, other), " can't run on the Vulkan device. Falling back to CPU.");
@@ -214,10 +286,12 @@ at::Tensor multiply_scalar_vulkan(const at::Tensor& self, const at::Scalar& othe
 }
 
 at::Tensor maximum_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    TORCH_CHECK_TYPE(!self.is_complex() && !other.is_complex(), "maximum not implemented for complex tensors.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::MAX, [](const at::Tensor& a, const at::Tensor& b) { return at::max(a, b); });
 }
 
 at::Tensor minimum_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    TORCH_CHECK_TYPE(!self.is_complex() && !other.is_complex(), "minimum not implemented for complex tensors.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::MIN, [](const at::Tensor& a, const at::Tensor& b) { return at::min(a, b); });
 }
 
@@ -250,10 +324,12 @@ at::Tensor threshold_backward_vulkan(const at::Tensor& grad_output, const at::Te
 }
 
 at::Tensor fmax_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    TORCH_CHECK_TYPE(!self.is_complex() && !other.is_complex(), "fmax not implemented for complex tensors.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::FMAX, [](const at::Tensor& a, const at::Tensor& b) { return at::fmax(a, b); });
 }
 
 at::Tensor fmin_vulkan(const at::Tensor& self, const at::Tensor& other) {
+    TORCH_CHECK_TYPE(!self.is_complex() && !other.is_complex(), "fmin not implemented for complex tensors.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::FMIN, [](const at::Tensor& a, const at::Tensor& b) { return at::fmin(a, b); });
 }
 
@@ -497,6 +573,14 @@ at::Tensor& addcdiv_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const a
 // as torch computes it: from whichever end is nearer, so weight 1 gives exactly `end`
 at::Tensor lerp_scalar_vulkan(const at::Tensor& self, const at::Tensor& end, const at::Scalar& weight) {
     at::Tensor diff = subtract_vulkan(end, self, (int)1);
+    
+    if (weight.isComplex()) 
+    {
+        c10::complex<double> w = weight.toComplexDouble();
+        if (std::abs(w) < 0.5) return torchvulkan::add_vulkan(self, diff, weight);
+        return subtract_vulkan(end, diff, c10::complex<double>(1.0) - w);
+    }
+
     double w = weight.toDouble();
     if (w < 0.5) return torchvulkan::add_vulkan(self, diff, weight);
     return subtract_vulkan(end, diff, 1.0 - w);
