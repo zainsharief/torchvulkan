@@ -1,5 +1,6 @@
 #pragma once
 #include <ATen/TensorIterator.h>
+#include <ATen/native/Resize.h>
 #include "vulkan/vulkan_context.h"
 #include "vulkan/builders.h"
 #include "vulkan/shader.h"
@@ -337,7 +338,62 @@ inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optiona
 // the dtype a reduction accumulates in is not always the dtype it returns
 inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
 {
+    if (dtype == at::kComplexHalf) return at::kComplexFloat;
     return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+}
+
+// a result built as a view of a private buffer (view_as_complex of real pairs, a moved or narrowed scratch tensor):
+// the same storage as a new tensor, so the op doesn't return a view the way no CPU kernel does
+inline at::Tensor unview(const at::Tensor& t)
+{
+    if (!t.is_view()) return t;
+    at::Tensor fresh = at::empty({0}, t.options());
+    fresh.set_(t.storage(), t.storage_offset(), t.sizes(), t.strides());
+    return fresh;
+}
+
+// resizes out= the way TensorIterator would lay it out (channels_last inputs give a channels_last out); meta copies
+// of the inputs stand in so working out the strides allocates nothing
+inline void resize_output_like(at::Tensor& out, at::IntArrayRef shape, std::initializer_list<at::Tensor> inputs)
+{
+    if (out.sizes().equals(shape)) return;
+    at::TensorIteratorConfig config;
+    config.check_all_same_dtype(false).add_owned_output(at::Tensor());
+    for (const at::Tensor& t : inputs) {
+        // one dtype for all: only the layouts matter, and mixed dtypes with an undefined output trip TensorIterator's checks
+        config.add_owned_const_input(at::empty_strided(t.sizes(), t.strides(), t.options().device(at::kMeta).dtype(at::kByte)));
+    }
+    at::TensorIterator iter = config.build();
+    at::native::resize_output(out, shape);
+    out.as_strided_(shape, iter.output().strides());
+}
+
+// torch's Scalar::to<T> check (out of range, or an imaginary part for a real dtype), which its fills make
+inline void check_scalar_convertible(const at::Scalar& value, at::ScalarType dtype)
+{
+    switch (dtype) {
+        case at::kBool: (void)value.to<bool>(); break;
+        case at::kByte: (void)value.to<uint8_t>(); break;
+        case at::kChar: (void)value.to<int8_t>(); break;
+        case at::kShort: (void)value.to<int16_t>(); break;
+        case at::kInt: (void)value.to<int32_t>(); break;
+        case at::kLong: (void)value.to<int64_t>(); break;
+        case at::kHalf: (void)value.to<at::Half>(); break;
+        case at::kBFloat16: (void)value.to<at::BFloat16>(); break;
+        case at::kFloat: (void)value.to<float>(); break;
+        case at::kDouble: (void)value.to<double>(); break;
+        case at::kComplexHalf: (void)value.to<c10::complex<at::Half>>(); break;
+        case at::kComplexFloat: (void)value.to<c10::complex<float>>(); break;
+        case at::kComplexDouble: (void)value.to<c10::complex<double>>(); break;
+        default: break;
+    }
+}
+
+// a bool byte may hold any nonzero value (a uint8 viewed as bool); kernels share uint8's, so read it as 0/1 first
+inline at::Tensor normalize_bool(const at::Tensor& t)
+{
+    if (t.scalar_type() != at::kBool || !t.is_privateuseone()) return t;
+    return at::ne(t.view(at::kByte), 0);
 }
 
 inline bool is_low_prec(at::ScalarType dtype)

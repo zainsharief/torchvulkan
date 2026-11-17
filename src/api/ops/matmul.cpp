@@ -290,6 +290,24 @@ torchvulkan::Kernel coop_kernel_for_block_size(uint32_t block_size)
     }
 }
 
+at::Tensor complex_matmul(const at::Tensor& self, const at::Tensor& other, const at::Tensor& bias, const at::Scalar& alpha, const at::Scalar& beta,
+                          c10::ScalarType promoted)
+{
+    at::ScalarType real = c10::toRealValueType(promoted == at::kComplexHalf ? at::kComplexFloat : promoted);
+    auto parts_of = [real](const at::Tensor& t) {
+        torchvulkan::ComplexParts p = torchvulkan::complex_parts(t);
+        return torchvulkan::ComplexParts{p.re.to(real), p.im.to(real)};
+    };
+    torchvulkan::ComplexParts a = parts_of(self), b = parts_of(other);
+    torchvulkan::ComplexParts r{at::sub(at::matmul(a.re, b.re), at::matmul(a.im, b.im)), at::add(at::matmul(a.re, b.im), at::matmul(a.im, b.re))};
+    if (alpha.toComplexDouble() != c10::complex<double>(1.0)) r = torchvulkan::complex_mul(r, torchvulkan::complex_scalar_parts(alpha, r.re));
+    if (bias.defined() && beta.toComplexDouble() != c10::complex<double>(0.0)) {
+        torchvulkan::ComplexParts c = torchvulkan::complex_mul(parts_of(bias), torchvulkan::complex_scalar_parts(beta, r.re));
+        r = {at::add(r.re, c.re), at::add(r.im, c.im)};
+    }
+    return torchvulkan::complex_from(r, promoted);
+}
+
 at::Tensor dispatch_matmul_coop_shader(
     const at::Tensor& self_, 
     const at::Tensor& other_,
@@ -300,6 +318,7 @@ at::Tensor dispatch_matmul_coop_shader(
 {
     DeviceContext* device = get_device_context(self_);
     c10::ScalarType promoted_type = at::result_type(self_, other_);
+    if (at::isComplexType(promoted_type)) return complex_matmul(self_, other_, bias_, alpha, beta, promoted_type);
     if (!is_dtype_supported(device, promoted_type)) {
         TORCHVULKAN_FALLBACK("Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
         return cpu_fallback();

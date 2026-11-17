@@ -141,6 +141,66 @@ at::Tensor cpu_reduce_fallback(
     return at::sum(cpu_self, dims, keepdim);
 }
 
+std::vector<int64_t> wrapped_dims(const at::Tensor& self, at::OptionalIntArrayRef dims)
+{
+    std::vector<int64_t> dim_list;
+    if (dims.has_value() && dims->size() > 0) {
+        for (int64_t d : *dims) dim_list.push_back(c10::maybe_wrap_dim(d, self.dim()));
+    } else {
+        for (int64_t d = 0; d < self.dim(); d++) dim_list.push_back(d);
+    }
+    std::sort(dim_list.begin(), dim_list.end(), std::greater<int64_t>());
+    return dim_list;
+}
+
+// a complex product along one dim: pairwise halving, log2(n) rounds of complex multiplies
+torchvulkan::ComplexParts complex_prod_dim(torchvulkan::ComplexParts z, int64_t dim)
+{
+    z.re = z.re.movedim(dim, 0);
+    z.im = z.im.movedim(dim, 0);
+    int64_t n = z.re.size(0);
+    if (n == 0) {
+        std::vector<int64_t> shape(z.re.sizes().begin() + 1, z.re.sizes().end());
+        return {at::ones(shape, z.re.options()), at::zeros(shape, z.im.options())};
+    }
+    while (n > 1) {
+        if (n % 2 == 1) {
+            std::vector<int64_t> pad_shape = z.re.sizes().vec();
+            pad_shape[0] = 1;
+            z.re = at::cat({z.re, at::ones(pad_shape, z.re.options())});
+            z.im = at::cat({z.im, at::zeros(pad_shape, z.im.options())});
+            n += 1;
+        }
+        int64_t half = n / 2;
+        z = torchvulkan::complex_mul({z.re.narrow(0, 0, half), z.im.narrow(0, 0, half)}, {z.re.narrow(0, half, half), z.im.narrow(0, half, half)});
+        n = half;
+    }
+    return {z.re.select(0, 0), z.im.select(0, 0)};
+}
+
+// complex sums reduce the (real, imag) pairs; complex products multiply pairwise (ops/complex.cpp)
+std::optional<at::Tensor> complex_reduce(const at::Tensor& self, at::OptionalIntArrayRef dims, bool keepdim, ReduceOp operation)
+{
+    if (!self.is_complex() || (operation != ReduceOp::SUM && operation != ReduceOp::PROD)) return std::nullopt;
+    if (self.dim() == 0) return self.clone();
+    std::vector<int64_t> dim_list = wrapped_dims(self, dims);
+    if (dim_list.empty()) return self.clone();
+    at::Tensor z = self.resolve_conj().resolve_neg();
+    if (operation == ReduceOp::SUM) {
+        at::Tensor pairs = at::view_as_real(z);
+        return unview(at::view_as_complex(at::sum(pairs, dim_list, keepdim).contiguous()));
+    }
+    torchvulkan::ComplexParts parts = torchvulkan::complex_parts(z);
+    for (int64_t d : dim_list) {
+        parts = complex_prod_dim(parts, d);
+        if (keepdim) {
+            parts.re = parts.re.unsqueeze(d);
+            parts.im = parts.im.unsqueeze(d);
+        }
+    }
+    return torchvulkan::complex_from(parts, self.scalar_type());
+}
+
 at::Tensor reduce_dims_vulkan(
     const at::Tensor& self,
     at::OptionalIntArrayRef dims,
@@ -149,6 +209,8 @@ at::Tensor reduce_dims_vulkan(
     double empty_value,
     bool has_subgroup)
 {
+    std::optional<at::Tensor> complex = complex_reduce(self, dims, keepdim, operation);
+    if (complex.has_value()) return *complex;
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());

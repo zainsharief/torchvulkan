@@ -10,6 +10,36 @@ at::Tensor multiply_vulkan(const at::Tensor& self, const at::Tensor& other);
 at::Tensor divide_vulkan(const at::Tensor& self, const at::Tensor& other);
 at::Tensor divide_scalar_vulkan(const at::Tensor& self, const at::Scalar& other);
 
+struct ComplexParts {
+    at::Tensor re;
+    at::Tensor im;
+};
+ComplexParts complex_parts(const at::Tensor& z);
+at::Tensor complex_from(const ComplexParts& z, at::ScalarType dtype);
+ComplexParts complex_scalar_parts(const at::Scalar& s, const at::Tensor& like);
+ComplexParts complex_mul(const ComplexParts& a, const ComplexParts& b);
+ComplexParts complex_div(const ComplexParts& a, const ComplexParts& b);
+at::Tensor complex_abs(const ComplexParts& z);
+ComplexParts complex_square(const ComplexParts& z);
+ComplexParts complex_exp(const ComplexParts& z);
+ComplexParts complex_log(const ComplexParts& z);
+ComplexParts complex_sqrt(const ComplexParts& z);
+ComplexParts complex_sin(const ComplexParts& z);
+ComplexParts complex_cos(const ComplexParts& z);
+ComplexParts complex_tan(const ComplexParts& z);
+ComplexParts complex_sinh(const ComplexParts& z);
+ComplexParts complex_cosh(const ComplexParts& z);
+ComplexParts complex_tanh(const ComplexParts& z);
+ComplexParts complex_asin(const ComplexParts& z);
+ComplexParts complex_acos(const ComplexParts& z);
+ComplexParts complex_atan(const ComplexParts& z);
+ComplexParts complex_asinh(const ComplexParts& z);
+ComplexParts complex_acosh(const ComplexParts& z);
+ComplexParts complex_atanh(const ComplexParts& z);
+ComplexParts complex_expm1(const ComplexParts& z);
+ComplexParts complex_log1p(const ComplexParts& z);
+ComplexParts complex_logaddexp(const ComplexParts& x, const ComplexParts& y);
+
 // ops/reduce.cpp
 at::Tensor sum_vulkan(const at::Tensor& self, c10::optional<at::ScalarType> dtype);
 
