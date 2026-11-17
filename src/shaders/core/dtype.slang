@@ -504,7 +504,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_atan(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_atan(a.toFloat())); if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
     public static T ext_sinh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sinh(a.toFloat())); if (sizeof(T) == 8) return T(sinh(a.toFloat())); return sinh(a); }
     public static T ext_cosh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_cosh(a.toFloat())); if (sizeof(T) == 8) return T(cosh(a.toFloat())); return cosh(a); }
-    public static T ext_tanh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_tanh(a.toFloat())); if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
+    // Vulkan defines tanh's precision through (e^x - e^-x) / (e^x + e^-x), so drivers may overflow to
+    // inf / inf = NaN for large |x| (AMD's does from about 89 in float32, and from about 5.5 in
+    // float16, whose e^x overflows sooner). tanh rounds to exactly +-1 beyond |x| ~ 9 in float32 and
+    // ~ 4.5 in float16, so return the sign there (NaN still propagates: the comparison is false).
+    public static T ext_tanh(T a)
+    {
+        if (abs(a) > T(sizeof(T) == 2 ? 5 : 15)) return a > T(0) ? T(1) : T(-1);
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_tanh(a.toFloat()));
+        if (sizeof(T) == 8) return T(tanh(a.toFloat()));
+        return tanh(a);
+    }
     public static T ext_exp2(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_exp2(a.toFloat())); if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
 
     public static T ext_log2(T a)
