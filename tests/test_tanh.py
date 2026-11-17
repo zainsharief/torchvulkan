@@ -1,4 +1,4 @@
-"""tanh (and gelu with approximate='tanh', which uses it) for large inputs.
+"""tanh (and gelu with approximate='tanh', which uses it) for large inputs, and atanh at |x| >= 1.
 
 Vulkan defines tanh's precision through (e^x - e^-x) / (e^x + e^-x), so a driver may overflow to
 inf / inf = NaN for large |x| (AMD's Windows driver did from about 89); the result must saturate to
@@ -27,6 +27,13 @@ def test_tanh_saturates(dtype):
 def test_tanh_propagates_nan():
     out = torch.tanh(torch.tensor([float("nan"), 1.0], device=DEVICE)).cpu()
     assert out[0].isnan() and out[1] == torch.tanh(torch.tensor(1.0))
+
+
+@pytest.mark.parametrize("dtype", DTYPES + [torch.int32, torch.int64], ids=str)
+def test_atanh_domain_edges(dtype):
+    # Vulkan leaves atanh undefined for |x| >= 1 (AMD's driver returned +-1.7e38 at +-1, not +-inf)
+    x = torch.tensor([-3.0, -1.0, -0.5, 0.0, 0.5, 1.0, 3.0]).to(dtype)
+    torch.testing.assert_close(torch.atanh(x.to(DEVICE)).cpu(), torch.atanh(x), equal_nan=True)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16], ids=str)

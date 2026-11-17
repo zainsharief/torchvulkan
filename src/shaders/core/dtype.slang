@@ -598,7 +598,16 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_sigmoid(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sigmoid(a.toFloat())); return T(1) / (T(1) + ext_exp(-a)); }
     public static T ext_asinh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_asinh(a.toFloat())); if (sizeof(T) == 8) return T(asinh(a.toFloat())); return asinh(a); }
     public static T ext_acosh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_acosh(a.toFloat())); if (sizeof(T) == 8) return T(acosh(a.toFloat())); return acosh(a); }
-    public static T ext_atanh(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_atanh(a.toFloat())); if (sizeof(T) == 8) return T(atanh(a.toFloat())); return atanh(a); }
+    // Vulkan leaves atanh undefined for |x| >= 1, and AMD's returns +-1.7e38 at +-1 instead of +-inf.
+    // The infinity and NaN are built from their bits: Vulkan doesn't define division by zero either.
+    public static T ext_atanh(T a)
+    {
+        if (sizeof(T) == 2) return fromFloat<T>(float.ext_atanh(a.toFloat()));
+        if (abs(a) == T(1)) return T(asfloat(a > T(0) ? 0x7f800000u : 0xff800000u));
+        if (abs(a) > T(1)) return T(asfloat(0x7fc00000u));
+        if (sizeof(T) == 8) return T(atanh(a.toFloat()));
+        return atanh(a);
+    }
     // multiplied out: radians()/degrees() have no 64-bit form in SPIR-V
     public static T ext_deg2rad(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_deg2rad(a.toFloat())); return a * T(0.017453292519943295); }
     public static T ext_rad2deg(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_rad2deg(a.toFloat())); return a * T(57.29577951308232); }
