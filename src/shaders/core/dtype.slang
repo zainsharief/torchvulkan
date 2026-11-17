@@ -303,6 +303,22 @@ public half halfFromFloat(float f)
     return bit_cast<half>(uint16_t(sign | h));
 }
 
+// float16 sqrt, correctly rounded on any driver. Vulkan lets float32 sqrt be off by a few ulp (Intel
+// Gen9's is), which flips the float16 rounding of some results. A midpoint between two neighbouring
+// float16 values has at most 12 significant bits, so its square is exact in float32, and comparing
+// it with x picks the correctly rounded neighbour (ties to even).
+public half halfSqrt(float x)
+{
+    half h = halfFromFloat(sqrt(x));
+    if (!(x > 0.0f) || isinf(x)) return h;  // zero, negative, inf, NaN: nothing to correct
+    uint16_t b = bit_cast<uint16_t>(h);
+    float lo = 0.5f * (float(bit_cast<half>(uint16_t(b - 1))) + float(h));
+    float hi = 0.5f * (float(h) + float(bit_cast<half>(uint16_t(b + 1))));
+    if (x < lo * lo || (x == lo * lo && (b & 1) != 0)) return bit_cast<half>(uint16_t(b - 1));
+    if (x > hi * hi || (x == hi * hi && (b & 1) != 0)) return bit_cast<half>(uint16_t(b + 1));
+    return h;
+}
+
 // a float32 result as T: rounded to nearest even for float16, exact for float32 and float64
 public T fromFloat<T : __BuiltinFloatingPointType>(float f)
 {
@@ -494,7 +510,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         return log(a);
     }
 
-    public static T ext_sqrt(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sqrt(a.toFloat())); return sqrt(a); }
+    public static T ext_sqrt(T a) { if (sizeof(T) == 2) return bit_cast<T>(halfSqrt(a.toFloat())); return sqrt(a); }
     public static T ext_reciprocal(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_reciprocal(a.toFloat())); return T(1.0) / a; }
     public static T ext_sin(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_sin(a.toFloat())); if (sizeof(T) == 8) return T(sin(a.toFloat())); return sin(a); }
     public static T ext_cos(T a) { if (sizeof(T) == 2) return fromFloat<T>(float.ext_cos(a.toFloat())); if (sizeof(T) == 8) return T(cos(a.toFloat())); return cos(a); }
@@ -508,10 +524,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // inf / inf = NaN for large |x| (AMD's does from about 89 in float32, and from about 5.5 in
     // float16, whose e^x overflows sooner). tanh rounds to exactly +-1 beyond |x| ~ 9 in float32 and
     // ~ 4.5 in float16, so return the sign there (NaN still propagates: the comparison is false).
+    // Near zero that formula also loses relative accuracy (Intel Gen9's tanh(1e-4) is 0.1 % off), so
+    // below 1/16 use the series x - x^3/3 + 2x^5/15, whose next term is under 4e-9 relative there.
     public static T ext_tanh(T a)
     {
         if (abs(a) > T(sizeof(T) == 2 ? 5 : 15)) return a > T(0) ? T(1) : T(-1);
         if (sizeof(T) == 2) return fromFloat<T>(float.ext_tanh(a.toFloat()));
+        if (abs(a) < T(0.0625))
+        {
+            T a2 = a * a;
+            return a + a * a2 * (T(-1.0 / 3.0) + a2 * T(2.0 / 15.0));
+        }
         if (sizeof(T) == 8) return T(tanh(a.toFloat()));
         return tanh(a);
     }
