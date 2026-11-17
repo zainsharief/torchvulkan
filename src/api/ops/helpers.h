@@ -318,12 +318,25 @@ inline void check_inplace_broadcast(const at::Tensor& out, const at::Tensor& sel
 // copies an op result into an out= tensor, resizing it first when the shapes differ
 inline at::Tensor& fill_out(at::Tensor& out, const at::Tensor& res)
 {
+    TORCH_CHECK(!res.is_privateuseone() || out.is_privateuseone(),
+        "Expected out tensor to have device ", res.device(), ", but got ", out.device(), " instead");
     TORCH_CHECK(at::canCast(res.scalar_type(), out.scalar_type()),
         "result type ", res.scalar_type(), " can't be cast to the desired output type ", out.scalar_type()
     );
-    if (out.sizes() != res.sizes()) out.resize_(res.sizes());
+    // warns, as torch does, when it resizes a non-empty out; a resized out takes a dense result's layout, as a
+    // TensorIterator output does
+    if (at::native::resize_output(out, res.sizes()) && res.is_non_overlapping_and_dense() && out.strides() != res.strides()) {
+        out.as_strided_(res.sizes(), res.strides());
+    }
     out.copy_(res);
     return out;
+}
+
+// TensorIterator's same-dtype ops (neg, floor, abs, ...) take an out= only of the result's own dtype
+inline at::Tensor& fill_exact_out(at::Tensor& out, const at::Tensor& res)
+{
+    TORCH_CHECK(out.scalar_type() == res.scalar_type(), "Found dtype ", out.scalar_type(), " but expected ", res.scalar_type());
+    return fill_out(out, res);
 }
 
 // writes an in-place op's result back into self, with the checks torch makes: the result must keep

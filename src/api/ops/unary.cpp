@@ -84,7 +84,7 @@ at::Tensor unary_op_vulkan(
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
         .add_output(dst)
-        .add_input(src)
+        .add_const_input(src)
         .build();
 
     uint64_t numel = iter.numel();
@@ -507,7 +507,7 @@ at::Tensor& relu_vulkan_(at::Tensor& self)
 at::Tensor& exp_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, exp_vulkan(self)); }
 at::Tensor& log_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, log_vulkan(self)); }
 at::Tensor& sqrt_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, sqrt_vulkan(self)); }
-at::Tensor& neg_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, neg_vulkan(self)); }
+at::Tensor& neg_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, neg_vulkan(self)); }
 at::Tensor& reciprocal_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, reciprocal_vulkan(self)); }
 at::Tensor& sin_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, sin_vulkan(self)); }
 at::Tensor& cos_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, cos_vulkan(self)); }
@@ -530,14 +530,14 @@ at::Tensor& rsqrt_out_vulkan(const at::Tensor& self, at::Tensor& out) { return f
 at::Tensor& sigmoid_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, sigmoid_vulkan(self)); }
 at::Tensor& deg2rad_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, deg2rad_vulkan(self)); }
 at::Tensor& rad2deg_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, rad2deg_vulkan(self)); }
-at::Tensor& floor_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, floor_vulkan(self)); }
-at::Tensor& ceil_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, ceil_vulkan(self)); }
-at::Tensor& trunc_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, trunc_vulkan(self)); }
-at::Tensor& round_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, round_vulkan(self)); }
-at::Tensor& frac_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, frac_vulkan(self)); }
-at::Tensor& abs_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, abs_vulkan(self)); }
-at::Tensor& sign_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, sign_vulkan(self)); }
-at::Tensor& sgn_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, sgn_vulkan(self)); }
+at::Tensor& floor_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, floor_vulkan(self)); }
+at::Tensor& ceil_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, ceil_vulkan(self)); }
+at::Tensor& trunc_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, trunc_vulkan(self)); }
+at::Tensor& round_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, round_vulkan(self)); }
+at::Tensor& frac_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, frac_vulkan(self)); }
+at::Tensor& abs_out_vulkan(const at::Tensor& self, at::Tensor& out) { return self.is_complex() ? fill_out(out, abs_vulkan(self)) : fill_exact_out(out, abs_vulkan(self)); }
+at::Tensor& sign_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, sign_vulkan(self)); }
+at::Tensor& sgn_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_exact_out(out, sgn_vulkan(self)); }
 at::Tensor& erf_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, erf_vulkan(self)); }
 at::Tensor& erfc_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, erfc_vulkan(self)); }
 at::Tensor& erfinv_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, erfinv_vulkan(self)); }

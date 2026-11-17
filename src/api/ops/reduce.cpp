@@ -1,5 +1,8 @@
 #include <torch/extension.h>
+#include <optional>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/WrapDimUtilsMulti.h>
 #include <c10/core/MemoryFormat.h>
 #include <algorithm>
 #include <limits>
@@ -481,23 +484,37 @@ at::Tensor count_nonzero_along(const at::Tensor& self, at::OptionalIntArrayRef d
     return sum_dim_vulkan(at::ne(self, 0), dim, keepdim, at::kLong);
 }
 
+void check_bool_result(const char* name, const at::Tensor& self, const at::Tensor& out)
+{
+    if (self.scalar_type() == at::kByte) {
+        TORCH_CHECK(out.scalar_type() == at::kBool || out.scalar_type() == at::kByte, name,
+            " only supports bool tensor for result, got: ", out.scalar_type());
+    } else {
+        TORCH_CHECK(out.scalar_type() == at::kBool, name, " only supports bool tensor for result, got: ", out.scalar_type());
+    }
+}
+
 at::Tensor& any_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& out)
 {
+    check_bool_result("any", self, out);
     return fill_out(out, at::gt(count_nonzero_along(self, at::IntArrayRef{dim}, keepdim), 0));
 }
 
 at::Tensor& any_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    check_bool_result("any", self, out);
     return fill_out(out, at::gt(count_nonzero_along(self, at::OptionalIntArrayRef(), false), 0));
 }
 
 at::Tensor& all_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& out)
 {
+    check_bool_result("all", self, out);
     return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::IntArrayRef{dim}, keepdim, at::kLong), 0));
 }
 
 at::Tensor& all_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    check_bool_result("all", self, out);
     return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::OptionalIntArrayRef(), false, at::kLong), 0));
 }
 
@@ -531,11 +548,17 @@ at::Tensor min_vulkan(const at::Tensor& self)
 
 at::Tensor& amax_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, bool keepdim, at::Tensor& out)
 {
+    TORCH_CHECK(out.device() == self.device(), "Expected out tensor to have device ", self.device(), ", but got ", out.device(), " instead");
+    TORCH_CHECK(self.scalar_type() == out.scalar_type(), "Expected the dtype for input and out to match, but got ",
+        self.scalar_type(), " for input's dtype and ", out.scalar_type(), " for out's dtype.");
     return fill_out(out, amax_vulkan(self, dim, keepdim));
 }
 
 at::Tensor& amin_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, bool keepdim, at::Tensor& out)
 {
+    TORCH_CHECK(out.device() == self.device(), "Expected out tensor to have device ", self.device(), ", but got ", out.device(), " instead");
+    TORCH_CHECK(self.scalar_type() == out.scalar_type(), "Expected the dtype for input and out to match, but got ",
+        self.scalar_type(), " for input's dtype and ", out.scalar_type(), " for out's dtype.");
     return fill_out(out, amin_vulkan(self, dim, keepdim));
 }
 
@@ -556,6 +579,13 @@ at::Tensor& min_unary_out_vulkan(const at::Tensor& self, at::Tensor& out)
 
 std::tuple<at::Tensor&, at::Tensor&> aminmax_out_vulkan(const at::Tensor& self, c10::optional<int64_t> dim, bool keepdim, at::Tensor& min, at::Tensor& max)
 {
+    for (const at::Tensor& out : {min, max}) {
+        TORCH_CHECK(out.dtype() == self.dtype(), "Expected out tensor to have dtype ", self.dtype(), ", but got ", out.dtype(), " instead");
+    }
+    at::MemOverlapStatus overlap = at::get_overlap_status(min, max);
+    TORCH_CHECK_VALUE(overlap != at::MemOverlapStatus::Full && overlap != at::MemOverlapStatus::Partial,
+        "aminmax(): the `min` and `max` out= tensors must not overlap.");
+    at::dim_list_to_bitset(dim.has_value() ? at::IntArrayRef(*dim) : at::IntArrayRef(), self.dim());
     if (dim.has_value()) {
         TORCH_CHECK(self.dim() == 0 || self.size(c10::maybe_wrap_dim(*dim, self.dim())) > 0,
             "aminmax(): Expected reduction dim ", *dim, " to have non-zero size."
