@@ -695,17 +695,85 @@ at::Tensor& divide_scalar_vulkan_(at::Tensor& self, const at::Scalar& other) {
     return copy_inplace_result(self, torchvulkan::divide_scalar_vulkan(self, other));
 }
 
+std::optional<at::Tensor> dispatch_addc_shader(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value,
+                                               bool divide, at::ScalarType dtype)
+{
+    DeviceContext* device = get_device_context(self.is_privateuseone() ? self : tensor1.is_privateuseone() ? tensor1 : tensor2);
+    if (!is_dtype_supported(device, dtype)) return std::nullopt;
+    at::Device where = self.is_privateuseone() ? self.device() : tensor1.is_privateuseone() ? tensor1.device() : tensor2.device();
+    at::Tensor s = self.to(where, dtype), a = tensor1.to(where, dtype), b = tensor2.to(where, dtype);
+    at::Tensor out = at::empty(at::infer_size(at::infer_size(s.sizes(), a.sizes()), b.sizes()), s.options());
+    at::TensorIterator iter = at::TensorIteratorConfig()
+        .add_output(out)
+        .add_const_input(s)
+        .add_const_input(a)
+        .add_const_input(b)
+        .build();
+    uint64_t numel = iter.numel();
+    if (numel == 0) return out;
+    int32_t out_dims = static_cast<int32_t>(iter.ndim());
+    if (out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) return std::nullopt;
+
+    uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(dtype, 1, device);
+    SpecializationBuilder spd{};
+    spd.push(contiguous)
+       .push(out_dims)
+       .push(workgroupSizeX)
+       .push(divide ? 1u : 0u)
+       .push(value.toComplexDouble() != c10::complex<double>(1.0) ? 1u : 0u);
+
+    MetadataBuilder metadataBuilder = get_iter_metadata(iter, {1, 2, 3});
+    Metadata metadata = metadataBuilder.build();
+
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(s))
+       .push(get_tensor_address(a))
+       .push(get_tensor_address(b))
+       .push(get_output_address(out))
+       .push_metadata(contiguous ? nullptr : &metadata)
+       .push(numel)
+       .push_scalar(value, is_low_prec(dtype) ? at::kFloat : dtype);  // the kernel's accumulate type
+
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::ADDC, dtype},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {s, a, b},
+        /* write = */ {out},
+        get_group_count(numel, workgroupSizeX), 1, 1
+    );
+    return out;
+}
+
+// self + value * (tensor1 op tensor2); half and bfloat16 compute it all in float32 and round once, as the CPU
+at::Tensor addc_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, bool divide)
+{
+    at::native::ResultTypeState state{};
+    for (const at::Tensor* t : {&self, &tensor1, &tensor2}) state = at::native::update_result_type_state(*t, state);
+    at::ScalarType dtype = at::native::result_type(state);
+    if (!at::isComplexType(dtype) && dtype != at::kBool) {
+        if (std::optional<at::Tensor> fused = dispatch_addc_shader(self, tensor1, tensor2, value, divide, dtype)) return *fused;
+    }
+    bool low = is_low_prec(dtype);
+    auto widen = [low](const at::Tensor& t) { return low ? t.to(at::kFloat) : t; };
+    at::Tensor combined = divide ? torchvulkan::divide_vulkan(widen(tensor1), widen(tensor2)) : torchvulkan::multiply_vulkan(widen(tensor1), widen(tensor2));
+    // a bool value (value=True) scales like 1, without add's boolean-alpha check
+    at::Scalar scale = value.isBoolean() ? at::Scalar(static_cast<int64_t>(value.toBool())) : value;
+    at::Tensor result = torchvulkan::add_vulkan(widen(self), combined, scale);
+    return low ? result.to(dtype) : result;
+}
+
 at::Tensor& addcmul_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
-    at::Tensor product = torchvulkan::multiply_vulkan(tensor1, tensor2);
-    return copy_inplace_result(self, torchvulkan::add_vulkan(self, product, value));
+    return copy_inplace_result(self, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/false));
 }
 
 at::Tensor& addcdiv_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
     TORCH_CHECK(!(at::isIntegralType(tensor1.scalar_type(), true) && at::isIntegralType(tensor2.scalar_type(), true)),
         "Integer division with addcdiv is no longer supported, and in a future release addcdiv will perform a true division of tensor1 and tensor2."
     );
-    at::Tensor quotient = torchvulkan::divide_vulkan(tensor1, tensor2);
-    return copy_inplace_result(self, torchvulkan::add_vulkan(self, quotient, value));
+    return copy_inplace_result(self, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/true));
 }
 
 // as torch computes it: from whichever end is nearer, so weight 1 gives exactly `end`
@@ -932,7 +1000,7 @@ at::Tensor& div_out_mode_vulkan(const at::Tensor& self, const at::Tensor& other,
 
 at::Tensor& addcmul_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, at::Tensor& out)
 {
-    return fill_out(out, torchvulkan::add_vulkan(self, torchvulkan::multiply_vulkan(tensor1, tensor2), value));
+    return fill_out(out, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/false));
 }
 
 at::Tensor& addcdiv_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, at::Tensor& out)
@@ -940,7 +1008,7 @@ at::Tensor& addcdiv_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1
     TORCH_CHECK(!(at::isIntegralType(tensor1.scalar_type(), true) && at::isIntegralType(tensor2.scalar_type(), true)),
         "Integer division with addcdiv is no longer supported, and in a future release addcdiv will perform a true division of tensor1 and tensor2."
     );
-    return fill_out(out, torchvulkan::add_vulkan(self, torchvulkan::divide_vulkan(tensor1, tensor2), value));
+    return fill_out(out, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/true));
 }
 
 } // namespace
