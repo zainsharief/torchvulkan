@@ -9,6 +9,10 @@
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
+#include <ATen/native/TypeProperties.h>
+#include <ATen/native/BinaryOps.h>
+#include <ATen/ops/_foreach_add_native.h>
+#include <ATen/ops/_foreach_mul_native.h>
 #include "api/fallback.h"
 
 namespace {
@@ -36,6 +40,15 @@ enum class BinaryOp {
     FLOOR_DIVIDE = 19
 };
 
+// at::native::alpha_check
+void alpha_check(at::ScalarType dtype, const at::Scalar& alpha)
+{
+    TORCH_CHECK(!alpha.isBoolean() || dtype == at::kBool, "Boolean alpha only supported for Boolean results.");
+    TORCH_CHECK(at::isFloatingType(dtype) || at::isComplexType(dtype) || alpha.isIntegral(true),
+        "For integral input tensors, argument alpha must not be a floating point number.");
+    TORCH_CHECK(at::isComplexType(dtype) || !alpha.isComplex(), "For non-complex input tensors, argument alpha must not be a complex number.");
+}
+
 // a 0-dim CPU tensor (or a wrapped Python number) mixed with vulkan tensors acts as a scalar
 bool is_cpu_scalar(const at::Tensor& t)
 {
@@ -57,10 +70,12 @@ std::optional<at::Tensor> dispatch_binary_shader(
     at::Tensor a = self.to(promoted_type);
     at::Tensor b = use_scalar ? at::Tensor() : other.to(a.options());
 
-    at::Tensor undefined_out;
+    // with a scalar the CPU's iterator also holds the 0-dim scalar, which makes a dense output take self's strides
+    // exactly (size-1 dims included): allocated so here
+    at::Tensor undefined_out = use_scalar && a.is_non_overlapping_and_dense() ? at::empty_strided(a.sizes(), a.strides(), a.options()) : at::Tensor();
     at::TensorIteratorConfig config;
-    config.set_check_mem_overlap(true).add_output(undefined_out).add_input(a);
-    if (!use_scalar) config.add_input(b);
+    config.set_check_mem_overlap(true).add_output(undefined_out).add_const_input(a);
+    if (!use_scalar) config.add_const_input(b);
     at::TensorIterator iter = config.build();
 
     at::Tensor out = iter.output();
@@ -93,7 +108,7 @@ std::optional<at::Tensor> dispatch_binary_shader(
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel)
        .push_scalar(alpha, promoted_type)
-       .push_scalar(use_scalar ? scalar : at::Scalar(0), promoted_type);
+       .push_operand_scalar(use_scalar ? scalar : at::Scalar(0), promoted_type);
 
     std::vector<at::Tensor> reads = {a};
     if (!use_scalar) reads.push_back(b);
@@ -110,6 +125,15 @@ std::optional<at::Tensor> dispatch_binary_shader(
     );
 
     return out;
+}
+
+bool fits_dtype(const at::Scalar& s, at::ScalarType dtype)
+{
+    if (s.isComplex() || !s.isFloatingPoint()) return true;
+    double v = s.toDouble();
+    if (!std::isfinite(v)) return true;
+    double limit = dtype == at::kHalf ? 65504.0 : 3.3895313892515355e38;
+    return std::abs(v) <= limit;
 }
 
 torchvulkan::ComplexParts complex_pow(const torchvulkan::ComplexParts& base, const torchvulkan::ComplexParts& exponent)
@@ -182,13 +206,19 @@ std::optional<at::Tensor> complex_binary(
 }
 
 at::Tensor binary_op_vulkan(
-    const at::Tensor& self, 
+    const at::Tensor& self_, 
     const at::Scalar& other, 
     const at::Scalar& alpha, 
     BinaryOp operation, 
     const std::function<at::Tensor(const at::Tensor&, const at::Scalar&)>& fallback)
 {
+    // a bool result computes on the raw bytes; other dtypes cast (and so normalize) bools on the way in
+    at::Tensor self = at::result_type(self_, other) == at::kBool ? normalize_bool(self_) : self_;
     at::ScalarType promoted = at::result_type(self, other);
+    // the shader takes scalars in the tensor's dtype: one that half or bfloat16 can't hold computes in float32, as the CPU's opmath does
+    if (is_low_prec(promoted) && (!fits_dtype(other, promoted) || !fits_dtype(alpha, promoted))) {
+        return binary_op_vulkan(self.to(at::kFloat), other, alpha, operation, fallback).to(promoted);
+    }
     std::optional<at::Tensor> out = complex_binary(self, at::Tensor(), &other, alpha, operation, promoted);
     if (!out.has_value()) out = dispatch_binary_shader(self, at::Tensor(), other, alpha, operation, promoted);
     if (out.has_value()) return *out;
@@ -198,12 +228,14 @@ at::Tensor binary_op_vulkan(
 }
 
 at::Tensor binary_op_vulkan(
-    const at::Tensor& self, 
-    const at::Tensor& other, 
+    const at::Tensor& self_, 
+    const at::Tensor& other_, 
     const at::Scalar& alpha, 
     BinaryOp operation, 
     const std::function<at::Tensor(const at::Tensor&, const at::Tensor&)>& fallback)
-{    
+{
+    bool bool_result = at::result_type(self_, other_) == at::kBool;
+    at::Tensor self = bool_result ? normalize_bool(self_) : self_, other = bool_result ? normalize_bool(other_) : other_;
     if (is_cpu_scalar(other) && self.device().type() == c10::DeviceType::PrivateUse1) 
     {
         return binary_op_vulkan(
@@ -212,6 +244,12 @@ at::Tensor binary_op_vulkan(
         );
     }
 
+    if (self.device() != other.device() && !is_cpu_scalar(self) && !is_cpu_scalar(other)) {
+        const at::Tensor& on_vulkan = self.device().type() == c10::DeviceType::PrivateUse1 ? self : other;
+        const at::Tensor& elsewhere = self.device().type() == c10::DeviceType::PrivateUse1 ? other : self;
+        TORCH_CHECK(false, "Expected all tensors to be on the same device, but found at least two devices, ", on_vulkan.device(), " and ",
+            elsewhere.device(), "!");
+    }
     at::Tensor lhs = is_cpu_scalar(self) ? self.to(other.device()) : self;
     at::Tensor rhs = other.device() == lhs.device() ? other : other.to(lhs.device());
 
@@ -227,6 +265,7 @@ at::Tensor binary_op_vulkan(
 
 at::Tensor torchvulkan::add_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) 
 {    
+    alpha_check(at::result_type(self, other), alpha);
     if (self.scalar_type() == at::kBool) {
         if (alpha.to<bool>() == false) return self.clone();
         return binary_op_vulkan(self, other, alpha, BinaryOp::MAX, [alpha](const at::Tensor& a, const at::Tensor& b) { return at::add(a, b, alpha); });
@@ -242,9 +281,10 @@ at::Tensor torchvulkan::divide_vulkan(const at::Tensor& self, const at::Tensor& 
     at::Tensor self_vulkan = self;
     at::Tensor other_vulkan = other;
 
+    // true division of integers gives the default dtype
     if (!self.is_floating_point() && !other.is_floating_point() && !self.is_complex() && !other.is_complex()) {
-        self_vulkan = self.to(c10::kFloat);
-        other_vulkan = other.to(c10::kFloat);
+        self_vulkan = promote_to_float(self);
+        other_vulkan = promote_to_float(other);
     }
 
     return binary_op_vulkan(self_vulkan, other_vulkan, (int)1, BinaryOp::DIV, [](const at::Tensor& a, const at::Tensor& b) { return at::div(a, b); });
@@ -253,7 +293,7 @@ at::Tensor torchvulkan::divide_vulkan(const at::Tensor& self, const at::Tensor& 
 at::Tensor torchvulkan::divide_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
     at::Tensor self_vulkan = self;
 
-    if (at::isIntegralType(self.scalar_type(), /* includeBool = */ true)) self_vulkan = self.to(c10::kFloat);
+    if (at::isIntegralType(self.scalar_type(), /* includeBool = */ true)) self_vulkan = promote_to_float(self);
 
     return binary_op_vulkan(self_vulkan, other, (int)1, BinaryOp::DIV, [](const at::Tensor& a, const at::Scalar& b) { return at::div(a, b); });
 }
@@ -262,6 +302,7 @@ namespace {
 
 at::Tensor add_scalar_vulkan(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) 
 {
+    alpha_check(at::result_type(self, other), alpha);
     if (self.scalar_type() == at::kBool) {
         if (alpha.to<bool>() == false) return self.clone();
         return binary_op_vulkan(self, other, alpha, BinaryOp::MAX, [alpha](const at::Tensor& a, const at::Scalar& b) { return at::add(a, b, alpha); });
@@ -269,15 +310,36 @@ at::Tensor add_scalar_vulkan(const at::Tensor& self, const at::Scalar& other, co
     return binary_op_vulkan(self, other, alpha, BinaryOp::ADD, [alpha](const at::Tensor& a, const at::Scalar& b) { return at::add(a, b, alpha); });
 }
 
+// an in-place op writes self, so a CPU self (even 0-dim) can't take a vulkan result
+void check_inplace_device(const at::Tensor& self, const at::Tensor& other)
+{
+    TORCH_CHECK(self.device() == other.device() || other.device().is_cpu(), "Expected all tensors to be on the same device, but found at least two devices, ",
+        other.device(), " and ", self.device(), "!");
+}
+
+void sub_check(at::ScalarType a, at::ScalarType b)
+{
+    TORCH_CHECK_NOT_IMPLEMENTED(a != at::kBool || b != at::kBool,
+        "Subtraction, the `-` operator, with two bool tensors is not supported. Use the `^` or `logical_xor()` operator instead.");
+    TORCH_CHECK_NOT_IMPLEMENTED(a != at::kBool && b != at::kBool,
+        "Subtraction, the `-` operator, with a bool tensor is not supported. If you are trying to invert a mask, use the `~` or `logical_not()` operator instead.");
+}
+
 at::Tensor subtract_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
+    sub_check(self.scalar_type(), other.scalar_type());
+    alpha_check(at::result_type(self, other), alpha);
     return binary_op_vulkan(self, other, alpha, BinaryOp::SUB, [alpha](const at::Tensor& a, const at::Tensor& b) { return at::sub(a, b, alpha); });
 }
 
 at::Tensor subtract_scalar_vulkan(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+    sub_check(self.scalar_type(), other.isBoolean() ? at::kBool : at::kLong);
+    alpha_check(at::result_type(self, other), alpha);
     return binary_op_vulkan(self, other, alpha, BinaryOp::SUB, [alpha](const at::Tensor& a, const at::Scalar& b) { return at::sub(a, b, alpha); });
 }
 
 at::Tensor rsub_scalar_vulkan(const at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
+    sub_check(self.scalar_type(), other.isBoolean() ? at::kBool : at::kLong);
+    alpha_check(at::result_type(self, other), alpha);
     return binary_op_vulkan(self, other, alpha, BinaryOp::RSUB, [alpha](const at::Tensor& a, const at::Scalar& b) { return at::rsub(a, b, alpha); });
 }
 
@@ -300,6 +362,8 @@ at::Tensor pow_vulkan(const at::Tensor& self, const at::Tensor& other) {
 }
 
 at::Tensor pow_tensor_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
+    TORCH_CHECK(!at::isIntegralType(self.scalar_type(), /*includeBool=*/true) || !other.isIntegral(/*includeBool=*/true) || other.toLong() >= 0,
+        "Integers to negative integer powers are not allowed.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::POW, [](const at::Tensor& a, const at::Scalar& b) { return at::pow(a, b); });
 }
 
@@ -333,8 +397,19 @@ at::Tensor fmin_vulkan(const at::Tensor& self, const at::Tensor& other) {
     return binary_op_vulkan(self, other, (int)1, BinaryOp::FMIN, [](const at::Tensor& a, const at::Tensor& b) { return at::fmin(a, b); });
 }
 
+// an integer divided by zero gives all bits set (as CUDA): 32 of them for int64, so 2^32 - 1 for non-negative x and -1 otherwise
+at::Tensor integer_by_zero(const at::Tensor& self, const at::Tensor& other, const at::Tensor& result)
+{
+    if (!at::isIntegralType(result.scalar_type(), /*includeBool=*/false)) return result;
+    at::Tensor pattern = result.scalar_type() == at::kLong
+        ? at::where(at::ge(self, 0), at::full_like(result, 4294967295LL), at::full_like(result, -1))
+        : at::full_like(result, result.scalar_type() == at::kByte ? 255 : -1);
+    return at::where(at::eq(other, 0), pattern, result);
+}
+
 at::Tensor fmod_vulkan(const at::Tensor& self, const at::Tensor& other) {
-    return binary_op_vulkan(self, other, (int)1, BinaryOp::FMOD, [](const at::Tensor& a, const at::Tensor& b) { return at::fmod(a, b); });
+    at::Tensor r = binary_op_vulkan(self, other, (int)1, BinaryOp::FMOD, [](const at::Tensor& a, const at::Tensor& b) { return at::fmod(a, b); });
+    return integer_by_zero(self, other, r);
 }
 
 at::Tensor fmod_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
@@ -342,7 +417,8 @@ at::Tensor fmod_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
 }
 
 at::Tensor remainder_vulkan(const at::Tensor& self, const at::Tensor& other) {
-    return binary_op_vulkan(self, other, (int)1, BinaryOp::REMAINDER, [](const at::Tensor& a, const at::Tensor& b) { return at::remainder(a, b); });
+    at::Tensor r = binary_op_vulkan(self, other, (int)1, BinaryOp::REMAINDER, [](const at::Tensor& a, const at::Tensor& b) { return at::remainder(a, b); });
+    return integer_by_zero(self, other, r);
 }
 
 at::Tensor remainder_scalar_vulkan(const at::Tensor& self, const at::Scalar& other) {
@@ -375,14 +451,51 @@ at::Tensor logaddexp2_vulkan(const at::Tensor& self, const at::Tensor& other) {
     return binary_op_vulkan(self, other, (int)1, BinaryOp::LOGADDEXP2, [](const at::Tensor& a, const at::Tensor& b) { return at::logaddexp2(a, b); });
 }
 
+// an integer bound outside an integer tensor's range saturates to it (clamp_min(uint8, -1) leaves the tensor alone)
+// torch's prepare_clamp_bound: an integral bound past the dtype's range on the side it can't reach changes nothing and
+// is dropped; on the other side every element would be unrepresentable, which raises
+std::optional<at::Scalar> clamp_bound(at::ScalarType dtype, const at::Scalar& bound, bool lower)
+{
+    if (!at::isIntegralType(dtype, /*includeBool=*/false)) return bound;
+    int64_t lowest = 0;
+    uint64_t highest = 0;
+    switch (dtype) {
+        case at::kByte: highest = std::numeric_limits<uint8_t>::max(); break;
+        case at::kUInt16: highest = std::numeric_limits<uint16_t>::max(); break;
+        case at::kUInt32: highest = std::numeric_limits<uint32_t>::max(); break;
+        case at::kUInt64: highest = std::numeric_limits<uint64_t>::max(); break;
+        case at::kChar: lowest = std::numeric_limits<int8_t>::lowest(); highest = std::numeric_limits<int8_t>::max(); break;
+        case at::kShort: lowest = std::numeric_limits<int16_t>::lowest(); highest = std::numeric_limits<int16_t>::max(); break;
+        case at::kInt: lowest = std::numeric_limits<int32_t>::lowest(); highest = std::numeric_limits<int32_t>::max(); break;
+        default: lowest = std::numeric_limits<int64_t>::lowest(); highest = std::numeric_limits<int64_t>::max(); break;
+    }
+    bool below = false, above = false;
+    if (bound.isFloatingPoint()) {
+        double v = bound.toDouble();
+        below = v < static_cast<double>(lowest);
+        above = v > static_cast<double>(highest);
+    } else if (bound.type() == at::ScalarType::UInt64) {
+        above = bound.toUInt64() > highest;
+    } else {
+        int64_t v = bound.toLong();
+        below = v < lowest;
+        above = v > 0 && static_cast<uint64_t>(v) > highest;
+    }
+    if (!below && !above) return bound;
+    TORCH_CHECK(lower ? below : above, "Clamp ", lower ? "min" : "max", " value ", bound.toDouble(), " is outside the representable range of ", dtype);
+    return std::nullopt;
+}
+
 at::Tensor clamp_min_scalar_vulkan(const at::Tensor& self, const at::Scalar& min) {
-    at::Tensor r = binary_op_vulkan(self, min, (int)1, BinaryOp::MAX, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_min(a, b); });
-    return r.scalar_type() == self.scalar_type() ? r : r.to(self.scalar_type());
+    std::optional<at::Scalar> bound = clamp_bound(at::result_type(self, min), min, /*lower=*/true);
+    if (!bound.has_value()) return self.clone();
+    return binary_op_vulkan(self, *bound, (int)1, BinaryOp::MAX, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_min(a, b); });
 }
 
 at::Tensor clamp_max_scalar_vulkan(const at::Tensor& self, const at::Scalar& max) {
-    at::Tensor r = binary_op_vulkan(self, max, (int)1, BinaryOp::MIN, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_max(a, b); });
-    return r.scalar_type() == self.scalar_type() ? r : r.to(self.scalar_type());
+    std::optional<at::Scalar> bound = clamp_bound(at::result_type(self, max), max, /*lower=*/false);
+    if (!bound.has_value()) return self.clone();
+    return binary_op_vulkan(self, *bound, (int)1, BinaryOp::MIN, [](const at::Tensor& a, const at::Scalar& b) { return at::clamp_max(a, b); });
 }
 
 at::Tensor clamp_min_tensor_vulkan(const at::Tensor& self, const at::Tensor& min) {
@@ -395,7 +508,10 @@ at::Tensor clamp_max_tensor_vulkan(const at::Tensor& self, const at::Tensor& max
 
 at::Tensor clamp_scalar_vulkan(const at::Tensor& self, const c10::optional<at::Scalar>& min, const c10::optional<at::Scalar>& max) {
     TORCH_CHECK(min.has_value() || max.has_value(), "torch.clamp: At least one of 'min' or 'max' must not be None");
-    at::Tensor result = self;
+    at::ScalarType dtype = self.scalar_type();
+    if (min.has_value()) dtype = at::promote_types(dtype, at::result_type(self, *min));
+    if (max.has_value()) dtype = at::promote_types(dtype, at::result_type(self, *max));
+    at::Tensor result = self.to(dtype);
     if (min.has_value()) result = clamp_min_scalar_vulkan(result, *min);
     if (max.has_value()) result = clamp_max_scalar_vulkan(result, *max);
     return result;
@@ -405,9 +521,14 @@ at::Tensor clamp_tensor_vulkan(const at::Tensor& self, const c10::optional<at::T
     bool has_min = min.has_value() && min->defined();
     bool has_max = max.has_value() && max->defined();
     TORCH_CHECK(has_min || has_max, "torch.clamp: At least one of 'min' or 'max' must not be None");
-    at::Tensor result = self;
-    if (has_min) result = maximum_vulkan(result, *min);
-    if (has_max) result = minimum_vulkan(result, *max);
+    // one promotion over self and both bounds, as the CPU (not max in self's dtype, then min)
+    at::native::ResultTypeState state = at::native::update_result_type_state(self, at::native::ResultTypeState{});
+    if (has_min) state = at::native::update_result_type_state(*min, state);
+    if (has_max) state = at::native::update_result_type_state(*max, state);
+    at::ScalarType dtype = at::native::result_type(state);
+    at::Tensor result = self.to(dtype);
+    if (has_min) result = maximum_vulkan(result, min->to(dtype));
+    if (has_max) result = minimum_vulkan(result, max->to(dtype));
     return result;
 }
 
