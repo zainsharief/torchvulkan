@@ -109,6 +109,39 @@ public interface IDtypeOps
     static This ext_gelu(This a);
 }
 
+int64_t _saturate_f32(float v, int64_t lo, int64_t hi)
+{
+    if ((asuint(v) & 0x7fffffffu) > 0x7f800000u) return 0;
+    if (v <= float(lo)) return lo;
+    if (v >= float(hi)) return hi;
+    return int64_t(v);
+}
+
+int64_t _saturate_f64(double v, int64_t lo, int64_t hi)
+{
+    if (v != v) return 0;
+    if (v <= double(lo)) return lo;
+    if (v >= double(hi)) return hi;
+    return int64_t(v);
+}
+
+uint64_t _saturate_f32_u64(float v)
+{
+    if ((asuint(v) & 0x7fffffffu) > 0x7f800000u || v <= 0.0f) return 0;
+    if (v >= 18446744073709551616.0f) return 0xffffffffffffffffull;
+    return uint64_t(v);
+}
+
+uint64_t _saturate_f64_u64(double v)
+{
+    if (v != v || v <= 0.0) return 0;
+    if (v >= 18446744073709551616.0) return 0xffffffffffffffffull;
+    return uint64_t(v);
+}
+
+static const int64_t _INT64_MIN = int64_t(0x8000000000000000ull);
+static const int64_t _INT64_MAX = 0x7fffffffffffffffll;
+
 public extension int64_t : ITorchVulkan
 {
     public typealias Accum = int64_t;
@@ -119,8 +152,8 @@ public extension int64_t : ITorchVulkan
     public int64_t widen() { return this; }
     public static int64_t castFromI64(int64_t v) { return v; }
     public static int64_t castFromU64(uint64_t v) { return int64_t(v); }
-    public static int64_t castFromF32(float v) { return int64_t(v); }
-    public static int64_t castFromF64(double v) { return int64_t(v); }
+    public static int64_t castFromF32(float v) { return _saturate_f32(v, _INT64_MIN, _INT64_MAX); }
+    public static int64_t castFromF64(double v) { return _saturate_f64(v, _INT64_MIN, _INT64_MAX); }
 }
 
 public extension int32_t : ITorchVulkan
@@ -133,8 +166,8 @@ public extension int32_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int32_t castFromI64(int64_t v) { return int32_t(v); }
     public static int32_t castFromU64(uint64_t v) { return int32_t(v); }
-    public static int32_t castFromF32(float v) { return int32_t(v); }
-    public static int32_t castFromF64(double v) { return int32_t(v); }
+    public static int32_t castFromF32(float v) { return int32_t(_saturate_f32(v, -2147483648ll, 2147483647ll)); }
+    public static int32_t castFromF64(double v) { return int32_t(_saturate_f64(v, -2147483648ll, 2147483647ll)); }
 }
 
 public extension int16_t : ITorchVulkan
@@ -147,8 +180,8 @@ public extension int16_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int16_t castFromI64(int64_t v) { return int16_t(v); }
     public static int16_t castFromU64(uint64_t v) { return int16_t(v); }
-    public static int16_t castFromF32(float v) { return int16_t(v); }
-    public static int16_t castFromF64(double v) { return int16_t(v); }
+    public static int16_t castFromF32(float v) { return int16_t(_saturate_f32(v, -32768ll, 32767ll)); }
+    public static int16_t castFromF64(double v) { return int16_t(_saturate_f64(v, -32768ll, 32767ll)); }
 }
 
 public extension int8_t : ITorchVulkan
@@ -161,8 +194,8 @@ public extension int8_t : ITorchVulkan
     public int64_t widen() { return int64_t(this); }
     public static int8_t castFromI64(int64_t v) { return int8_t(v); }
     public static int8_t castFromU64(uint64_t v) { return int8_t(v); }
-    public static int8_t castFromF32(float v) { return int8_t(v); }
-    public static int8_t castFromF64(double v) { return int8_t(v); }
+    public static int8_t castFromF32(float v) { return int8_t(_saturate_f32(v, -128ll, 127ll)); }
+    public static int8_t castFromF64(double v) { return int8_t(_saturate_f64(v, -128ll, 127ll)); }
 }
 
 public extension uint64_t : ITorchVulkan
@@ -175,8 +208,8 @@ public extension uint64_t : ITorchVulkan
     public uint64_t widen() { return this; }
     public static uint64_t castFromI64(int64_t v) { return uint64_t(v); }
     public static uint64_t castFromU64(uint64_t v) { return v; }
-    public static uint64_t castFromF32(float v) { return uint64_t(v); }
-    public static uint64_t castFromF64(double v) { return uint64_t(v); }
+    public static uint64_t castFromF32(float v) { return _saturate_f32_u64(v); }
+    public static uint64_t castFromF64(double v) { return _saturate_f64_u64(v); }
 }
 
 public extension uint32_t : ITorchVulkan
@@ -189,8 +222,8 @@ public extension uint32_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint32_t castFromI64(int64_t v) { return uint32_t(v); }
     public static uint32_t castFromU64(uint64_t v) { return uint32_t(v); }
-    public static uint32_t castFromF32(float v) { return uint32_t(v); }
-    public static uint32_t castFromF64(double v) { return uint32_t(v); }
+    public static uint32_t castFromF32(float v) { return uint32_t(_saturate_f32(v, 0ll, 4294967295ll)); }
+    public static uint32_t castFromF64(double v) { return uint32_t(_saturate_f64(v, 0ll, 4294967295ll)); }
 }
 
 public extension uint16_t : ITorchVulkan
@@ -203,8 +236,8 @@ public extension uint16_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint16_t castFromI64(int64_t v) { return uint16_t(v); }
     public static uint16_t castFromU64(uint64_t v) { return uint16_t(v); }
-    public static uint16_t castFromF32(float v) { return uint16_t(v); }
-    public static uint16_t castFromF64(double v) { return uint16_t(v); }
+    public static uint16_t castFromF32(float v) { return uint16_t(_saturate_f32(v, 0ll, 65535ll)); }
+    public static uint16_t castFromF64(double v) { return uint16_t(_saturate_f64(v, 0ll, 65535ll)); }
 }
 
 public extension uint8_t : ITorchVulkan
@@ -217,8 +250,8 @@ public extension uint8_t : ITorchVulkan
     public uint64_t widen() { return uint64_t(this); }
     public static uint8_t castFromI64(int64_t v) { return uint8_t(v); }
     public static uint8_t castFromU64(uint64_t v) { return uint8_t(v); }
-    public static uint8_t castFromF32(float v) { return uint8_t(v); }
-    public static uint8_t castFromF64(double v) { return uint8_t(v); }
+    public static uint8_t castFromF32(float v) { return uint8_t(_saturate_f32(v, 0ll, 255ll)); }
+    public static uint8_t castFromF64(double v) { return uint8_t(_saturate_f64(v, 0ll, 255ll)); }
 }
 
 public extension double : ITorchVulkan
@@ -279,34 +312,205 @@ public extension BFloat16 : ITorchVulkan
     public static BFloat16 castFromF64(double v) { return BFloat16(float(v)); }
 }
 
+// 2/pi from bit 31 on (bit j weighs 2^(31 - j)), for the exact argument reduction below
+static const uint _TWO_OVER_PI[8] = { 0x00000000u, 0xA2F9836Eu, 0x4E441529u, 0xFC2757D1u, 0xF534DDC0u, 0xDB629599u, 0x3C439041u, 0xFE5163ABu };
+
+// Payne-Hanek for |x| >= 2^18 (native sin/cos lose all accuracy from 2^22 on Metal): the 24-bit mantissa times the 96
+// bits of 2/pi its exponent selects (higher bits only add multiples of 4) gives the quadrant and the remainder in Q64;
+// returns the remainder in [-pi/4, pi/4]
+float _reduce_half_pi(float x, out uint quadrant)
+{
+    uint b = asuint(x);
+    uint64_t m = uint64_t((b & 0x7FFFFFu) | 0x800000u);
+    uint j0 = ((b >> 23) & 0xFFu) - 120u;
+    uint idx = j0 >> 5, sh = j0 & 31u;
+    uint w0 = _TWO_OVER_PI[idx], w1 = _TWO_OVER_PI[idx + 1], w2 = _TWO_OVER_PI[idx + 2], w3 = _TWO_OVER_PI[idx + 3];
+    if (sh != 0u) {
+        w0 = (w0 << sh) | (w1 >> (32u - sh));
+        w1 = (w1 << sh) | (w2 >> (32u - sh));
+        w2 = (w2 << sh) | (w3 >> (32u - sh));
+    }
+    uint64_t p0 = m * uint64_t(w2), p1 = m * uint64_t(w1), p2 = m * uint64_t(w0);
+    uint64_t lo = p0 + (p1 << 32);
+    uint hi = uint((p1 >> 32) + p2 + (lo < p0 ? 1ull : 0ull));
+    quadrant = hi >> 30;
+    uint64_t f = (uint64_t(hi & 0x3FFFFFFFu) << 34) | (lo >> 30);
+    if ((f >> 63) != 0ull) quadrant = (quadrant + 1u) & 3u;
+    return float(int64_t(f)) * 5.421010862427522e-20 * 1.5707963267948966;
+}
+
+uint64_t _mulhi64(uint64_t a, uint64_t b)
+{
+    uint64_t a0 = a & 0xFFFFFFFFull, a1 = a >> 32, b0 = b & 0xFFFFFFFFull, b1 = b >> 32;
+    uint64_t p01 = a0 * b1, p10 = a1 * b0;
+    uint64_t mid = ((a0 * b0) >> 32) + (p01 & 0xFFFFFFFFull) + (p10 & 0xFFFFFFFFull);
+    return a1 * b1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+}
+
+// pow for finite x > 0 to ~1 ulp (native pow is 16 ulp on Metal and exp2(y log2 x) elsewhere): y * log2(x) in 64-bit
+// fixed point (log2 of the mantissa by the atanh series in Q64; integers, so fast math can't reassociate it), then
+// 2^n * 2^f with |f| <= 1/2 by a float polynomial
+float _accurate_pow(float x, float y)
+{
+    if (!(abs(y * log2(x)) < 512.0)) return pow(x, y);
+    uint bx = asuint(x);
+    uint64_t m = uint64_t(bx & 0x7FFFFFu);
+    int e = int((bx >> 23) & 0xFFu) - 127;
+    if (e == -127) {
+        int shift = 23 - int(firstbithigh(uint(m)));
+        m <<= shift;
+        e = -126 - shift;
+    } else {
+        m |= 0x800000ull;
+    }
+    uint64_t d = 0x800000ull;
+    if (m > 11863283ull) { d = 0x1000000ull; e += 1; }  // mantissa in [sqrt(1/2), sqrt(2))
+    // |s| = |m - 1| / (m + 1) in Q64: the float quotient, corrected by the integer residual
+    bool negative_log = m < d;
+    uint64_t num = negative_log ? d - m : m - d, den = m + d;
+    uint s0 = asuint(float(num) / float(den));
+    uint64_t s = 0;
+    if (num != 0) {
+        s = uint64_t((s0 & 0x7FFFFFu) | 0x800000u) << uint(int(s0 >> 23) - 86);
+        // in Q48 (s has >= 16 trailing zeros), so the residual of an inexact (fast-math) quotient can't overflow
+        int64_t residual = int64_t((num << 48) - (s >> 16) * den);
+        s += uint64_t(int64_t(float(residual) / float(den))) << 16;
+    }
+    uint64_t z = _mulhi64(s, s);
+    // atanh(s) = s + s z (1/3 + z (1/5 + ... z / 13)), |s| <= 0.172
+    uint64_t acc = 0x13B13B13B13B13B1ull;
+    acc = 0x1745D1745D1745D1ull + _mulhi64(z, acc);
+    acc = 0x1C71C71C71C71C71ull + _mulhi64(z, acc);
+    acc = 0x2492492492492492ull + _mulhi64(z, acc);
+    acc = 0x3333333333333333ull + _mulhi64(z, acc);
+    acc = 0x5555555555555555ull + _mulhi64(z, acc);
+    uint64_t atanh_s = s + _mulhi64(s, _mulhi64(z, acc));
+    // |log2 m| = atanh(s) * 2 log2(e), the fraction 2 log2(e) - 2 in Q64
+    uint64_t log2_m = (atanh_s << 1) + _mulhi64(atanh_s, 0xE2A8ECA5705FC2EEull);
+    // log2 x in Q55, times y = Y * 2^ey into Q32
+    int64_t log2_x = (int64_t(e) << 55) + (negative_log ? -int64_t(log2_m >> 9) : int64_t(log2_m >> 9));
+    uint64_t magnitude = uint64_t(log2_x < 0 ? -log2_x : log2_x);
+    uint by = asuint(y);
+    int ey_field = int((by >> 23) & 0xFFu);
+    uint64_t big_y = uint64_t(by & 0x7FFFFFu) | (ey_field != 0 ? 0x800000ull : 0ull);
+    int shift = max(ey_field, 1) - 173;
+    uint64_t lo = big_y * magnitude, hi = _mulhi64(big_y, magnitude);
+    uint64_t t = 0;
+    if (shift >= 0) { if (shift < 64) t = lo << uint(shift); }
+    else if (shift > -64) { t = (lo >> uint(-shift)) | (hi << uint(64 + shift)); }
+    else if (shift > -128) { t = hi >> uint(-shift - 64); }
+    int64_t t_q32 = ((by >> 31) != 0) != (log2_x < 0) ? -int64_t(t) : int64_t(t);
+    int64_t n = (t_q32 + int64_t(0x80000000ull)) >> 32;
+    float f = float(t_q32 - (n << 32)) * 2.3283064365386963e-10;
+    float p = 1.5252733646775596e-05;
+    p = p * f + 1.540352968731895e-04;
+    p = p * f + 1.3333557872101665e-03;
+    p = p * f + 9.618128649890423e-03;
+    p = p * f + 5.550410971045494e-02;
+    p = p * f + 2.4022650718688965e-01;
+    p = p * f + 6.931471824645996e-01;
+    p = p * f + 1.0;
+    // 2^n through the exponent bits (a product of two scale factors can be reassociated into an overflow)
+    int exponent = int((asuint(p) >> 23) & 0xFFu) + int(n);
+    if (exponent > 254) return asfloat(0x7F800000u);
+    if (exponent >= 1) return asfloat(asuint(p) + (uint(int(n)) << 23));
+    if (exponent < -24) return 0.0;
+    return p * asfloat(uint(int(n) + 191) << 23) * 5.421010862427522e-20;  // subnormal: 2^(n + 64) * 2^-64
+}
+
+// exp(x) = 2^n exp(r), r = x - n ln 2 in two parts (fdlibm's split): the GPU's exp is exp2(x log2 e), and rounding that
+// product costs about |x| ulp
+float _exp_f32(float x)
+{
+    if (!(abs(x) < 104.0f)) return exp(x);
+    float n = round(x * 1.44269504088896341f);
+    float r = (x - n * 6.9313812256e-01f) - n * 9.0580006145e-06f;
+    int ni = int(n);
+    int h = ni / 2;
+    // 2^n in two halves, so 2^128 can't overflow before exp(r) < 1 scales it back
+    return exp(r) * asfloat(uint(h + 127) << 23) * asfloat(uint(ni - h + 127) << 23);
+}
+
+float _with_sign_of(float magnitude, float x) { return asfloat((asuint(magnitude) & 0x7fffffffu) | (asuint(x) & 0x80000000u)); }
+
+// fdlibm's sinh and cosh: expm1 near zero, where (e^x - e^-x) / 2 cancels
+float _sinh_f32(float x)
+{
+    float ax = abs(x);
+    float r;
+    if (ax < 22.0f) {
+        float t = float.ext_expm1(ax);
+        r = ax < 1.0f ? 0.5f * (2.0f * t - t * t / (t + 1.0f)) : 0.5f * (t + t / (t + 1.0f));
+    } else if (ax < 88.0f) {
+        r = 0.5f * _exp_f32(ax);
+    } else {
+        float w = _exp_f32(0.5f * ax);
+        r = (0.5f * w) * w;
+    }
+    return _with_sign_of(r, x);
+}
+
+float _cosh_f32(float x)
+{
+    float ax = abs(x);
+    if (ax < 0.34657359f) {
+        float t = float.ext_expm1(ax);
+        float w = 1.0f + t;
+        return 1.0f + (t * t) / (w + w);
+    }
+    if (ax < 22.0f) {
+        float t = _exp_f32(ax);
+        return 0.5f * t + 0.5f / t;
+    }
+    if (ax < 88.0f) return 0.5f * _exp_f32(ax);
+    float w = _exp_f32(0.5f * ax);
+    return (0.5f * w) * w;
+}
+
+// sqrt(x^2 + y^2) of finite x, y >= 0 scaled by a power of 2 into range, then Borges' fma correction of the square root
+// (nearly always correctly rounded; m sqrt(1 + r^2) is an ulp off often enough to flip isclose at a boundary)
+float _hypot_f32(float x, float y)
+{
+    float m = max(x, y);
+    float scale = 1.0f;
+    if (m > 1.0e18f) scale = 1.4210854715202004e-14f;        // 2^-46
+    else if (m < 1.0e-18f) scale = 70368744177664.0f;        // 2^46
+    float a = x * scale;
+    float b = y * scale;
+    float h = sqrt(fma(a, a, b * b));
+    float h_sq = h * h;
+    float a_sq = a * a;
+    float e = fma(-b, b, h_sq - a_sq) + fma(h, h, -h_sq) - fma(a, a, -a_sq);
+    h = h - e / (2.0f * h);
+    return h / scale;
+}
+
 public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 {
-    // half and double have no native pow, so both route through float32
-    public static T _safe_pow(T base, T exp)
-    {
-        if (sizeof(T) != 4) return T(pow(base.toFloat(), exp.toFloat()));
-        return pow(base, exp);
-    }
-
+    // C99 Annex F special cases; signed zeros and infinities from bit patterns (fast math assumes neither).
+    // half and double compute in float32
     public static T ext_pow(T a, T b)
     {
-        if (b == T(0.0)) return T(1.0);
-        else if (b == T(1.0)) return a;
-        else if (b == T(2.0)) return a * a;
-        else if (a == T(1.0)) return T(1.0);
-        else if (isnan(a) || isnan(b)) return T(0.0) / T(0.0);
-        else if (a == T(0.0))
-        {
-            if (b < T(0.0)) return T(1.0) / T(0.0);
-            return T(0.0);
+        if (b == T(0.0) || a == T(1.0)) return T(1.0);
+        if (isnan(a) || isnan(b)) return _nan();
+        if (b == T(1.0)) return a;
+        if (b == T(2.0)) return a * a;
+        T inf = T(asfloat(0x7F800000u));
+        if (isinf(b)) {
+            if (abs(a) == T(1.0)) return T(1.0);
+            return (abs(a) < T(1.0)) == (b < T(0.0)) ? inf : T(0.0);
         }
-        else if (a > T(0.0)) { return _safe_pow(a, b); }
-        else if (isinf(b)) { return _safe_pow(abs(a), b); }
-        else if (frac(b) != T(0.0)) { return T(0.0) / T(0.0); /* NaN */ }
-
-        T res = _safe_pow(abs(a), b);
-        if (frac(abs(b) * T(0.5)) != T(0.0)) { return -res; }  // b is an odd integer
-        return res;
+        bool odd = frac(abs(b) * T(0.5)) == T(0.5);
+        bool negative = (asuint(a.toFloat()) >> 31) != 0;
+        if (a == T(0.0) || isinf(a)) {
+            // |a|^b is 0 or inf; an odd b keeps a's sign
+            bool big = (a == T(0.0)) == (b < T(0.0));
+            return T(asfloat((big ? 0x7F800000u : 0u) | (negative && odd ? 0x80000000u : 0u)));
+        }
+        if (!negative) return T(_accurate_pow(a.toFloat(), b.toFloat()));
+        if (frac(b) != T(0.0)) return _nan();
+        T res = T(_accurate_pow(-a.toFloat(), b.toFloat()));
+        return odd ? -res : res;
     }
 
     // max/min propagate NaN (a + b is NaN if either is), fmax/fmin suppress it
@@ -323,7 +527,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static T ext_add(T a, T b) { return a + b; }
     public static T ext_sub(T a, T b) { return a - b; }
     public static T ext_mul(T a, T b) { return a * b; }
-    public static T ext_div(T a, T b) { return a / b; }
+
+    // a GPU may divide as a * (1 / b), and 1 / b flushes to zero once |b| passes 2^126: past 2^125, quarter both first. b is
+    // quartered through its exponent bits, which a fast-math compiler can't fold back into a / b.
+    public static T ext_div(T a, T b)
+    {
+        if (sizeof(T) == 4 && abs(b) > T(4.2535295865117308e37) && !isinf(b)) {
+            float quarter_b = asfloat(asuint(b.toFloat()) - 0x01000000u);
+            return T((a.toFloat() * 0.25f) / quarter_b);
+        }
+        return a / b;
+    }
 
     public static T ext_floor(T a) { return floor(a); }
     public static T ext_ceil(T a) { return ceil(a); }
@@ -381,7 +595,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         if (b == T(0)) return a / b;
 
         T mod = ext_fmod(a, b);
-        T div = (a - mod) / b;
+        T div = ext_div(a - mod, b);
         if (mod != T(0) && ((b < T(0)) != (mod < T(0)))) div = div - T(1);
 
         if (div != T(0))
@@ -390,7 +604,7 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
             if (div - floordiv > T(0.5)) floordiv = floordiv + T(1);
             return floordiv;
         }
-        T q = a / b;
+        T q = ext_div(a, b);
         bool negative = q < T(0) || (q == T(0) && T(1) / q < T(0));
         return negative ? -T(0) : T(0);
     }
@@ -406,12 +620,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_atan2(T a, T b)
     {
-        if (a == T(0) && b == T(0)) return T(0);
+        // both zero: +-pi when b is -0, +-0 when it is +0, signed like a (C's atan2)
+        if (a == T(0) && b == T(0)) {
+            bool a_negative = (asuint(a.toFloat()) >> 31) != 0, b_negative = (asuint(b.toFloat()) >> 31) != 0;
+            T magnitude = b_negative ? T(3.14159265358979) : T(0);
+            return a_negative ? -magnitude : magnitude;
+        }
         if (sizeof(T) != 4) return T(atan2(a.toFloat(), b.toFloat()));
         return atan2(a, b);
     }
 
-    public static T ext_exp(T a) { if (sizeof(T) == 8) return T(exp(a.toFloat())); return exp(a); }
+    public static T ext_exp(T a) { if (sizeof(T) >= 4) return T(_exp_f32(a.toFloat())); return exp(a); }
 
     public static T ext_log(T a)
     {
@@ -422,16 +641,53 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     }
 
     public static T ext_sqrt(T a) { return sqrt(a); }
-    public static T ext_reciprocal(T a) { return T(1.0) / a; }
-    public static T ext_sin(T a) { if (sizeof(T) == 8) return T(sin(a.toFloat())); return sin(a); }
-    public static T ext_cos(T a) { if (sizeof(T) == 8) return T(cos(a.toFloat())); return cos(a); }
-    public static T ext_tan(T a) { if (sizeof(T) == 8) return T(tan(a.toFloat())); return tan(a); }
+    public static T ext_reciprocal(T a) { return ext_div(T(1.0), a); }
+    // the GPU's sin and cos give 0 for inf and NaN: those are NaN, tested and built on the bits so fast math keeps them
+    static bool _nonfinite(T a) { return (asuint(a.toFloat()) & 0x7F800000u) == 0x7F800000u; }
+    static T _nan() { return T(asfloat(0x7FC00000u)); }
+    public static T ext_sin(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(sin(x)) : sin(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? cos(t) : sin(t);
+        return T(((q & 2u) != 0) != (x < 0.0) ? -r : r);
+    }
+    public static T ext_cos(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(cos(x)) : cos(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? sin(t) : cos(t);
+        return T(((q + 1u) & 2u) != 0 ? -r : r);
+    }
+    public static T ext_tan(T a)
+    {
+        if (_nonfinite(a)) return _nan();
+        float x = a.toFloat();
+        if (abs(x) < 262144.0) return sizeof(T) == 8 ? T(tan(x)) : tan(a);
+        uint q;
+        float t = _reduce_half_pi(x, q);
+        float r = (q & 1u) != 0 ? -cos(t) / sin(t) : tan(t);
+        return T(x < 0.0 ? -r : r);
+    }
     public static T ext_asin(T a) { if (sizeof(T) == 8) return T(asin(a.toFloat())); return asin(a); }
     public static T ext_acos(T a) { if (sizeof(T) == 8) return T(acos(a.toFloat())); return acos(a); }
     public static T ext_atan(T a) { if (sizeof(T) == 8) return T(atan(a.toFloat())); return atan(a); }
-    public static T ext_sinh(T a) { if (sizeof(T) == 8) return T(sinh(a.toFloat())); return sinh(a); }
-    public static T ext_cosh(T a) { if (sizeof(T) == 8) return T(cosh(a.toFloat())); return cosh(a); }
-    public static T ext_tanh(T a) { if (sizeof(T) == 8) return T(tanh(a.toFloat())); return tanh(a); }
+    public static T ext_sinh(T a) { return T(_sinh_f32(a.toFloat())); }
+    public static T ext_cosh(T a) { return T(_cosh_f32(a.toFloat())); }
+    public static T ext_tanh(T a)
+    {
+        float x = a.toFloat();
+        // +-1 past 20 (already so in float): the builtin's exponentials overflow to inf / inf, in half from 6
+        if (abs(x) > 20.0f) return T(x < 0.0f ? -1.0f : 1.0f);
+        if (sizeof(T) != 4) return T(tanh(x));
+        return tanh(a);
+    }
     public static T ext_exp2(T a) { if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
 
     public static T ext_log2(T a)
@@ -486,9 +742,38 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     }
     public static T ext_rsqrt(T a) { return T(1) / ext_sqrt(a); }
     public static T ext_sigmoid(T a) { return T(1) / (T(1) + ext_exp(-a)); }
-    public static T ext_asinh(T a) { if (sizeof(T) == 8) return T(asinh(a.toFloat())); return asinh(a); }
-    public static T ext_acosh(T a) { if (sizeof(T) == 8) return T(acosh(a.toFloat())); return acosh(a); }
-    public static T ext_atanh(T a) { if (sizeof(T) == 8) return T(atanh(a.toFloat())); return atanh(a); }
+    // fdlibm's forms, in float: the builtins overflow past |x| ~ 1.8e19 (x * x) and lose small arguments to log(1 + y)
+    public static T ext_asinh(T a)
+    {
+        float x = a.toFloat();
+        float ax = abs(x);
+        if (isnan(x) || isinf(x)) return T(x);
+        float r;
+        if (ax > 268435456.0f) r = float.ext_log(ax) + 0.693147180559945309f;  // 2^28: log(2|x|)
+        else if (ax > 2.0f) r = float.ext_log(2.0f * ax + 1.0f / (sqrt(x * x + 1.0f) + ax));
+        else r = float.ext_log1p(ax + x * x / (1.0f + sqrt(1.0f + x * x)));
+        return T(x < 0.0f ? -r : r);
+    }
+    public static T ext_acosh(T a)
+    {
+        float x = a.toFloat();
+        if (isnan(x) || x < 1.0f) return _nan();
+        if (isinf(x)) return T(x);
+        if (x > 268435456.0f) return T(float.ext_log(x) + 0.693147180559945309f);
+        if (x > 2.0f) return T(float.ext_log(2.0f * x - 1.0f / (x + sqrt(x * x - 1.0f))));
+        float t = x - 1.0f;
+        return T(float.ext_log1p(t + sqrt(2.0f * t + t * t)));
+    }
+    public static T ext_atanh(T a)
+    {
+        float x = a.toFloat();
+        float ax = abs(x);
+        if (isnan(x) || ax > 1.0f) return _nan();
+        if (ax == 1.0f) return T(x < 0.0f ? -asfloat(0x7F800000u) : asfloat(0x7F800000u));
+        float r = ax < 0.5f ? 0.5f * float.ext_log1p(2.0f * ax + 2.0f * ax * ax / (1.0f - ax))
+                            : 0.5f * float.ext_log1p(2.0f * ax / (1.0f - ax));
+        return T(x < 0.0f ? -r : r);
+    }
     // multiplied out: radians()/degrees() have no 64-bit form in SPIR-V
     public static T ext_deg2rad(T a) { return a * T(0.017453292519943295); }
     public static T ext_rad2deg(T a) { return a * T(57.29577951308232); }
@@ -603,13 +888,17 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     public static T ext_sinc(T a)
     {
-        float px = 3.14159265358979f * a.toFloat();  // 3.14159265358979 = pi
-        return T(px == 0.0f ? 1.0f : sin(px) / px);  // normalized sinc = sin(pi*x)/(pi*x)
+        float x = a.toFloat();
+        if (isinf(x)) return _nan();
+        float px = 3.14159265358979f * x;  // 3.14159265358979 = pi
+        // normalized sinc = sin(pi*x)/(pi*x), through ext_sin: the builtin sin loses large arguments
+        return T(px == 0.0f ? 1.0f : float.ext_sin(px) / px);
     }
 
     public static T ext_entr(T a)
     {
         float x = a.toFloat();
+        if (isnan(x)) return a;
         if (x > 0.0f) return T(-x * log(x));
         if (x == 0.0f) return T(0.0f);
         float zero = 0.0f;
@@ -629,13 +918,15 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
             + 12.507343278686905f / (z + 5.0f) - 0.13857109526572012f / (z + 6.0f)
             + 9.9843695780195716e-6f / (z + 7.0f) + 1.5056327351493116e-7f / (z + 8.0f);
         float lg = 0.5f * log(2.0f * PI) + (z + 0.5f) * log(t) - t + log(a);
-        if (reflect) return log(PI / abs(sin(PI * z0))) - lg;
+        // |sin(pi x)| has period 1, so x - round(x) (exact) keeps the precision pi * x loses for large x
+        if (reflect) return log(PI / abs(sin(PI * (z0 - round(z0))))) - lg;
         return lg;
     }
 
     public static T ext_lgamma(T a)
     {
         float x = a.toFloat();
+        if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return T(asfloat(0x7f800000u));  // lgamma(+-inf) = +inf
         if (x <= 0.0f && x == floor(x)) { float zero = 0.0f; return T(1.0f / zero); }
         return T(_lgamma_lanczos(x));
     }
@@ -646,7 +937,9 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     {
         float x0 = a.toFloat();
         const float PI = 3.14159265358979f;
-        if (x0 <= 0.0f && x0 == floor(x0)) return T(x0 == 0.0f ? asfloat(0xff800000u) : asfloat(0x7fc00000u));
+        // +-0 gives -+inf (copysign(inf, -x), as the CPU); other non-positive integers are poles
+        if (x0 == 0.0f) return T(asfloat((asuint(x0) & 0x80000000u) != 0u ? 0x7f800000u : 0xff800000u));
+        if (x0 < 0.0f && x0 == floor(x0)) return T(asfloat(0x7fc00000u));
 
         bool reflect = x0 < 0.5f;
         float x = reflect ? (1.0f - x0) : x0;
@@ -656,7 +949,8 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         float inv = 1.0f / x;
         float inv2 = inv * inv;
         result += log(x) - 0.5f * inv - inv2 * (1.0f / 12.0f - inv2 * (1.0f / 120.0f - inv2 / 252.0f));
-        if (reflect) result -= PI / tan(PI * x0);
+        // tan(pi x) has period 1: as the CPU, take it of the exact fractional part
+        if (reflect) result -= PI / tan(PI * (x0 - round(x0)));
         return T(result);
     }
 
@@ -721,14 +1015,15 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
         if (isnan(x) || isnan(y)) return x + y;
         T m = max(x, y);
         if (m == T(0)) return T(0);
+        if (sizeof(T) == 4) return T(_hypot_f32(x.toFloat(), y.toFloat()));
         // scaled by 2^-32 near the top of the range: GPUs divide via 1 / m, which flushes to zero once it's subnormal
         T scale = m > T(1.0e30) ? T(2.3283064365386963e-10) : T(1);
         T r = (min(x, y) * scale) / (m * scale);
         return m * sqrt(T(1) + r * r);
     }
     public static T ext_xlogy(T a, T b) { if (isnan(a)) return a; if (a == T(0)) return T(0); return a * ext_log(b); }
-    public static T ext_logaddexp(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
-    public static T ext_logaddexp2(T a, T b) { T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
+    public static T ext_logaddexp(T a, T b) { if (isnan(a) || isnan(b)) return a + b; T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log1p(ext_exp(n - m)); }
+    public static T ext_logaddexp2(T a, T b) { if (isnan(a) || isnan(b)) return a + b; T m = max(a, b); T n = min(a, b); if (isinf(m)) return m; return m + ext_log2(T(1) + ext_exp2(n - m)); }
 
     // the exact (erf) form, as torch computes gelu with approximate='none'
     public static T ext_gelu(T a) { return T(0.5) * a * (T(1.0) + ext_erf(a * T(0.7071067811865476))); }

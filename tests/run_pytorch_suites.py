@@ -185,6 +185,10 @@ EXPECTED = [
     (r"test_ops_jit\.py::.*::test_variant_consistency_jit_nn_functional_cross_entropy_.*_float32$", r"Scalars are not close",
      "the scripted variant embeds the weight kwarg as its printed literal (4 decimals); this sample's weights nearly cancel "
      "(sum 0.576), so the rounding alone moves the loss 3e-5. The eager result equals the CPU's bit for bit"),
+    (r"test_tensor_creation_ops\.py::.*::test_float_to_int_conversion_(finite_.*_uint8|nonfinite_.*_int(8|16))$",
+     r"Tensor-likes are not equal",
+     "out-of-range float -> integer is undefined in C++; these cases pin the ARM64 CPU's codegen (wrapping through a "
+     "wider int, so uint8(-2) = 254). torchvulkan saturates to the target range, NaN to 0, on every device"),
     (r"test_torch\.py::.*::test_tensor_storage_type_", r"Type comparison failed: <class 'torch\.vulkan\.",
      "the test expects the CPU's storage class off CUDA, but torch's _get_legacy_storage_class looks it up on the "
      "PrivateUse1 module (torch.vulkan.FloatStorage, ...)"),

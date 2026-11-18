@@ -64,7 +64,9 @@ T gcd<T : __BuiltinIntegerType>(T a_in, T b_in)
 T lcm<T : __BuiltinIntegerType>(T a, T b)
 {
     T g = gcd(a, b);
-    return (g == T(0)) ? T(0) : absInteger(a / g * b);
+    if (g == T(0)) return T(0);
+    if (sizeof(T) < 4) return T(absInteger((a / g).toInt() * b.toInt()));
+    return absInteger(a / g * b);
 }
 
 // must match IntegerBinaryOp in bitwise.cpp

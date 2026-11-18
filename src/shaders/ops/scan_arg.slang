@@ -34,8 +34,8 @@ public struct ScanArgPair<T>
 
 public ScanArgPair<T> combinePair<T : ITorchVulkan>(ScanArgPair<T> a, ScanArgPair<T> b)
 {
-    if (T.ext_isnan(a.val)) return a;
     if (T.ext_isnan(b.val)) return b;
+    if (T.ext_isnan(a.val)) return a;
     bool take_b = (OP_TYPE == 0) ? T.ext_ge(b.val, a.val) : T.ext_le(b.val, a.val);
     return take_b ? b : a;
 }

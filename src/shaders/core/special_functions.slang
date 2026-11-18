@@ -920,6 +920,56 @@ public float igamma(float a, float x)
     return _igam_helper_series(a, x);
 }
 
+// m * 2^e rounded to the nearest float, ties to even (sticky: nonzero bits were already dropped below m); m > 0
+public float _float_rn(uint64_t m, int e, bool sticky)
+{
+    uint hi = uint(m >> 32);
+    int top = hi != 0u ? 32 + int(firstbithigh(hi)) : int(firstbithigh(uint(m)));
+    int drop = top - 23;
+    uint64_t mant = m;
+    if (drop > 0) {
+        uint64_t half = uint64_t(1) << uint(drop - 1);
+        uint64_t rest = m & ((half << 1) - 1);
+        mant = m >> uint(drop);
+        if (rest > half || (rest == half && (sticky || (mant & 1) != 0))) mant++;
+        if (mant == (uint64_t(1) << 24)) { mant >>= 1; drop++; }
+    } else {
+        mant = m << uint(-drop);
+    }
+    int biased = e + drop + 150;
+    if (biased >= 255) return _inf();
+    return asfloat((uint(biased) << 23) | (uint(mant) & 0x7FFFFFu));
+}
+
+// float32's (-2 * x) * sqrt(-x) / 3 + pi / 4 for x < 0, each step rounded as IEEE does: the CPU's Airy phase, which for
+// large |x| is millions of radians, so it is exact here (the GPU's sqrt and division may not round correctly)
+float _airy_phase(float x)
+{
+    uint b = asuint(-x);
+    uint64_t my = uint64_t((b & 0x7FFFFFu) | 0x800000u);
+    int ey = int((b >> 23) & 0xFFu) - 150;
+    // sqrt(-x), from the integer square root of an even-exponent mantissa
+    uint64_t n = my;
+    int en = ey;
+    if ((en & 1) != 0) { n <<= 1; en -= 1; }
+    n <<= 30;
+    en -= 30;
+    uint64_t r = uint64_t(sqrt(float(n)));
+    [loop] for (int i = 0; i < 64 && r * r > n; i++) r--;
+    [loop] for (int i = 0; i < 64 && (r + 1) * (r + 1) <= n; i++) r++;
+    float s = _float_rn(r, en / 2, r * r != n);
+    uint sb = asuint(s);
+    uint64_t ms = uint64_t((sb & 0x7FFFFFu) | 0x800000u);
+    int es = int((sb >> 23) & 0xFFu) - 150;
+    // (-2 * x) * sqrt(-x): -2x is exact
+    float p = _float_rn(my * ms, ey + 1 + es, false);
+    if (isinf(p)) return p;
+    uint pb = asuint(p);
+    uint64_t num = uint64_t((pb & 0x7FFFFFu) | 0x800000u) << 30;
+    float q = _float_rn(num / 3, int((pb >> 23) & 0xFFu) - 180, num % 3 != 0);
+    return q + 0.785398185253143310546875f;
+}
+
 public float airy_ai_forward(float x)
 {
     static const float AN[8] = {
@@ -1015,6 +1065,8 @@ public float airy_ai_forward(float x)
 
     if (x < float(-2.09))
     {
+        // the oscillation's phase overflows (the CPU's sin(inf) is NaN)
+        if ((asuint(float(-2.0) * x * sqrt(-x)) & 0x7f800000u) == 0x7f800000u) return asfloat(0x7fc00000u);
         float z = float(1.0) / (float(-2.0) * x * sqrt(-x) / float(3.0));
 
         float afn = 0.0;
@@ -1045,9 +1097,9 @@ public float airy_ai_forward(float x)
             agd = agd * (z * z) + AGD[index];
         }
 
-        float t = float(-2.0) * x * sqrt(-x) / float(3.0) + float(0.25) * 3.14159265358979323846;
+        float t = _airy_phase(x);
 
-        return float(5.64189583547756286948e-01) / sqrt(sqrt(-x)) * (sin(t) * (float(1.0) + z * z * afn / afd) - cos(t) * (z * agn / agd));
+        return float(5.64189583547756286948e-01) / sqrt(sqrt(-x)) * (float.ext_sin(t) * (float(1.0) + z * z * afn / afd) - float.ext_cos(t) * (z * agn / agd));
     }
 
     if (x >= float(2.09))
@@ -1114,6 +1166,7 @@ public float airy_ai_forward(float x)
 
 public float bessel_j0_forward(float x)
 {
+    if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return asfloat(0x7fc00000u);  // the CPU's +-inf gives NaN
     static const float PP[7] = {
         +7.96936729297347051624e-04,
         +8.28352392107440799803e-02,
@@ -1346,11 +1399,13 @@ float _bessel_j1_nonnegative(float x)
 
 public float bessel_j1_forward(float x)
 {
+    if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return asfloat(0x7fc00000u);  // the CPU's +-inf gives NaN
     return x < 0.0f ? -_bessel_j1_nonnegative(-x) : _bessel_j1_nonnegative(x);
 }
 
 public float bessel_y0_forward(float x)
 {
+    if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return asfloat(0x7fc00000u);  // the CPU's +-inf gives NaN
     static const float PP[7] = {
         +7.96936729297347051624e-04,
         +8.28352392107440799803e-02,
@@ -1475,6 +1530,7 @@ public float bessel_y0_forward(float x)
 
 public float bessel_y1_forward(float x)
 {
+    if ((asuint(x) & 0x7fffffffu) == 0x7f800000u) return asfloat(0x7fc00000u);  // the CPU's +-inf gives NaN
     static const float PP[7] = {
         +7.62125616208173112003e-04,
         +7.31397056940917570436e-02,
