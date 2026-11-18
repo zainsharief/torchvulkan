@@ -1,5 +1,8 @@
 #include <torch/extension.h>
+#include <optional>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/WrapDimUtils.h>
+#include <ATen/WrapDimUtilsMulti.h>
 #include <c10/core/MemoryFormat.h>
 #include <algorithm>
 #include <limits>
@@ -141,6 +144,66 @@ at::Tensor cpu_reduce_fallback(
     return at::sum(cpu_self, dims, keepdim);
 }
 
+std::vector<int64_t> wrapped_dims(const at::Tensor& self, at::OptionalIntArrayRef dims)
+{
+    std::vector<int64_t> dim_list;
+    if (dims.has_value() && dims->size() > 0) {
+        for (int64_t d : *dims) dim_list.push_back(c10::maybe_wrap_dim(d, self.dim()));
+    } else {
+        for (int64_t d = 0; d < self.dim(); d++) dim_list.push_back(d);
+    }
+    std::sort(dim_list.begin(), dim_list.end(), std::greater<int64_t>());
+    return dim_list;
+}
+
+// a complex product along one dim: pairwise halving, log2(n) rounds of complex multiplies
+torchvulkan::ComplexParts complex_prod_dim(torchvulkan::ComplexParts z, int64_t dim)
+{
+    z.re = z.re.movedim(dim, 0);
+    z.im = z.im.movedim(dim, 0);
+    int64_t n = z.re.size(0);
+    if (n == 0) {
+        std::vector<int64_t> shape(z.re.sizes().begin() + 1, z.re.sizes().end());
+        return {at::ones(shape, z.re.options()), at::zeros(shape, z.im.options())};
+    }
+    while (n > 1) {
+        if (n % 2 == 1) {
+            std::vector<int64_t> pad_shape = z.re.sizes().vec();
+            pad_shape[0] = 1;
+            z.re = at::cat({z.re, at::ones(pad_shape, z.re.options())});
+            z.im = at::cat({z.im, at::zeros(pad_shape, z.im.options())});
+            n += 1;
+        }
+        int64_t half = n / 2;
+        z = torchvulkan::complex_mul({z.re.narrow(0, 0, half), z.im.narrow(0, 0, half)}, {z.re.narrow(0, half, half), z.im.narrow(0, half, half)});
+        n = half;
+    }
+    return {z.re.select(0, 0), z.im.select(0, 0)};
+}
+
+// complex sums reduce the (real, imag) pairs; complex products multiply pairwise (ops/complex.cpp)
+std::optional<at::Tensor> complex_reduce(const at::Tensor& self, at::OptionalIntArrayRef dims, bool keepdim, ReduceOp operation)
+{
+    if (!self.is_complex() || (operation != ReduceOp::SUM && operation != ReduceOp::PROD)) return std::nullopt;
+    if (self.dim() == 0) return self.clone();
+    std::vector<int64_t> dim_list = wrapped_dims(self, dims);
+    if (dim_list.empty()) return self.clone();
+    at::Tensor z = self.resolve_conj().resolve_neg();
+    if (operation == ReduceOp::SUM) {
+        at::Tensor pairs = at::view_as_real(z);
+        return unview(at::view_as_complex(at::sum(pairs, dim_list, keepdim).contiguous()));
+    }
+    torchvulkan::ComplexParts parts = torchvulkan::complex_parts(z);
+    for (int64_t d : dim_list) {
+        parts = complex_prod_dim(parts, d);
+        if (keepdim) {
+            parts.re = parts.re.unsqueeze(d);
+            parts.im = parts.im.unsqueeze(d);
+        }
+    }
+    return torchvulkan::complex_from(parts, self.scalar_type());
+}
+
 at::Tensor reduce_dims_vulkan(
     const at::Tensor& self,
     at::OptionalIntArrayRef dims,
@@ -149,6 +212,32 @@ at::Tensor reduce_dims_vulkan(
     double empty_value,
     bool has_subgroup)
 {
+    // torch's dim checks: at most 64 dims, none repeated
+    if (dims.has_value() && dims->size() > 0) at::dim_list_to_bitset(*dims, self.dim());
+    std::optional<at::Tensor> complex = complex_reduce(self, dims, keepdim, operation);
+    if (complex.has_value()) return *complex;
+    // more dims than the kernel takes: the kept dims and the reduced ones each flattened into one, reduced, and shaped back
+    if (self.dim() > MAX_DIMS && is_dtype_supported(self, self.scalar_type())) {
+        std::vector<bool> reduced(self.dim(), !(dims.has_value() && dims->size() > 0));
+        if (dims.has_value()) for (int64_t d : *dims) reduced[c10::maybe_wrap_dim(d, self.dim())] = true;
+        std::vector<int64_t> order, kept_sizes, out_sizes;
+        int64_t kept = 1, folded = 1;
+        for (int64_t d = 0; d < self.dim(); d++) {
+            if (reduced[d]) continue;
+            order.push_back(d);
+            kept_sizes.push_back(self.size(d));
+            kept *= self.size(d);
+        }
+        for (int64_t d = 0; d < self.dim(); d++) {
+            if (!reduced[d]) continue;
+            order.push_back(d);
+            folded *= self.size(d);
+        }
+        for (int64_t d = 0; d < self.dim(); d++) out_sizes.push_back(reduced[d] ? 1 : self.size(d));
+        at::Tensor flat = self.permute(order).reshape({kept, folded});
+        at::Tensor r = reduce_dims_vulkan(flat, at::IntArrayRef{1}, /*keepdim=*/false, operation, empty_value, has_subgroup);
+        return unview(r.reshape(keepdim ? out_sizes : kept_sizes));
+    }
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());
@@ -170,7 +259,7 @@ at::Tensor reduce_dims_vulkan(
     for (int64_t d : dim_list) {
         result = dispatch_reduce_shader(result, d, keepdim, operation, empty_value, has_subgroup);
     }
-    return result;
+    return unview(result);  // the shader's output reshaped (a full reduction's [1] as []) is still a new tensor
 }
 
 // the sum in its accumulation dtype (float32 for half and bfloat16), before it's cast to the output dtype
@@ -205,11 +294,27 @@ at::Tensor torchvulkan::sum_vulkan(
 
 namespace {
 
+// max and min have no identity: torch refuses to reduce over an empty dimension
+void check_extremum_dims(const at::Tensor& self, at::IntArrayRef dim, const char* name)
+{
+    at::dim_list_to_bitset(dim, self.dim());  // repeated dims, more than 64 dims
+    if (dim.empty()) {
+        TORCH_CHECK(self.numel() > 0, name, "(): Expected reduction dim to be specified for input.numel() == 0. ",
+            "Specify the reduction dim with the 'dim' argument.");
+        return;
+    }
+    for (int64_t d : dim) {
+        int64_t wrapped = c10::maybe_wrap_dim(d, self.dim());
+        TORCH_CHECK_INDEX(self.dim() == 0 || self.size(wrapped) != 0, name, "(): Expected reduction dim ", d, " to have non-zero size.");
+    }
+}
+
 at::Tensor amax_vulkan(
     const at::Tensor& self,
     at::IntArrayRef dim,
     bool keepdim)
 {
+    check_extremum_dims(self, dim, "amax");
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMAX, -std::numeric_limits<double>::infinity(), true);
 }
 
@@ -218,6 +323,7 @@ at::Tensor amin_vulkan(
     at::IntArrayRef dim,
     bool keepdim)
 {
+    check_extremum_dims(self, dim, "amin");
     return reduce_dims_vulkan(self, dim, keepdim, ReduceOp::AMIN, std::numeric_limits<double>::infinity(), true);
 }
 
@@ -256,7 +362,7 @@ at::Tensor mean_dim_vulkan(
         "mean(): could not infer output dtype. ", (dtype.has_value() ? "Optional" : "Input"),
         " dtype must be either a floating point or complex dtype. Got: ", out_dtype
     );
-    if (self.dim() == 0) return self.to(out_dtype);
+    if (self.dim() == 0) return self.to(out_dtype, /*non_blocking=*/false, /*copy=*/true);  // a new tensor, never self
 
     int64_t count = 1;
     if (dim.has_value() && dim->size() > 0) {
@@ -282,12 +388,50 @@ enum class ArgOp
     ARGMIN = 1 
 };
 
+at::Tensor argreduce(const at::Tensor& self, c10::optional<int64_t> dim, bool keepdim, ArgOp op);
+
+// past 32-bit indexing: reduce chunks of the dim and pick the winning chunk (the first on a tie), or split a kept dim
+at::Tensor argreduce_chunked(const at::Tensor& x, int64_t d, ArgOp op)
+{
+    constexpr int64_t chunk = int64_t(1) << 30;
+    int64_t n = x.size(d);
+    if (n > chunk) {
+        std::vector<at::Tensor> values;
+        std::vector<at::Tensor> indices;
+        for (int64_t start = 0; start < n; start += chunk) {
+            at::Tensor part = x.narrow(d, start, std::min(chunk, n - start));
+            at::Tensor i = argreduce(part, d, /*keepdim=*/true, op);
+            values.push_back(at::gather(part, d, i));
+            indices.push_back(at::add(i, start));
+        }
+        at::Tensor pick = argreduce(at::cat(values, d), d, /*keepdim=*/true, op);
+        return at::gather(at::cat(indices, d), d, pick);
+    }
+
+    if (x.numel() <= chunk) return argreduce(x.contiguous(), d, /*keepdim=*/true, op);
+    int64_t k = d == 0 ? 1 : 0;
+    for (int64_t i = 0; i < x.dim(); i++) {
+        if (i != d && x.size(i) > x.size(k)) k = i;
+    }
+    int64_t step = std::max<int64_t>(1, x.size(k) * chunk / x.numel());
+    std::vector<at::Tensor> parts;
+    for (int64_t start = 0; start < x.size(k); start += step) {
+        parts.push_back(argreduce(x.narrow(k, start, std::min(step, x.size(k) - start)), d, /*keepdim=*/true, op));
+    }
+    return at::cat(parts, k);
+}
+
 at::Tensor argreduce(
     const at::Tensor& self,
     c10::optional<int64_t> dim,
     bool keepdim,
     ArgOp op)
 {
+    // no dim with keepdim: every dim kept, at size 1
+    if (!dim.has_value() && keepdim && self.dim() > 0) {
+        std::vector<int64_t> ones(self.dim(), 1);
+        return argreduce(self, dim, false, op).reshape(ones);
+    }
     at::Tensor x = self;
     bool flatten = !dim.has_value();
     int64_t d = 0;
@@ -298,7 +442,18 @@ at::Tensor argreduce(
         d = c10::maybe_wrap_dim(*dim, x.dim());
     }
 
-    if (!is_dtype_supported(x, x.scalar_type()) || x.dim() == 0 || x.dim() > MAX_DIMS || x.numel() == 0 || !fits_32bit_indexing({x})) {
+    // a 0-dim or empty input: the meta kernel raises torch's error or gives the shape, and every index is 0
+    if (self.dim() == 0 || self.numel() == 0) {
+        at::Tensor meta = self.to(at::kMeta);
+        at::Tensor shape = op == ArgOp::ARGMAX ? at::argmax(meta, dim, keepdim) : at::argmin(meta, dim, keepdim);
+        return at::zeros(shape.sizes(), self.options().dtype(at::kLong));
+    }
+
+    if (is_dtype_supported(x, x.scalar_type()) && x.dim() <= MAX_DIMS && !fits_32bit_indexing({x})) {
+        at::Tensor idx = argreduce_chunked(x, d, op);
+        return keepdim ? idx : idx.squeeze(d);
+    }
+    if (!is_dtype_supported(x, x.scalar_type()) || x.dim() > MAX_DIMS) {
         TORCHVULKAN_FALLBACK("This ", op == ArgOp::ARGMAX ? "argmax" : "argmin", " on ", x.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ArgOp::ARGMAX ? at::argmax(self.cpu(), dim, keepdim) : at::argmin(self.cpu(), dim, keepdim);
         return cpu.to(self.device());
@@ -352,8 +507,7 @@ at::Tensor& argmax_out_vulkan(
     bool keepdim,
     at::Tensor& out)
 {
-    out.copy_(argreduce(self, dim, keepdim, ArgOp::ARGMAX));
-    return out;
+    return fill_out(out, argreduce(self, dim, keepdim, ArgOp::ARGMAX));
 }
 
 at::Tensor& argmin_out_vulkan(
@@ -362,8 +516,7 @@ at::Tensor& argmin_out_vulkan(
     bool keepdim,
     at::Tensor& out)
 {
-    out.copy_(argreduce(self, dim, keepdim, ArgOp::ARGMIN));
-    return out;
+    return fill_out(out, argreduce(self, dim, keepdim, ArgOp::ARGMIN));
 }
 
 // NaN counts as nonzero
@@ -372,23 +525,37 @@ at::Tensor count_nonzero_along(const at::Tensor& self, at::OptionalIntArrayRef d
     return sum_dim_vulkan(at::ne(self, 0), dim, keepdim, at::kLong);
 }
 
+void check_bool_result(const char* name, const at::Tensor& self, const at::Tensor& out)
+{
+    if (self.scalar_type() == at::kByte) {
+        TORCH_CHECK(out.scalar_type() == at::kBool || out.scalar_type() == at::kByte, name,
+            " only supports bool tensor for result, got: ", out.scalar_type());
+    } else {
+        TORCH_CHECK(out.scalar_type() == at::kBool, name, " only supports bool tensor for result, got: ", out.scalar_type());
+    }
+}
+
 at::Tensor& any_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& out)
 {
+    check_bool_result("any", self, out);
     return fill_out(out, at::gt(count_nonzero_along(self, at::IntArrayRef{dim}, keepdim), 0));
 }
 
 at::Tensor& any_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    check_bool_result("any", self, out);
     return fill_out(out, at::gt(count_nonzero_along(self, at::OptionalIntArrayRef(), false), 0));
 }
 
 at::Tensor& all_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& out)
 {
+    check_bool_result("all", self, out);
     return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::IntArrayRef{dim}, keepdim, at::kLong), 0));
 }
 
 at::Tensor& all_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
+    check_bool_result("all", self, out);
     return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::OptionalIntArrayRef(), false, at::kLong), 0));
 }
 
@@ -422,11 +589,17 @@ at::Tensor min_vulkan(const at::Tensor& self)
 
 at::Tensor& amax_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, bool keepdim, at::Tensor& out)
 {
+    TORCH_CHECK(out.device() == self.device(), "Expected out tensor to have device ", self.device(), ", but got ", out.device(), " instead");
+    TORCH_CHECK(self.scalar_type() == out.scalar_type(), "Expected the dtype for input and out to match, but got ",
+        self.scalar_type(), " for input's dtype and ", out.scalar_type(), " for out's dtype.");
     return fill_out(out, amax_vulkan(self, dim, keepdim));
 }
 
 at::Tensor& amin_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, bool keepdim, at::Tensor& out)
 {
+    TORCH_CHECK(out.device() == self.device(), "Expected out tensor to have device ", self.device(), ", but got ", out.device(), " instead");
+    TORCH_CHECK(self.scalar_type() == out.scalar_type(), "Expected the dtype for input and out to match, but got ",
+        self.scalar_type(), " for input's dtype and ", out.scalar_type(), " for out's dtype.");
     return fill_out(out, amin_vulkan(self, dim, keepdim));
 }
 
@@ -447,6 +620,13 @@ at::Tensor& min_unary_out_vulkan(const at::Tensor& self, at::Tensor& out)
 
 std::tuple<at::Tensor&, at::Tensor&> aminmax_out_vulkan(const at::Tensor& self, c10::optional<int64_t> dim, bool keepdim, at::Tensor& min, at::Tensor& max)
 {
+    for (const at::Tensor& out : {min, max}) {
+        TORCH_CHECK(out.dtype() == self.dtype(), "Expected out tensor to have dtype ", self.dtype(), ", but got ", out.dtype(), " instead");
+    }
+    at::MemOverlapStatus overlap = at::get_overlap_status(min, max);
+    TORCH_CHECK_VALUE(overlap != at::MemOverlapStatus::Full && overlap != at::MemOverlapStatus::Partial,
+        "aminmax(): the `min` and `max` out= tensors must not overlap.");
+    at::dim_list_to_bitset(dim.has_value() ? at::IntArrayRef(*dim) : at::IntArrayRef(), self.dim());
     if (dim.has_value()) {
         TORCH_CHECK(self.dim() == 0 || self.size(c10::maybe_wrap_dim(*dim, self.dim())) > 0,
             "aminmax(): Expected reduction dim ", *dim, " to have non-zero size."

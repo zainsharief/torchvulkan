@@ -2,6 +2,7 @@ module jacobi;
 
 [[vk::constant_id(0)]] public const uint MODE = 0;
 [[vk::constant_id(1)]] public const uint WG_x = 0;
+[[vk::constant_id(2)]] public const uint COMPLEX = 0;
 
 static const int MAX_SWEEPS = 60;
 
@@ -26,14 +27,38 @@ void roundPair(int round, int i, int players, out int p, out int q)
     q = max(left, right);
 }
 
-bool computeRotation<T : __BuiltinFloatingPointType>(T* a, int m, int n, int p, int q, out T c, out T s)
+// (cos, sin) of the phase of x^H y, which a complex rotation divides out of y
+bool computeRotation<T : __BuiltinFloatingPointType>(T* a, int m, int n, int p, int q, out T c, out T s, out T phase_re, out T phase_im)
 {
     c = T(1);
     s = T(0);
+    phase_re = T(1);
+    phase_im = T(0);
     T app;
     T aqq;
     T apq;
-    if (MODE == 0)
+    if (MODE == 0 && COMPLEX != 0)
+    {
+        app = T(0);
+        aqq = T(0);
+        T dot_re = T(0);
+        T dot_im = T(0);
+        for (int i = 0; i < m; i++)
+        {
+            int64_t xi = (int64_t(i) * n + p) * 2;
+            int64_t yi = (int64_t(i) * n + q) * 2;
+            T xr = a[xi], xm = a[xi + 1], yr = a[yi], ym = a[yi + 1];
+            app += xr * xr + xm * xm;
+            aqq += yr * yr + ym * ym;
+            dot_re += xr * yr + xm * ym;
+            dot_im += xr * ym - xm * yr;
+        }
+        apq = sqrt(dot_re * dot_re + dot_im * dot_im);
+        if (apq == T(0) || apq <= epsilon<T>() * sqrt(app * aqq)) return false;
+        phase_re = dot_re / apq;
+        phase_im = dot_im / apq;
+    }
+    else if (MODE == 0)
     {
         app = T(0);
         aqq = T(0);
@@ -73,6 +98,10 @@ void applyRotations<T : __BuiltinFloatingPointType>(T* data, T* rotations, uint 
         T y = T(0);
         T c = T(1);
         T s = T(0);
+        T xi = T(0);
+        T yi = T(0);
+        T ph_re = T(1);
+        T ph_im = T(0);
         int64_t px = 0;
         int64_t qx = 0;
         bool active = false;
@@ -83,22 +112,39 @@ void applyRotations<T : __BuiltinFloatingPointType>(T* data, T* rotations, uint 
             int p;
             int q;
             roundPair(round, pair, players, p, q);
-            c = rotations[pair * 2];
-            s = rotations[pair * 2 + 1];
+            c = rotations[pair * 4];
+            s = rotations[pair * 4 + 1];
             active = q < n && s != T(0);
             px = int64_t(p) * line_stride + int64_t(e) * element_stride;
             qx = int64_t(q) * line_stride + int64_t(e) * element_stride;
-            if (active)
+            if (active && COMPLEX == 0)
             {
                 x = data[px];
                 y = data[qx];
             }
+            else if (active)
+            {
+                ph_re = rotations[pair * 4 + 2];
+                ph_im = rotations[pair * 4 + 3];
+                x = data[px * 2];
+                xi = data[px * 2 + 1];
+                y = data[qx * 2];
+                yi = data[qx * 2 + 1];
+            }
         }
         AllMemoryBarrierWithGroupSync();
-        if (active)
+        if (active && COMPLEX == 0)
         {
             data[px] = c * x - s * y;
             data[qx] = s * x + c * y;
+        }
+        else if (active)
+        {
+            // x' = c x - s conj(phase) y, y' = s phase x + c y
+            data[px * 2] = c * x - s * (ph_re * y + ph_im * yi);
+            data[px * 2 + 1] = c * xi - s * (ph_re * yi - ph_im * y);
+            data[qx * 2] = s * (ph_re * x - ph_im * xi) + c * y;
+            data[qx * 2 + 1] = s * (ph_re * xi + ph_im * x) + c * yi;
         }
         AllMemoryBarrierWithGroupSync();
     }
@@ -111,11 +157,12 @@ void jacobiKernel<T : __BuiltinFloatingPointType>(uint b, uint lane, JacobiPushC
     int n = int(pcs.n);
     int pairs = int(pcs.pairs);
     int players = pairs * 2;
-    T* a = (T*)pcs.a + int64_t(b) * m * n;
-    T* v = (T*)pcs.v + int64_t(b) * n * n;
-    T* rotations = (T*)pcs.rotations + int64_t(b) * pairs * 2;
+    int width = (COMPLEX != 0) ? 2 : 1;
+    T* a = (T*)pcs.a + int64_t(b) * m * n * width;
+    T* v = (T*)pcs.v + int64_t(b) * n * n * width;
+    T* rotations = (T*)pcs.rotations + int64_t(b) * pairs * 4;
 
-    for (int idx = int(lane); idx < n * n; idx += int(WG_x)) v[idx] = (idx / n == idx % n) ? T(1) : T(0);
+    for (int idx = int(lane); idx < n * n * width; idx += int(WG_x)) v[idx] = (idx / width / n == idx / width % n && idx % width == 0) ? T(1) : T(0);
     AllMemoryBarrierWithGroupSync();
 
     for (int sweep = 0; sweep < MAX_SWEEPS && players > 1; sweep++)
@@ -132,9 +179,13 @@ void jacobiKernel<T : __BuiltinFloatingPointType>(uint b, uint lane, JacobiPushC
                 roundPair(round, pair, players, p, q);
                 T c = T(1);
                 T s = T(0);
-                if (q < n && computeRotation<T>(a, m, n, p, q, c, s)) rotated = 1;
-                rotations[pair * 2] = c;
-                rotations[pair * 2 + 1] = s;
+                T phase_re = T(1);
+                T phase_im = T(0);
+                if (q < n && computeRotation<T>(a, m, n, p, q, c, s, phase_re, phase_im)) rotated = 1;
+                rotations[pair * 4] = c;
+                rotations[pair * 4 + 1] = s;
+                rotations[pair * 4 + 2] = phase_re;
+                rotations[pair * 4 + 3] = phase_im;
             }
             AllMemoryBarrierWithGroupSync();
 

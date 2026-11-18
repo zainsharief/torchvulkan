@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <c10/util/safe_numerics.h>
 #include <c10/util/accumulate.h>
 #include <algorithm>
 #include <array>
@@ -114,17 +115,29 @@ ConvGeometry make_geometry(c10::IntArrayRef kernel, at::IntArrayRef stride, at::
 at::Tensor im2col_vulkan(const at::Tensor& self, at::IntArrayRef kernel_size, at::IntArrayRef dilation, at::IntArrayRef padding, at::IntArrayRef stride)
 {
     TORCH_CHECK(kernel_size.size() == 2 && dilation.size() == 2 && padding.size() == 2 && stride.size() == 2, "im2col: expected 2 values each for kernel_size, dilation, padding and stride");
-    TORCH_CHECK(self.dim() == 3 || self.dim() == 4, "Expected 3D or 4D (batch mode) tensor for input with possibly 0 batch size and non-zero dimensions, but got: ", self.sizes());
+    bool nonzero_rest = true;
+    for (int64_t d = self.dim() == 4 ? 1 : 0; d < self.dim(); d++) nonzero_rest = nonzero_rest && self.size(d) != 0;
+    TORCH_CHECK((self.dim() == 3 || self.dim() == 4) && nonzero_rest,
+        "Expected 3D or 4D (batch mode) tensor with possibly 0 batch size and other non-zero dimensions for input, but got: ", self.sizes());
     bool batched = self.dim() == 4;
     at::Tensor input = batched ? self : self.unsqueeze(0);
     ConvGeometry g = make_geometry(kernel_size, stride, padding, dilation);
     for (int64_t d = 0; d < 2; d++) {
-        TORCH_CHECK(g.kernel[d] > 0 && g.stride[d] > 0 && g.dilation[d] > 0 && g.padding[d] >= 0, "im2col: kernel size, stride and dilation should be positive and padding non-negative");
-        TORCH_CHECK(window_count(input.size(2 + d), g.kernel[d], g.stride[d], g.padding[d], g.dilation[d]) >= 1,
-            "Given input with spatial size (", input.size(2), ", ", input.size(3), "), kernel_size=", kernel_size, ", calculated shape of the array of sliding blocks is non-positive."
-        );
     }
+    // im2col_shape_check's messages
+    TORCH_CHECK(kernel_size[0] > 0 && kernel_size[1] > 0, "kernel size should be greater than zero, but got kernel_height: ", kernel_size[0],
+        " kernel_width: ", kernel_size[1]);
+    TORCH_CHECK(stride[0] > 0 && stride[1] > 0, "stride should be greater than zero, but got stride_height: ", stride[0], " stride_width: ", stride[1]);
+    TORCH_CHECK(dilation[0] > 0 && dilation[1] > 0, "dilation should be greater than zero, but got dilation_height: ", dilation[0],
+        " dilation_width: ", dilation[1]);
+    TORCH_CHECK(padding[0] >= 0 && padding[1] >= 0, "padding should be non-negative, but got pad_height: ", padding[0], " pad_width: ", padding[1]);
+    int64_t blocks_h = window_count(input.size(2), g.kernel[0], g.stride[0], g.padding[0], g.dilation[0]);
+    int64_t blocks_w = window_count(input.size(3), g.kernel[1], g.stride[1], g.padding[1], g.dilation[1]);
+    TORCH_CHECK(blocks_h >= 1 && blocks_w >= 1, "Given input with spatial size (", input.size(2), ", ", input.size(3), "), kernel_size=(", kernel_size[0], ", ",
+        kernel_size[1], "), dilation=(", dilation[0], ", ", dilation[1], "), padding=(", padding[0], ", ", padding[1],
+        "), calculated shape of the array of sliding blocks as (", blocks_h, ", ", blocks_w, "), but its components must be at least one.");
     at::Tensor cols = im2col_nd(input, g);
+    if (cols.is_alias_of(self)) cols = cols.clone();  // a 1x1 kernel is only a reshape; the op returns a new tensor
     return batched ? cols : cols.squeeze(0);
 }
 
@@ -144,6 +157,8 @@ at::Tensor col2im_vulkan(
     std::vector<int64_t> output_size;
     for (const c10::SymInt& s : output_size_) output_size.push_back(s.guard_int(__FILE__, __LINE__));
     TORCH_CHECK(output_size.size() == 2 && kernel_size.size() == 2, "col2im: expected 2 values each for output_size and kernel_size");
+    int64_t kernel_product = 0;
+    TORCH_CHECK(!c10::mul_overflows(kernel_size[0], kernel_size[1], &kernel_product), "the product of kernel_width and kernel_height overflowed.");
     TORCH_CHECK(self.dim() == 2 || self.dim() == 3, "Expected 2D or 3D (batch mode) tensor for input with possibly 0 batch size and non-zero dimensions, but got: ", self.sizes());
     bool batched = self.dim() == 3;
     at::Tensor cols = batched ? self : self.unsqueeze(0);
@@ -153,6 +168,7 @@ at::Tensor col2im_vulkan(
         cols.size(1), " and kernel_size=", kernel_size
     );
     at::Tensor image = col2im_nd(cols, cols.size(1) / kernel_volume, output_size, g);
+    if (image.storage_offset() != 0 || !image.is_contiguous()) image = image.clone(at::MemoryFormat::Contiguous);  // a new tensor, not the unpadded view
     return batched ? image : image.squeeze(0);
 }
 
@@ -370,6 +386,7 @@ void dispatch_conv_shader(
         case ConvMode::GRAD_WEIGHT: reads = {x, y}; writes = {weight}; break;
     }
     if (has_bias) reads.push_back(bias);
+    for (const at::Tensor& t : writes) materialize_cow(t);
 
     MetadataBuilder metadataBuilder = conv_metadata(p);
     Metadata metadata = metadataBuilder.build();
@@ -476,6 +493,14 @@ ConvProblem transposed_problem(const at::Tensor& y, const at::Tensor& weight, co
     return ConvProblem{g, y.size(0), groups, weight.size(1), y.size(1) / groups, in, out};
 }
 
+at::MemoryFormat conv_memory_format(const at::Tensor& input, const at::Tensor& weight)
+{
+    for (at::MemoryFormat format : {input.suggest_memory_format(), weight.suggest_memory_format()}) {
+        if (format != at::MemoryFormat::Contiguous) return format;
+    }
+    return at::MemoryFormat::Contiguous;
+}
+
 at::Tensor convolution_vulkan(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -498,10 +523,13 @@ at::Tensor convolution_vulkan(
     at::Tensor w = weight.contiguous();
     at::Tensor b = bias.has_value() && bias->defined() ? bias->to(x.scalar_type()).contiguous() : at::Tensor();
     ConvProblem p = transposed ? transposed_problem(xc, w, g, groups, output_size) : forward_problem(xc, w, g, groups);
-    if (implicit_gemm_supported(p, {xc, w, b})) return transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b);
+    at::MemoryFormat format = conv_memory_format(input, weight);
+    if (implicit_gemm_supported(p, {xc, w, b})) {
+        return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format);
+    }
 
     at::Tensor output = transposed ? conv_transpose_forward(x, weight, g, groups, output_size) : conv_forward(x, weight, g, groups);
-    return add_bias(output, bias);
+    return add_bias(output, bias).contiguous(format);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
@@ -553,7 +581,132 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
         for (int64_t d = 0; d < dims; d++) reduce.push_back(2 + d);
         grad_bias = at::sum(grad_output, reduce);
     }
+    at::MemoryFormat format = conv_memory_format(input, weight);
+    if (grad_input.defined()) grad_input = grad_input.contiguous(format);
+    if (grad_weight.defined()) grad_weight = grad_weight.contiguous(format);
     return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
+// the direct slow/depthwise convolution ops, with the CPU's kernel_size check
+at::Tensor direct_convolution(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    bool transposed,
+    c10::SymIntArrayRef output_padding,
+    int64_t groups)
+{
+    std::vector<int64_t> kernel = spatial_kernel(weight);
+    std::vector<int64_t> requested = to_ints(kernel_size);
+    TORCH_CHECK(requested == kernel, "kernel_size ", c10::IntArrayRef(requested), " must match weight spatial dimensions ", c10::IntArrayRef(kernel));
+    std::vector<c10::SymInt> ones(kernel.size(), 1);
+    std::vector<c10::SymInt> zeros(kernel.size(), 0);
+    return convolution_vulkan(self, weight, bias, stride, padding, dilation.empty() ? c10::SymIntArrayRef(ones) : dilation,
+                              transposed, output_padding.empty() ? c10::SymIntArrayRef(zeros) : output_padding, groups);
+}
+
+at::Tensor slow_conv_transpose_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef output_padding,
+    c10::SymIntArrayRef dilation)
+{
+    return direct_convolution(self, weight, kernel_size, bias, stride, padding, dilation, true, output_padding, 1);
+}
+
+at::Tensor& slow_conv_transpose_out_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef output_padding,
+    c10::SymIntArrayRef dilation,
+    at::Tensor& out)
+{
+    return fill_out(out, slow_conv_transpose_vulkan(self, weight, kernel_size, bias, stride, padding, output_padding, dilation));
+}
+
+at::Tensor slow_conv_dilated_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation)
+{
+    return direct_convolution(self, weight, kernel_size, bias, stride, padding, dilation, false, {}, 1);
+}
+
+at::Tensor& slow_conv_dilated_out_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    at::Tensor& out)
+{
+    return fill_out(out, slow_conv_dilated_vulkan(self, weight, kernel_size, bias, stride, padding, dilation));
+}
+
+at::Tensor slow_conv_forward_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding)
+{
+    return direct_convolution(self, weight, kernel_size, bias, stride, padding, {}, false, {}, 1);
+}
+
+at::Tensor& slow_conv_forward_out_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    at::Tensor& out)
+{
+    return fill_out(out, slow_conv_forward_vulkan(self, weight, kernel_size, bias, stride, padding));
+}
+
+at::Tensor conv_depthwise_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation)
+{
+    return direct_convolution(self, weight, kernel_size, bias, stride, padding, dilation, false, {}, self.size(1));
+}
+
+at::Tensor& conv_depthwise_out_vulkan(
+    const at::Tensor& self,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef kernel_size,
+    const c10::optional<at::Tensor>& bias,
+    c10::SymIntArrayRef stride,
+    c10::SymIntArrayRef padding,
+    c10::SymIntArrayRef dilation,
+    at::Tensor& out)
+{
+    return fill_out(out, conv_depthwise_vulkan(self, weight, kernel_size, bias, stride, padding, dilation));
 }
 
 } // namespace
@@ -565,4 +718,20 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("col2im.out", &col2im_out_vulkan);
     m.impl("convolution_overrideable", &convolution_vulkan);
     m.impl("convolution_backward_overrideable", &convolution_backward_vulkan);
+    m.impl("slow_conv_transpose2d", &slow_conv_transpose_vulkan);
+    m.impl("slow_conv_transpose2d.out", &slow_conv_transpose_out_vulkan);
+    m.impl("slow_conv_transpose3d", &slow_conv_transpose_vulkan);
+    m.impl("slow_conv_transpose3d.out", &slow_conv_transpose_out_vulkan);
+    m.impl("slow_conv_dilated2d", &slow_conv_dilated_vulkan);
+    m.impl("slow_conv_dilated2d.out", &slow_conv_dilated_out_vulkan);
+    m.impl("slow_conv_dilated3d", &slow_conv_dilated_vulkan);
+    m.impl("slow_conv_dilated3d.out", &slow_conv_dilated_out_vulkan);
+    m.impl("_slow_conv2d_forward", &slow_conv_forward_vulkan);
+    m.impl("_slow_conv2d_forward.output", &slow_conv_forward_out_vulkan);
+    m.impl("slow_conv3d_forward", &slow_conv_forward_vulkan);
+    m.impl("slow_conv3d_forward.output", &slow_conv_forward_out_vulkan);
+    m.impl("_conv_depthwise2d", &conv_depthwise_vulkan);
+    m.impl("_conv_depthwise2d.out", &conv_depthwise_out_vulkan);
+    m.impl("conv_depthwise3d", &conv_depthwise_vulkan);
+    m.impl("conv_depthwise3d.out", &conv_depthwise_out_vulkan);
 }

@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/MemoryOverlap.h>
 #include <ATen/TensorIterator.h>
 #include "vulkan/memory.h"
 #include "vulkan/vulkan_context.h"
@@ -38,8 +39,8 @@ bool dispatch_integer_binary_shader(
     at::Tensor b = use_scalar ? at::Tensor() : other.to(out.device(), dtype);
 
     at::TensorIteratorConfig config;
-    config.set_check_mem_overlap(true).add_output(out).add_input(a);
-    if (!use_scalar) config.add_input(b);
+    config.set_check_mem_overlap(true).add_output(out).add_const_input(a);
+    if (!use_scalar) config.add_const_input(b);
     at::TensorIterator iter = config.build();
 
     uint64_t numel = iter.numel();
@@ -66,7 +67,7 @@ bool dispatch_integer_binary_shader(
        .push(get_output_address(iter.output()))
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel)
-       .push_scalar(use_scalar ? scalar : at::Scalar(0), dtype);
+       .push_operand_scalar(use_scalar ? scalar : at::Scalar(0), dtype);
 
     std::vector<at::Tensor> reads = {a};
     if (!use_scalar) reads.push_back(b);
@@ -98,13 +99,14 @@ at::Tensor cpu_integer_binary(const at::Tensor& a, const at::Tensor& b, IntegerB
 }
 
 at::Tensor& integer_binary_out(
-    const at::Tensor& self,
-    const at::Tensor& other,
+    const at::Tensor& self_,
+    const at::Tensor& other_,
     at::Tensor& out,
     IntegerBinaryOp operation,
     bool allow_bool,
     const char* name)
 {
+    at::Tensor self = normalize_bool(self_), other = normalize_bool(other_);
     at::ScalarType dtype = at::result_type(self, other);
     TORCH_CHECK_NOT_IMPLEMENTED(at::isIntegralType(dtype, allow_bool), "\"", name, "\" not implemented for '", dtype, "'");
     TORCH_CHECK(at::canCast(dtype, out.scalar_type()), "result type ", dtype, " can't be cast to the desired output type ", out.scalar_type());
@@ -112,7 +114,7 @@ at::Tensor& integer_binary_out(
     bool scalar_other = is_cpu_scalar(other) && !is_cpu_scalar(self);
     std::vector<int64_t> shape = scalar_other ? self.sizes().vec() : at::infer_size(self.sizes(), other.sizes());
     at::Tensor result = out.scalar_type() == dtype ? out : at::empty({0}, out.options().dtype(dtype));
-    if (result.sizes() != shape) result.resize_(shape);
+    at::native::resize_output(result, shape);
 
     bool ran = scalar_other
         ? dispatch_integer_binary_shader(self, at::Tensor(), other.item(), result, operation)
@@ -164,6 +166,7 @@ at::Tensor& bitwise_not_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     at::ScalarType dtype = self.scalar_type();
     TORCH_CHECK_NOT_IMPLEMENTED(at::isIntegralType(dtype, /*includeBool=*/true), "\"bitwise_not\" not implemented for '", dtype, "'");
+    TORCH_CHECK(out.scalar_type() == dtype, "Found dtype ", out.scalar_type(), " but expected ", dtype);
     at::Tensor ones = dtype == at::kBool ? at::scalar_tensor(true, at::kBool) : at::scalar_tensor(-1, at::kLong).to(dtype);
     return integer_binary_out(self, ones, out, IntegerBinaryOp::XOR, true, "bitwise_not");
 }
@@ -199,6 +202,9 @@ at::Tensor rshift_scalar_vulkan(const at::Tensor& self, const at::Scalar& other)
 
 at::Tensor& ilshift_tensor_vulkan(at::Tensor& self, const at::Tensor& other)
 {
+    // the in-place iterator's overlap checks come before the dtype's
+    at::assert_no_internal_overlap(self);
+    at::assert_no_partial_overlap(self, other);
     return copy_inplace_result(self, lshift_tensor_vulkan(self, other));
 }
 
@@ -209,6 +215,9 @@ at::Tensor& ilshift_scalar_vulkan(at::Tensor& self, const at::Scalar& other)
 
 at::Tensor& irshift_tensor_vulkan(at::Tensor& self, const at::Tensor& other)
 {
+    // the in-place iterator's overlap checks come before the dtype's
+    at::assert_no_internal_overlap(self);
+    at::assert_no_partial_overlap(self, other);
     return copy_inplace_result(self, rshift_tensor_vulkan(self, other));
 }
 

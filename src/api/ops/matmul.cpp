@@ -119,8 +119,10 @@ MatmulShape get_matmul_shape(const at::Tensor& self_, const at::Tensor& other_)
         shape.other_unsqueezed = true;
     }
 
-    TORCH_CHECK(shape.self.size(-1) == shape.other.size(-2), "torchvulkan [ERROR]: matmul inner dimensions must match, got ",
-        shape.self.sizes(), " and ", shape.other.sizes(), ".");
+    TORCH_CHECK(shape.self.scalar_type() == shape.other.scalar_type(), "expected m1 and m2 to have the same dtype, but got: ",
+        shape.self.dtype().name(), " != ", shape.other.dtype().name());
+    TORCH_CHECK(shape.self.size(-1) == shape.other.size(-2), "mat1 and mat2 shapes cannot be multiplied (", shape.self.size(-2), "x", shape.self.size(-1),
+        " and ", shape.other.size(-2), "x", shape.other.size(-1), ")");
 
     shape.M = static_cast<uint32_t>(shape.self.size(-2));
     shape.K = static_cast<uint32_t>(shape.self.size(-1));
@@ -246,6 +248,7 @@ at::Tensor dispatch_matmul_simd_shader(
     for (int64_t b0 = 0; b0 < B; b0 += max_batch)
     {
         int64_t batch = std::min(max_batch, B - b0);
+        materialize_cow(out);
         auto address_at = [&](const at::Tensor& t) { return get_tensor_address(t) + b0 * t.stride(0) * t.element_size(); };
 
         PushConstantBuilder pcs{};
@@ -290,6 +293,24 @@ torchvulkan::Kernel coop_kernel_for_block_size(uint32_t block_size)
     }
 }
 
+at::Tensor complex_matmul(const at::Tensor& self, const at::Tensor& other, const at::Tensor& bias, const at::Scalar& alpha, const at::Scalar& beta,
+                          c10::ScalarType promoted)
+{
+    at::ScalarType real = c10::toRealValueType(promoted == at::kComplexHalf ? at::kComplexFloat : promoted);
+    auto parts_of = [real](const at::Tensor& t) {
+        torchvulkan::ComplexParts p = torchvulkan::complex_parts(t);
+        return torchvulkan::ComplexParts{p.re.to(real), p.im.to(real)};
+    };
+    torchvulkan::ComplexParts a = parts_of(self), b = parts_of(other);
+    torchvulkan::ComplexParts r{at::sub(at::matmul(a.re, b.re), at::matmul(a.im, b.im)), at::add(at::matmul(a.re, b.im), at::matmul(a.im, b.re))};
+    if (alpha.toComplexDouble() != c10::complex<double>(1.0)) r = torchvulkan::complex_mul(r, torchvulkan::complex_scalar_parts(alpha, r.re));
+    if (bias.defined() && beta.toComplexDouble() != c10::complex<double>(0.0)) {
+        torchvulkan::ComplexParts c = torchvulkan::complex_mul(parts_of(bias), torchvulkan::complex_scalar_parts(beta, r.re));
+        r = {at::add(r.re, c.re), at::add(r.im, c.im)};
+    }
+    return torchvulkan::complex_from(r, promoted);
+}
+
 at::Tensor dispatch_matmul_coop_shader(
     const at::Tensor& self_, 
     const at::Tensor& other_,
@@ -300,6 +321,7 @@ at::Tensor dispatch_matmul_coop_shader(
 {
     DeviceContext* device = get_device_context(self_);
     c10::ScalarType promoted_type = at::result_type(self_, other_);
+    if (at::isComplexType(promoted_type)) return complex_matmul(self_, other_, bias_, alpha, beta, promoted_type);
     if (!is_dtype_supported(device, promoted_type)) {
         TORCHVULKAN_FALLBACK("Vulkan device does not support ", promoted_type, ". Falling back to CPU.");
         return cpu_fallback();
@@ -419,6 +441,7 @@ at::Tensor dispatch_matmul_coop_shader(
     for (int64_t b0 = 0; b0 < B; b0 += max_batch)
     {
         int64_t batch = std::min(max_batch, B - b0);
+        materialize_cow(out);
         auto address_at = [&](const at::Tensor& t) { return get_tensor_address(t) + b0 * t.stride(0) * t.element_size(); };
 
         PushConstantBuilder pcs{};
@@ -471,10 +494,20 @@ at::Tensor dispatch_matmul_shader(
     return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, activation, cpu_fallback);
 }
 
+// the CPU's mm / addmm checks (mat1 is "self" in its messages)
+void check_matrix_product(const char* name, const at::Tensor& mat1, const at::Tensor& mat2)
+{
+    TORCH_CHECK(mat1.dim() == 2, name, ": self must be a matrix, got ", mat1.dim(), "-D tensor");
+    TORCH_CHECK(mat2.dim() == 2, name, ": mat2 must be a matrix, got ", mat2.dim(), "-D tensor");
+    TORCH_CHECK(mat1.size(1) == mat2.size(0), name, ": mat1 and mat2 shapes cannot be multiplied (", mat1.size(0), "x", mat1.size(1), " and ",
+        mat2.size(0), "x", mat2.size(1), ")");
+}
+
 at::Tensor mm_vulkan(
     const at::Tensor& self,
     const at::Tensor& other)
 {
+    check_matrix_product("mm", self, other);
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
         [&]() { return at::mm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
@@ -485,6 +518,14 @@ at::Tensor bmm_vulkan(
     const at::Tensor& self, 
     const at::Tensor& other)
 {
+    // the structured meta function's checks
+    TORCH_CHECK(self.dim() == 3, "batch1 must be a 3D tensor");
+    TORCH_CHECK(other.dim() == 3, "batch2 must be a 3D tensor");
+    TORCH_CHECK(self.device() == other.device(), "Expected all tensors to be on the same device, but found at least two devices, ", self.device(),
+        " and ", other.device(), "!");
+    TORCH_CHECK(self.scalar_type() == other.scalar_type(), "expected scalar type ", self.scalar_type(), " but found ", other.scalar_type());
+    TORCH_CHECK(other.size(0) == self.size(0) && other.size(1) == self.size(2), "Expected size for first two dimensions of batch2 tensor to be: [",
+        self.size(0), ", ", self.size(2), "] but got: [", other.size(0), ", ", other.size(1), "].");
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
         [&]() { return at::bmm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
@@ -498,6 +539,11 @@ at::Tensor addmm_vulkan(
     const at::Scalar& beta, 
     const at::Scalar& alpha) 
 {
+    for (const at::Tensor* t : {&mat1, &mat2}) {
+        TORCH_CHECK(t->device() == input.device(), "Expected all tensors to be on the same device, but found at least two devices, ", input.device(),
+            " and ", t->device(), "!");
+    }
+    check_matrix_product("addmm", mat1, mat2);
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
         [&]() { return at::addmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
@@ -511,6 +557,8 @@ at::Tensor baddbmm_vulkan(
     const at::Scalar& beta, 
     const at::Scalar& alpha)
 {
+    TORCH_CHECK(input.scalar_type() == mat1.scalar_type() && mat1.scalar_type() == mat2.scalar_type(), "Input dtypes must be the same, got: input ",
+        input.dtype().name(), ", batch1: ", mat1.dtype().name(), ", batch2: ", mat2.dtype().name());
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
         [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
@@ -534,6 +582,7 @@ at::Tensor addmm_activation_vulkan(
 
 at::Tensor& bmm_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out)
 {
+    check_out_device(out, self);
     return fill_out(out, bmm_vulkan(self, other));
 }
 
@@ -552,10 +601,55 @@ at::Tensor& addmm_activation_out_vulkan(const at::Tensor& input, const at::Tenso
     return fill_out(out, addmm_activation_vulkan(input, mat1, mat2, beta, alpha, use_gelu));
 }
 
+// torch's _scaled_mm_out_cpu_emulated: float8 operands upcast and scaled (one scale each, or a row of A by a column of B),
+// multiplied in float32
+at::Tensor& scaled_mm_out_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, const at::Tensor& scale_a, const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias, const std::optional<at::Tensor>& scale_result, std::optional<at::ScalarType> out_dtype,
+    bool /* use_fast_accum */, at::Tensor& out)
+{
+    TORCH_CHECK_VALUE(!out_dtype || *out_dtype == out.scalar_type(), "out_dtype must match output matrix type");
+    TORCH_CHECK(mat1.dim() == 2, "mat1 must be a matrix");
+    TORCH_CHECK(mat2.dim() == 2, "mat2 must be a matrix");
+    TORCH_CHECK(mat1.size(1) == mat2.size(0), "mat_a and mat_b shapes cannot be multiplied (", mat1.size(0), "x", mat1.size(1), " and ",
+        mat2.size(0), "x", mat2.size(1), ")");
+    TORCH_CHECK_VALUE(at::isFloat8Type(mat1.scalar_type()) && at::isFloat8Type(mat2.scalar_type()), "mat1 and mat2 must be fp8 types, got: ",
+        mat1.scalar_type(), mat2.scalar_type());
+    bool tensorwise = scale_a.numel() == 1 && scale_b.numel() == 1;
+    bool rowwise = scale_a.dim() == 2 && scale_b.dim() == 2 && scale_a.size(0) == mat1.size(0) && scale_a.size(1) == 1 &&
+        scale_b.size(0) == 1 && scale_b.size(1) == mat2.size(1);
+    TORCH_CHECK_VALUE(tensorwise || rowwise, "Invalid scaling configuration");
+    TORCH_CHECK_VALUE(scale_a.scalar_type() == at::kFloat, "scale_a must have Float elements");
+    TORCH_CHECK_VALUE(scale_b.scalar_type() == at::kFloat, "scale_b must have Float elements");
+    TORCH_CHECK(!scale_result || (scale_result->numel() == 1 && scale_result->scalar_type() == at::kFloat), "scale_result must be a float scalar");
+    TORCH_CHECK(!bias || bias->numel() == mat2.size(1), "Bias must be size ", mat2.size(1), " but got ", bias->numel());
+
+    at::native::resize_output(out, {mat1.size(0), mat2.size(1)});
+    at::ScalarType target = out_dtype.value_or(at::kBFloat16);
+    at::Tensor a = at::mul(mat1.contiguous().to(at::kFloat), tensorwise ? scale_a.reshape({}) : scale_a);
+    at::Tensor b = at::mul(mat2.contiguous().to(at::kFloat), tensorwise ? scale_b.reshape({}) : scale_b);
+    at::Tensor product = at::matmul(a, b);
+    if (bias) product.add_(*bias);
+    if (scale_result && (target == at::kFloat8_e4m3fn || target == at::kFloat8_e5m2)) {
+        product = at::mul(product, at::reciprocal(scale_result->reshape({})));
+    }
+    out.copy_(product.to(out.scalar_type()));
+    return out;
+}
+
+at::Tensor scaled_mm_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, const at::Tensor& scale_a, const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias, const std::optional<at::Tensor>& scale_result, std::optional<at::ScalarType> out_dtype,
+    bool use_fast_accum)
+{
+    at::Tensor out = at::empty({0}, mat1.options().dtype(out_dtype.value_or(mat1.scalar_type())));
+    return scaled_mm_out_vulkan(mat1, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mm", &mm_vulkan);
+    m.impl("_scaled_mm", &scaled_mm_vulkan);
+    m.impl("_scaled_mm.out", &scaled_mm_out_vulkan);
     m.impl("bmm", &bmm_vulkan);
     m.impl("addmm", &addmm_vulkan);
     m.impl("baddbmm", &baddbmm_vulkan);

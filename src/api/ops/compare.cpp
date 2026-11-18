@@ -5,6 +5,7 @@
 #include "vulkan/vulkan_context.h"
 #include "vulkan/allocator.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 #include "api/fallback.h"
 
 namespace {
@@ -43,6 +44,29 @@ at::Tensor cpu_compare_scalar(const at::Tensor& a, const at::Scalar& b, CompareO
     return cpu_compare(a, at::scalar_tensor(b, a.options()), op);
 }
 
+bool compare_complex(const at::Tensor& self, const at::Tensor* other, const at::Scalar& scalar_value, at::Tensor& out, CompareOp op, c10::ScalarType promoted)
+{
+    at::ScalarType real = c10::toRealValueType(promoted == at::kComplexHalf ? at::kComplexFloat : promoted);
+    auto parts_of = [real](const at::Tensor& t) {
+        torchvulkan::ComplexParts p = torchvulkan::complex_parts(t);
+        return torchvulkan::ComplexParts{p.re.to(real), p.im.to(real)};
+    };
+    torchvulkan::ComplexParts a = parts_of(self);
+    torchvulkan::ComplexParts b = other == nullptr ? torchvulkan::complex_scalar_parts(scalar_value, a.re) : parts_of(*other);
+    auto truthy = [](const torchvulkan::ComplexParts& z) { return at::logical_or(at::ne(z.re, 0), at::ne(z.im, 0)); };
+    at::Tensor result;
+    switch (op) {
+        case CompareOp::EQ: result = at::logical_and(at::eq(a.re, b.re), at::eq(a.im, b.im)); break;
+        case CompareOp::NE: result = at::logical_or(at::ne(a.re, b.re), at::ne(a.im, b.im)); break;
+        case CompareOp::LAND: result = at::logical_and(truthy(a), truthy(b)); break;
+        case CompareOp::LOR: result = at::logical_or(truthy(a), truthy(b)); break;
+        case CompareOp::LXOR: result = at::logical_xor(truthy(a), truthy(b)); break;
+        default: return false;
+    }
+    out.copy_(result.expand(out.sizes()));
+    return true;
+}
+
 bool dispatch_compare_shader(
     const at::Tensor& self, 
     const at::Tensor* other, 
@@ -51,6 +75,25 @@ bool dispatch_compare_shader(
     CompareOp op, 
     c10::ScalarType promoted)
 {
+    if (at::isComplexType(promoted)) return compare_complex(self, other, scalar_value, out, op, promoted);
+    // float8 values compare as float32, which holds them exactly
+    if (c10::isFloat8Type(promoted)) {
+        at::Tensor rhs = other == nullptr ? at::Tensor() : other->to(at::kFloat);
+        return dispatch_compare_shader(self.to(at::kFloat), other == nullptr ? nullptr : &rhs, scalar_value, out, op, at::kFloat);
+    }
+    // bools compare as 0/1 whatever their bytes (the logical ops already test for nonzero)
+    if (promoted == at::kBool && op != CompareOp::LAND && op != CompareOp::LOR && op != CompareOp::LXOR) {
+        auto as_bits = [](const at::Tensor& t) { return t.scalar_type() == at::kBool && t.is_privateuseone() ? normalize_bool(t).view(at::kByte) : t.to(at::kByte); };
+        at::Tensor lhs = as_bits(self);
+        at::Tensor rhs = other == nullptr ? at::Tensor() : as_bits(*other);
+        return dispatch_compare_shader(lhs, other == nullptr ? nullptr : &rhs, scalar_value, out, op, at::kByte);
+    }
+    // packed float4 pairs have no arithmetic; like the CPU, eq/ne compare the bytes
+    if (promoted == at::kFloat4_e2m1fn_x2) {
+        if (other == nullptr || other->scalar_type() != promoted || (op != CompareOp::EQ && op != CompareOp::NE)) return false;
+        at::Tensor rhs = other->view(at::kByte);
+        return dispatch_compare_shader(self.view(at::kByte), &rhs, scalar_value, out, op, at::kByte);
+    }
     DeviceContext* device = get_device_context(self);
     if (!is_dtype_supported(device, promoted)) return false;
     bool use_scalar = (other == nullptr);
@@ -59,8 +102,8 @@ bool dispatch_compare_shader(
     at::Tensor b = use_scalar ? at::Tensor() : other->to(a.options());
 
     at::TensorIteratorConfig config;
-    config.check_all_same_dtype(false).set_check_mem_overlap(true).add_output(out).add_input(a);
-    if (!use_scalar) config.add_input(b);
+    config.check_all_same_dtype(false).set_check_mem_overlap(true).add_output(out).add_const_input(a);
+    if (!use_scalar) config.add_const_input(b);
     at::TensorIterator iter = config.build();
 
     uint64_t numel = iter.numel();
@@ -88,7 +131,7 @@ bool dispatch_compare_shader(
        .push(get_output_address(out))
        .push_metadata(contiguous ? nullptr : &metadata)
        .push(numel)
-       .push_scalar(scalar_value, promoted);
+       .push_operand_scalar(scalar_value, promoted);
 
     std::vector<at::Tensor> reads = {a};
     if (!use_scalar) reads.push_back(b);
@@ -115,26 +158,38 @@ at::Tensor where_vulkan(
     c10::Device device = condition.device().type() == c10::DeviceType::PrivateUse1 ? condition.device()
         : self.device().type() == c10::DeviceType::PrivateUse1 ? self.device() : other.device();
 
+    // complex values are moved as integer pairs of their width
+    if (at::isComplexType(promoted)) 
+    {
+        at::ScalarType real = c10::toRealValueType(promoted);
+        at::ScalarType bits = real == at::kHalf ? at::kShort : real == at::kFloat ? at::kInt : at::kLong;
+        auto as_bits = [&](const at::Tensor& t) { return at::view_as_real(t.to(device, promoted).resolve_conj().resolve_neg()).view(bits); };
+        at::Tensor picked = at::where(condition.to(device, at::kBool).unsqueeze(-1), as_bits(self), as_bits(other));
+        return unview(at::view_as_complex(picked.view(real)));
+    }
+
     // 0-dim CPU tensors (from scalars) join the vulkan tensors' device
     at::Tensor c = condition.to(device, at::kBool);
     at::Tensor a = self.to(device, promoted);
     at::Tensor b = other.to(device, promoted);
 
-    at::Tensor out = at::empty(at::infer_size(at::infer_size(c.sizes(), a.sizes()), b.sizes()), a.options());
+    // TensorIterator allocates the output, so it takes the inputs' layout (channels_last in, channels_last out)
     at::TensorIterator iter = at::TensorIteratorConfig()
         .check_all_same_dtype(false)
-        .add_output(out)
-        .add_input(c)
-        .add_input(a)
-        .add_input(b)
+        .add_owned_output(at::Tensor())
+        .add_const_input(c)
+        .add_const_input(a)
+        .add_const_input(b)
+        .declare_static_dtype(promoted)
         .build();
+    at::Tensor out = iter.output();
     uint64_t numel = iter.numel();
     if (numel == 0) return out;
 
     DeviceContext* context = get_device_context(out);
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
     if (!is_dtype_supported(context, promoted) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
-        TORCHVULKAN_FALLBACK("This where can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_FALLBACK("A where on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         return at::where(c.cpu(), a.cpu(), b.cpu()).to(device);
     }
 
@@ -170,12 +225,24 @@ at::Tensor where_vulkan(
     return out;
 }
 
+// the kernel writes bools: any other out dtype (an in-place logical op on ints, say) takes them by a cast
+at::Tensor& cast_bool_result(at::Tensor& out, const at::Tensor& result)
+{
+    at::native::resize_output(out, result.sizes());
+    out.copy_(result);
+    return out;
+}
+
 at::Tensor& compare_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& other, at::Tensor& out, CompareOp op) 
 {
-    if (!out.sizes().equals(self.sizes())) out.resize_(self.sizes());
+    if (out.scalar_type() != at::kBool) {
+        at::Tensor result = at::empty({0}, out.options().dtype(at::kBool));
+        return cast_bool_result(out, compare_scalar_out_vulkan(self, other, result, op));
+    }
+    resize_output_like(out, self.sizes(), {self});
     c10::ScalarType promoted = at::result_type(self, other);
     if (!dispatch_compare_shader(self, nullptr, other, out, op, promoted)) {
-        TORCHVULKAN_FALLBACK("This comparison can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_FALLBACK("A comparison on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare_scalar(self.cpu(), other, op));
     }
     return out;
@@ -188,17 +255,21 @@ bool is_cpu_scalar(const at::Tensor& t)
 
 at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out, CompareOp op) 
 {
+    if (out.scalar_type() != at::kBool) {
+        at::Tensor result = at::empty({0}, out.options().dtype(at::kBool));
+        return cast_bool_result(out, compare_out_vulkan(self, other, result, op));
+    }
     if (is_cpu_scalar(other) && self.device().type() == c10::DeviceType::PrivateUse1) {
         return compare_scalar_out_vulkan(self, other.item(), out, op);
     }
 
     std::vector<int64_t> shape = at::infer_size(self.sizes(), other.sizes());
-    if (!out.sizes().equals(shape)) out.resize_(shape);
+    resize_output_like(out, shape, {self, other});
     c10::ScalarType promoted = at::result_type(self, other);
     at::Tensor lhs = self.to(out.device());
     at::Tensor rhs = other.to(out.device());
     if (!dispatch_compare_shader(lhs, &rhs, at::Scalar(0), out, op, promoted)) {
-        TORCHVULKAN_FALLBACK("This comparison can't run on the Vulkan device. Falling back to CPU.");
+        TORCHVULKAN_FALLBACK("A comparison on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare(self.cpu(), other.cpu(), op));
     }
     return out;
@@ -206,19 +277,23 @@ at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, 
 
 at::Tensor& isinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
-    if (!self.is_floating_point()) { out.fill_(false); return out; }
+    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(at::abs(self), std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
 at::Tensor& isposinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
-    if (!self.is_floating_point()) { out.fill_(false); return out; }
+    TORCH_CHECK(!self.is_complex(), "isposinf does not support complex inputs.");
+    TORCH_CHECK(out.scalar_type() == at::kBool, "isposinf does not support non-boolean outputs.");
+    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
 at::Tensor& isneginf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
-    if (!self.is_floating_point()) { out.fill_(false); return out; }
+    TORCH_CHECK(!self.is_complex(), "isneginf does not support complex inputs.");
+    TORCH_CHECK(out.scalar_type() == at::kBool, "isneginf does not support non-boolean outputs.");
+    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, -std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 

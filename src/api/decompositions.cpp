@@ -1,4 +1,8 @@
 #include <torch/extension.h>
+#include <ATen/native/Resize.h>
+#include <ATen/native/TypeProperties.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/ops/addr_native.h>
 #include <ATen/SDPBackend.h>
 #include <ATen/WrapDimUtils.h>
 #include <ATen/ops/_native_multi_head_attention_native.h>
@@ -23,7 +27,8 @@ at::Tensor p_norm(const at::Tensor& self, double p, at::OptionalIntArrayRef dim,
 {
     at::ScalarType odt = self.scalar_type();
     bool low = is_low_prec(odt);
-    at::Tensor a = at::abs(low ? self.to(at::kFloat) : self);
+    bool complex_half = odt == at::kComplexHalf;  // like half, accumulates in float
+    at::Tensor a = at::abs(low ? self.to(at::kFloat) : complex_half ? self.to(at::kComplexFloat) : self);
     std::vector<int64_t> dv = (dim.has_value() && dim->size() > 0)
         ? std::vector<int64_t>(dim->begin(), dim->end())
         : all_dims(self);
@@ -34,11 +39,17 @@ at::Tensor p_norm(const at::Tensor& self, double p, at::OptionalIntArrayRef dim,
     else if (std::isinf(p)) r = p > 0 ? at::amax(a, dv, keepdim) : at::amin(a, dv, keepdim);
     else if (p == 0.0) r = at::sum(at::ne(a, 0).to(a.scalar_type()), dv, keepdim);
     else r = at::pow(at::sum(at::pow(a, p), dv, keepdim), 1.0 / p);
+    if (complex_half) return r.to(at::kHalf);
     return low ? r.to(odt) : r;
 }
 
 at::Tensor dot_vulkan(const at::Tensor& self, const at::Tensor& other)
 {
+    TORCH_CHECK(self.dim() == 1 && other.dim() == 1, "1D tensors expected, but got ", self.dim(), "D and ", other.dim(), "D tensors");
+    TORCH_CHECK(self.scalar_type() == other.scalar_type(), "dot : expected both vectors to have same dtype, but found ", self.scalar_type(),
+        " and ", other.scalar_type());
+    TORCH_CHECK(self.numel() == other.numel(), "inconsistent tensor size, expected tensor [", self.numel(), "] and src [", other.numel(),
+        "] to have the same number of elements, but got ", self.numel(), " and ", other.numel(), " elements respectively");
     at::ScalarType odt = self.scalar_type();
     bool low = is_low_prec(odt);
     at::Tensor a = low ? self.to(at::kFloat) : self;
@@ -46,9 +57,61 @@ at::Tensor dot_vulkan(const at::Tensor& self, const at::Tensor& other)
     return at::sum(at::mul(a, b)).to(odt);
 }
 
+at::Tensor vdot_vulkan(const at::Tensor& self, const at::Tensor& other);
+
+// the CPU's handling of conjugate views, down to which results come back as conjugate views
+at::Tensor dot_conj_aware(const at::Tensor& self, const at::Tensor& other)
+{
+    if (self.is_complex()) {
+        if (self.is_conj()) return other.is_conj() ? dot_conj_aware(self.conj(), other.conj()).conj() : vdot_vulkan(self.conj(), other);
+        if (other.is_conj()) return vdot_vulkan(other.conj(), self);
+    }
+    return dot_vulkan(self, other);
+}
+
+at::Tensor vdot_vulkan(const at::Tensor& self, const at::Tensor& other)
+{
+    if (!self.is_complex()) return dot_vulkan(self, other);
+    if (self.is_conj()) return other.is_conj() ? vdot_vulkan(other.conj(), self.conj()) : dot_vulkan(self.conj(), other);
+    if (other.is_conj()) return dot_vulkan(self, other.conj()).conj();
+    return dot_vulkan(self.conj().resolve_conj(), other);
+}
+
+// the beta/alpha checks of the CPU and CUDA addr kernels, which torch's composite skips
+void addr_check(const at::Tensor& self, const at::Tensor& vec1, const at::Tensor& vec2, const at::Scalar& beta, const at::Scalar& alpha)
+{
+    at::native::ResultTypeState state{};
+    for (const at::Tensor* t : {&self, &vec1, &vec2}) state = at::native::update_result_type_state(*t, state);
+    at::ScalarType dtype = at::native::result_type(state);
+    TORCH_CHECK(!beta.isBoolean() || dtype == at::kBool, "Boolean beta only supported for Boolean results.");
+    TORCH_CHECK(!alpha.isBoolean() || dtype == at::kBool, "Boolean alpha only supported for Boolean results.");
+    if (at::isIntegralType(dtype, /*includeBool=*/true)) {
+        TORCH_CHECK(!beta.isFloatingPoint(), "For integral input tensors, argument beta must not be a floating point number.");
+        TORCH_CHECK(!alpha.isFloatingPoint(), "For integral input tensors, argument alpha must not be a floating point number.");
+    }
+}
+
+at::Tensor addr_vulkan(const at::Tensor& self, const at::Tensor& vec1, const at::Tensor& vec2, const at::Scalar& beta, const at::Scalar& alpha)
+{
+    addr_check(self, vec1, vec2, beta, alpha);
+    return at::native::math_addr(self, vec1, vec2, beta, alpha);
+}
+
+// torch's composite addr.out, with the checks its CPU and CUDA kernels make
+at::Tensor& addr_out_vulkan(const at::Tensor& self, const at::Tensor& vec1, const at::Tensor& vec2, const at::Scalar& beta, const at::Scalar& alpha,
+                            at::Tensor& out)
+{
+    check_out_device(out, vec1);
+    addr_check(self, vec1, vec2, beta, alpha);
+    return at::native::math_addr_out(self, vec1, vec2, beta, alpha, out);
+}
+
 at::Tensor& addmv_out_vulkan(const at::Tensor& self, const at::Tensor& mat, const at::Tensor& vec, const at::Scalar& beta, const at::Scalar& alpha, at::Tensor& out)
 {
-    at::ScalarType odt = self.scalar_type();
+    // structured like torch's: the result has mat's dtype, and out must too (mv.out passes out as self)
+    at::ScalarType odt = mat.scalar_type();
+    TORCH_CHECK(out.scalar_type() == odt, "Expected out tensor to have dtype ", odt, ", but got ", out.scalar_type(), " instead");
+    check_out_device(out, mat);
     bool low = is_low_prec(odt);
     at::Scalar a = alpha, b = beta;
     if (at::isIntegralType(odt, /*includeBool=*/true)) { a = alpha.toLong(); b = beta.toLong(); }
@@ -56,7 +119,7 @@ at::Tensor& addmv_out_vulkan(const at::Tensor& self, const at::Tensor& mat, cons
     at::Tensor m = low ? mat.to(at::kFloat) : mat;
     at::Tensor v = low ? vec.to(at::kFloat) : vec;
     at::Tensor res = at::mul(at::mm(m, v.unsqueeze(1)).squeeze(1), a);
-    if (b.toDouble() != 0.0) res = at::add(res, at::mul(low ? self.to(at::kFloat) : self, b));
+    if (b.toComplexDouble() != c10::complex<double>(0.0)) res = at::add(res, at::mul(low ? self.to(at::kFloat) : self, b));
     return fill_out(out, res.to(odt));
 }
 
@@ -92,11 +155,19 @@ at::Tensor& softshrink_out_vulkan(const at::Tensor& self, const at::Scalar& lamb
 
 at::Tensor& hardshrink_out_vulkan(const at::Tensor& self, const at::Scalar& lambd, at::Tensor& out)
 {
-    return fill_out(out, at::where(at::le(at::abs(self), lambd), at::zeros_like(self), self));
+    return fill_exact_out(out, at::where(at::le(at::abs(self), lambd), at::zeros_like(self), self));
 }
 
 at::Tensor& threshold_out_vulkan(const at::Tensor& self, const at::Scalar& threshold, const at::Scalar& value, at::Tensor& out)
 {
+    // in place on a self-overlapping (expanded) tensor: threshold is idempotent, so apply it to the distinct elements
+    if (out.is_same(self) && at::has_internal_overlap(out) == at::MemOverlap::Yes) {
+        std::vector<int64_t> sizes = out.sizes().vec();
+        for (int64_t d = 0; d < out.dim(); d++) if (out.stride(d) == 0) sizes[d] = 1;
+        at::Tensor distinct = out.as_strided(sizes, out.strides(), out.storage_offset());
+        distinct.copy_(at::where(at::le(distinct, threshold), at::scalar_tensor(value, self.options()), distinct));
+        return out;
+    }
     return fill_out(out, at::where(at::le(self, threshold), at::scalar_tensor(value, self.options()), self));
 }
 
@@ -123,12 +194,13 @@ at::Tensor prelu_vulkan(const at::Tensor& self, const at::Tensor& weight)
 std::tuple<at::Tensor, at::Tensor> log_sigmoid_forward_vulkan(const at::Tensor& self)
 {
     at::Tensor output = at::neg(at::softplus(at::neg(self), 1, 20));
-    at::Tensor buffer = at::empty({0}, self.options());
+    at::Tensor buffer = at::exp(at::neg(at::abs(self)));  // the CPU's buffer (CUDA's is empty)
     return std::make_tuple(output, buffer);
 }
 
 at::Tensor huber_loss_vulkan(const at::Tensor& self, const at::Tensor& target, int64_t reduction, double delta)
 {
+    TORCH_CHECK(delta > 0, "huber_loss does not support non-positive values for delta.");
     at::Tensor d = at::sub(self, target);
     at::Tensor absd = at::abs(d);
     at::Tensor quad = at::mul(at::mul(d, d), 0.5);
@@ -177,7 +249,7 @@ at::Tensor soft_margin_loss_vulkan(const at::Tensor& self, const at::Tensor& tar
     bool low = is_low_prec(odt);
     at::Tensor s = low ? self.to(at::kFloat) : self;
     at::Tensor t = low ? target.to(at::kFloat) : target;
-    at::Tensor loss = at::softplus(at::neg(at::mul(t, s)), 1, 20);
+    at::Tensor loss = at::softplus(at::neg(at::mul(s, t)), 1, 20);
     at::Tensor r = reduce_loss(loss, reduction);
     return low ? r.to(odt) : r;
 }
@@ -192,11 +264,13 @@ at::Tensor& special_xlog1py_out_vulkan(const at::Tensor& self, const at::Tensor&
 
 at::Tensor trace_vulkan(const at::Tensor& self)
 {
+    TORCH_CHECK(self.dim() == 2, "trace: expected a matrix, but got tensor with dim ", self.dim());
     return at::sum(at::diagonal(self));
 }
 
 at::Tensor& gelu_out_vulkan(const at::Tensor& self, c10::string_view approximate, at::Tensor& out)
 {
+    TORCH_CHECK(approximate == "none" || approximate == "tanh", "approximate argument must be either none or tanh.");
     at::Tensor r;
     if (approximate == "tanh") {
         at::Tensor x3 = at::mul(at::mul(self, self), self);
@@ -208,22 +282,55 @@ at::Tensor& gelu_out_vulkan(const at::Tensor& self, c10::string_view approximate
     return fill_out(out, r);
 }
 
+// torch's masked_fill_ checks; an expanded self takes the result through its distinct elements, as the CPU's kernel
+// writes them (the last of each set of aliases remains)
+at::Tensor& masked_fill_write(at::Tensor& self, const at::Tensor& mask, const at::Tensor& result)
+{
+    if (at::has_internal_overlap(self) != at::MemOverlap::Yes) {
+        at::assert_no_partial_overlap(self, mask);
+        return copy_inplace_result(self, result);
+    }
+    TORCH_WARN("Use of masked_fill_ on expanded tensors is deprecated. Please clone() the tensor before performing this operation. "
+               "This also applies to advanced indexing e.g. tensor[mask] = scalar");
+    at::Tensor dst = self, src = result.expand(self.sizes());
+    for (int64_t d = 0; d < self.dim(); d++) {
+        if (self.stride(d) == 0 && self.size(d) > 1) {
+            dst = dst.narrow(d, self.size(d) - 1, 1);
+            src = src.narrow(d, self.size(d) - 1, 1);
+        }
+    }
+    dst.copy_(src);
+    return self;
+}
+
 at::Tensor& masked_fill_scalar_vulkan_(at::Tensor& self, const at::Tensor& mask, const at::Scalar& value)
 {
     TORCH_CHECK(mask.scalar_type() == at::kBool, "masked_fill_ only supports boolean masks, but got mask with dtype ", mask.scalar_type());
-    return copy_inplace_result(self, at::where(mask, at::scalar_tensor(value, self.options()), self));
+    check_scalar_convertible(value, self.scalar_type());
+    return masked_fill_write(self, mask, at::where(mask, at::scalar_tensor(value, self.options()), self));
 }
 
 at::Tensor& masked_fill_tensor_vulkan_(at::Tensor& self, const at::Tensor& mask, const at::Tensor& value)
 {
     TORCH_CHECK(mask.scalar_type() == at::kBool, "masked_fill_ only supports boolean masks, but got mask with dtype ", mask.scalar_type());
     TORCH_CHECK(value.dim() == 0, "masked_fill_ only supports a 0-dimensional value tensor, but got tensor with ", value.dim(), " dimension(s).");
-    return copy_inplace_result(self, at::where(mask, value.to(self.options()), self));
+    check_scalar_convertible(value.item(), self.scalar_type());
+    return masked_fill_write(self, mask, at::where(mask, value.to(self.options()), self));
 }
 
 at::Tensor& nan_to_num_out_vulkan(const at::Tensor& self, c10::optional<double> nan, c10::optional<double> posinf, c10::optional<double> neginf, at::Tensor& out)
 {
-    if (!self.is_floating_point()) { out.copy_(self); return out; }
+    TORCH_CHECK(out.scalar_type() == self.scalar_type(), "Found dtype ", out.scalar_type(), " but expected ", self.scalar_type());
+    // complex: each of the real and imaginary parts
+    if (self.is_complex()) {
+        at::Tensor pairs = at::view_as_real(self.resolve_conj().resolve_neg());
+        at::Tensor fixed = at::empty_like(pairs);
+        nan_to_num_out_vulkan(pairs, nan, posinf, neginf, fixed);
+        at::native::resize_output(out, self.sizes());
+        out.copy_(at::view_as_complex(fixed));
+        return out;
+    }
+    if (!self.is_floating_point()) return fill_out(out, self);
     double type_max, type_min;
     switch (self.scalar_type()) {
         case at::kHalf: type_max = static_cast<double>(std::numeric_limits<c10::Half>::max()); break;
@@ -240,40 +347,94 @@ at::Tensor& nan_to_num_out_vulkan(const at::Tensor& self, c10::optional<double> 
     r = at::where(at::isnan(r), at::scalar_tensor(nan_v, self.options()), r);
     r = at::where(at::isposinf(r), at::scalar_tensor(posinf_v, self.options()), r);
     r = at::where(at::isneginf(r), at::scalar_tensor(neginf_v, self.options()), r);
-    out.copy_(r);
-    return out;
+    return fill_out(out, r);
 }
 
 at::Tensor& heaviside_out_vulkan(const at::Tensor& self, const at::Tensor& values, at::Tensor& out)
 {
+    // the structured meta function's checks, which a PrivateUse1 out= kernel doesn't get
+    TORCH_CHECK(!self.is_complex() && !values.is_complex() && (!out.defined() || !out.is_complex()),
+                "heaviside is not yet implemented for complex tensors.");
+    TORCH_CHECK(self.dtype() == values.dtype() && (!out.defined() || self.dtype() == out.dtype()),
+                "heaviside is not yet implemented for tensors with different dtypes.");
     at::Tensor one = at::scalar_tensor(1, self.options());
     at::Tensor zero = at::scalar_tensor(0, self.options());
     at::Tensor r = at::where(at::gt(self, 0), one, values);
     r = at::where(at::lt(self, 0), zero, r);
     if (self.is_floating_point()) r = at::where(at::isnan(self), self, r);
-    out.copy_(r);
-    return out;
+    return fill_out(out, r);
 }
 
-at::Tensor& cat_out_vulkan(const at::ITensorListRef& tensors, int64_t dim, at::Tensor& out)
+// torch's cat checks and output shape (legacy empty 1-D inputs are skipped), then each input copied into its slice
+at::Tensor& cat_out_vulkan(const at::ITensorListRef& tensors_ref, int64_t dim, at::Tensor& out)
 {
-    int64_t d = c10::maybe_wrap_dim(dim, out.dim());
+    std::vector<at::Tensor> tensors(tensors_ref.begin(), tensors_ref.end());
+    TORCH_CHECK(!tensors.empty(), "torch.cat(): expected a non-empty list of Tensors");
+    auto skipped = [](const at::Tensor& t) { return t.dim() == 1 && t.size(0) == 0; };
+    at::native::ResultTypeState state{};
+    const at::Tensor* ref = nullptr;
+    for (const at::Tensor& t : tensors) {
+        state = at::native::update_result_type_state(t, state);
+        TORCH_CHECK(t.device() == out.device(), "Expected all tensors to be on the same device, but found at least two devices, ",
+            out.device(), " and ", t.device(), "!");
+        if (ref == nullptr && !skipped(t)) ref = &t;
+    }
+    at::ScalarType dtype = at::native::result_type(state);
+    if (!at::canCast(dtype, out.scalar_type())) {
+        throw c10::TypeError({__func__, __FILE__, static_cast<uint32_t>(__LINE__)},
+            c10::str("torch.cat(): input types can't be cast to the desired output type ", out.scalar_type()));
+    }
+    if (ref == nullptr) {
+        at::native::resize_output(out, {0});
+        return out;
+    }
+    int64_t d = c10::maybe_wrap_dim(dim, ref->dim());
+    std::vector<int64_t> shape = ref->sizes().vec();
+    shape[d] = 0;
+    for (size_t k = 0; k < tensors.size(); k++) {
+        const at::Tensor& t = tensors[k];
+        at::assert_no_overlap(out, t);  // a skipped input too: out may be that very tensor
+        if (skipped(t)) continue;
+        TORCH_CHECK(t.dim() == ref->dim(), "Tensors must have same number of dimensions: got ", ref->dim(), " and ", t.dim());
+        for (int64_t i = 0; i < t.dim(); i++) {
+            TORCH_CHECK(i == d || t.size(i) == ref->size(i), "Sizes of tensors must match except in dimension ", d, ". Expected size ",
+                ref->size(i), " but got size ", t.size(i), " for tensor number ", k, " in the list.");
+        }
+        shape[d] += t.size(d);
+    }
+    // a resized out takes the inputs' memory format when they all share one, as torch's cat
+    if (at::native::resize_output_check(out, shape)) {
+        at::native::resize_output(out, shape);
+        std::optional<at::MemoryFormat> format;
+        for (const at::Tensor& t : tensors) {
+            if (skipped(t)) continue;
+            at::MemoryFormat f = t.suggest_memory_format();
+            if (format.has_value() && *format != f) {
+                format = at::MemoryFormat::Contiguous;
+                break;
+            }
+            format = f;
+        }
+        if (format.has_value() && *format != at::MemoryFormat::Contiguous) out.resize_(shape, *format);
+    }
+    at::assert_no_internal_overlap(out);
     int64_t offset = 0;
     for (const at::Tensor& t : tensors) {
-        if (t.numel() == 0) continue;
-        int64_t n = t.size(d);
-        out.narrow(d, offset, n).copy_(t);
-        offset += n;
+        if (skipped(t) || t.size(d) == 0) continue;
+        out.narrow(d, offset, t.size(d)).copy_(t);
+        offset += t.size(d);
     }
     return out;
 }
 
 at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntArrayRef dims)
 {
-    if (dims.empty()) {
+    TORCH_CHECK(!shifts.empty(), "`shifts` required");
+    if (dims.empty() && shifts.size() == 1) {
         at::Tensor flat = self.contiguous().view({-1});
-        return roll_vulkan(flat, shifts, {0}).view(self.sizes());
+        return unview(roll_vulkan(flat, shifts, {0}).view(self.sizes()));
     }
+    TORCH_CHECK(shifts.size() == dims.size(), "shifts and dimensions must align. shifts: ", shifts.size(), ", dims:", dims.size());
     at::Tensor result = self;
     for (size_t i = 0; i < dims.size(); i++) {
         int64_t d = c10::maybe_wrap_dim(dims[i], result.dim());
@@ -285,7 +446,7 @@ at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntAr
         at::Tensor back = result.narrow(d, 0, size - shift);
         result = at::cat({front, back}, d);
     }
-    return result;
+    return result.is_same(self) ? self.clone() : result;
 }
 
 at::Tensor silu_vulkan(const at::Tensor& self)
@@ -295,6 +456,10 @@ at::Tensor silu_vulkan(const at::Tensor& self)
 
 at::Tensor hardtanh_vulkan(const at::Tensor& self, const at::Scalar& min_val, const at::Scalar& max_val)
 {
+    // keeps an integer dtype: the bounds truncate to integers
+    if (at::isIntegralType(self.scalar_type(), /*includeBool=*/false)) {
+        return at::clamp(self, at::Scalar(static_cast<int64_t>(min_val.toDouble())), at::Scalar(static_cast<int64_t>(max_val.toDouble())));
+    }
     return at::clamp(self, min_val, max_val);
 }
 
@@ -354,13 +519,24 @@ at::Tensor isnan_vulkan(const at::Tensor& self)
 
 at::Tensor log_softmax_vulkan(const at::Tensor& self, int64_t dim, bool half_to_float)
 {
-    at::Tensor input = half_to_float ? self.to(at::kFloat) : self;
-    if (input.numel() == 0) return input.clone();
+    // contiguous, as the CPU's output is whatever the input's strides; half and bfloat16 accumulate in float32 and round
+    // once, as CUDA's (so the result equals log_softmax(x, dtype=float32).to(half))
+    bool low = is_low_prec(self.scalar_type());
+    at::Tensor input = (low ? self.to(at::kFloat) : self).contiguous();
+    if (input.numel() == 0) return (low && !half_to_float) ? input.to(self.scalar_type()) : input.clone();
 
     at::Tensor self_max = at::amax(input, {dim}, /*keepdim=*/true);
     at::Tensor shifted = at::sub(input, self_max);
     at::Tensor sum_exp = at::sum(at::exp(shifted), {dim}, /*keepdim=*/true);
-    return at::sub(shifted, at::log(sum_exp));
+    at::Tensor result = at::sub(shifted, at::log(sum_exp));
+    return (low && !half_to_float) ? result.to(self.scalar_type()) : result;
+}
+
+at::Tensor log_softmax_float(const at::Tensor& input, int64_t dim)
+{
+    at::Tensor self_max = at::amax(input, {dim}, /*keepdim=*/true);
+    at::Tensor shifted = at::sub(input, self_max);
+    return at::sub(shifted, at::log(at::sum(at::exp(shifted), {dim}, /*keepdim=*/true)));
 }
 
 at::Tensor log_softmax_backward_vulkan(
@@ -371,14 +547,23 @@ at::Tensor log_softmax_backward_vulkan(
 {
     if (grad_output.numel() == 0) return grad_output.clone();
 
-    at::Tensor sum_grad = at::sum(grad_output, {dim}, /*keepdim=*/true);
-    at::Tensor softmax = at::exp(output);
-    return at::sub(grad_output, at::mul(softmax, sum_grad));
+    // half and bfloat16 in float32, rounded once, as softmax_backward_vulkan and the CPU's opmath
+    at::ScalarType out_type = grad_output.scalar_type();
+    bool upcast = out_type == at::kHalf || out_type == at::kBFloat16;
+    at::Tensor go = upcast ? grad_output.to(at::kFloat) : grad_output;
+    at::Tensor out = upcast ? output.to(at::kFloat) : output;
+    at::Tensor sum_grad = at::sum(go, {dim}, /*keepdim=*/true);
+    at::Tensor res = at::sub(go, at::mul(at::exp(out), sum_grad));
+    return upcast ? res.to(out_type) : res;
 }
 
 at::Tensor softmax_vulkan(const at::Tensor& self, int64_t dim, bool half_to_float)
 {
-    return at::exp(log_softmax_vulkan(self, dim, half_to_float));
+    bool low = is_low_prec(self.scalar_type());
+    at::Tensor input = (low ? self.to(at::kFloat) : self).contiguous();
+    if (input.numel() == 0) return (low && !half_to_float) ? input.to(self.scalar_type()) : input.clone();
+    at::Tensor result = at::exp(log_softmax_float(input, dim));
+    return (low && !half_to_float) ? result.to(self.scalar_type()) : result;
 }
 
 at::Tensor softmax_backward_vulkan(
@@ -404,11 +589,17 @@ at::Tensor logsumexp_vulkan(
     at::IntArrayRef dim,
     bool keepdim)
 {
-    at::Tensor self = self_in.is_floating_point()
+    at::Tensor self = self_in.is_floating_point() || self_in.is_complex()
         ? self_in
         : self_in.to(c10::typeMetaToScalarType(at::get_default_dtype()));
 
     if (self.numel() == 0) return at::sum(at::exp(self), dim, keepdim).log_();
+    if (self.is_complex()) {
+        // the CPU's shift: the real parts' max, 0 where that is infinite
+        at::Tensor m = at::amax(at::real(self), dim, /*keepdim=*/true);
+        m = at::where(at::isinf(m), at::zeros_like(m), m);
+        return at::add(at::log(at::sum(at::exp(at::sub(self, m)), dim, keepdim)), keepdim ? m : at::squeeze(m, dim));
+    }
 
     at::Tensor m = at::amax(self, dim, /*keepdim=*/true);
     at::Tensor s = at::sum(at::exp(at::sub(self, m)), dim, /*keepdim=*/true);
@@ -424,11 +615,13 @@ at::Tensor logsumexp_vulkan(
     return res;
 }
 
+// name: the op whose warning a non-positive degrees of freedom raises, as torch's (none for internal uses)
 std::tuple<at::Tensor, at::Tensor> compute_var_mean(
     const at::Tensor& self_in,
     at::OptionalIntArrayRef dim,
     double correction,
-    bool keepdim)
+    bool keepdim,
+    const char* name = nullptr)
 {
     TORCH_CHECK(at::isFloatingType(self_in.scalar_type()) || at::isComplexType(self_in.scalar_type()),
         "std and var only support floating point and complex dtypes"
@@ -440,16 +633,24 @@ std::tuple<at::Tensor, at::Tensor> compute_var_mean(
 
     at::Tensor mean_keep = at::mean(self, dim, /*keepdim=*/true);
     at::Tensor diff = at::sub(self, mean_keep);
-    at::Tensor ssum = at::sum(at::mul(diff, diff), dim, keepdim);
+    // |x - mean|^2, so a complex variance is real
+    at::Tensor squared = self.is_complex() ? at::add(at::square(at::real(diff)), at::square(at::imag(diff))) : at::mul(diff, diff);
+    at::Tensor ssum = at::sum(squared, dim, keepdim);
 
     int64_t N = 1;
     if (dim.has_value() && dim->size() > 0) {
-        for (int64_t d : *dim) N *= self.size(c10::maybe_wrap_dim(d, self.dim()));
+        for (int64_t d : *dim) {
+            int64_t wrapped = c10::maybe_wrap_dim(d, self.dim(), /*wrap_scalar=*/true);
+            N *= self.dim() == 0 ? 1 : self.size(wrapped);
+        }
     } else {
         N = self.numel();
     }
 
     double denom = static_cast<double>(N) - correction;
+    if (denom <= 0.0 && name != nullptr) {
+        TORCH_WARN(name, "(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel).");
+    }
     at::Tensor var = denom > 0.0
         ? at::div(ssum, denom)
         : at::full_like(ssum, std::numeric_limits<double>::quiet_NaN());
@@ -469,7 +670,7 @@ at::Tensor var_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
-    return std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim));
+    return std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim, "var"));
 }
 
 at::Tensor std_correction_vulkan(
@@ -478,7 +679,7 @@ at::Tensor std_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
-    return at::sqrt(var_correction_vulkan(self, dim, correction, keepdim));
+    return at::sqrt(std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std")));
 }
 
 std::tuple<at::Tensor, at::Tensor> var_mean_correction_vulkan(
@@ -487,7 +688,7 @@ std::tuple<at::Tensor, at::Tensor> var_mean_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
-    return compute_var_mean(self, dim, correction_or_default(correction), keepdim);
+    return compute_var_mean(self, dim, correction_or_default(correction), keepdim, "var_mean");
 }
 
 std::tuple<at::Tensor, at::Tensor> std_mean_correction_vulkan(
@@ -497,8 +698,17 @@ std::tuple<at::Tensor, at::Tensor> std_mean_correction_vulkan(
     bool keepdim)
 {
     at::Tensor var, mean;
-    std::tie(var, mean) = compute_var_mean(self, dim, correction_or_default(correction), keepdim);
+    std::tie(var, mean) = compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std_mean");
     return std::make_tuple(at::sqrt(var), mean);
+}
+
+// as torch's arange/linspace/logspace/range out=: an out of the right numel keeps its shape (and its strides, when it's a
+// view), filled in its logical order; otherwise it's resized to 1-D
+at::Tensor& write_sequence(at::Tensor& out, const at::Tensor& values)
+{
+    if (out.numel() != values.numel()) out.resize_(values.sizes());
+    out.copy_(values.view(out.sizes()));
+    return out;
 }
 
 at::Tensor& arange_start_out_vulkan(
@@ -508,9 +718,12 @@ at::Tensor& arange_start_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::arange(start, end, step, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    if (out.numel() > 0 && out.numel() != cpu.numel()) {
+        TORCH_WARN("The number of elements in the out tensor of shape ", out.sizes(), " is ", out.numel(),
+            " which does not match the computed number of elements ", cpu.numel(), ". Note that this may occur as a result of rounding "
+            "error. The out tensor will be resized to a tensor of shape (", cpu.numel(), ",).");
+    }
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& linspace_out_vulkan(
@@ -520,9 +733,7 @@ at::Tensor& linspace_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::linspace(start, end, steps, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& logspace_out_vulkan(
@@ -533,9 +744,7 @@ at::Tensor& logspace_out_vulkan(
     at::Tensor& out
 ) {
     at::Tensor cpu = at::logspace(start, end, steps, base, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 at::Tensor& eye_m_out_vulkan(
@@ -622,6 +831,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_vulkan(
 {
     int64_t ndim = input.dim();
     int64_t nnorm = static_cast<int64_t>(normalized_shape.size());
+    // torch's _check_layer_norm_inputs
+    std::vector<int64_t> shape = C10_AS_INTARRAYREF_SLOW(normalized_shape).vec();
+    TORCH_CHECK(nnorm >= 1, "Expected normalized_shape to be at least 1-dimensional, i.e., containing at least one element, but got normalized_shape = ",
+        at::IntArrayRef(shape));
+    TORCH_CHECK(!weight.has_value() || !weight->defined() || weight->sizes().equals(shape), "Expected weight to be of same shape as normalized_shape, but got ",
+        "weight of shape ", weight.has_value() && weight->defined() ? weight->sizes() : at::IntArrayRef(), " and normalized_shape = ", at::IntArrayRef(shape));
+    TORCH_CHECK(!bias.has_value() || !bias->defined() || bias->sizes().equals(shape), "Expected bias to be of same shape as normalized_shape, but got ",
+        "bias of shape ", bias.has_value() && bias->defined() ? bias->sizes() : at::IntArrayRef(), " and normalized_shape = ", at::IntArrayRef(shape));
+    TORCH_CHECK(ndim >= nnorm && input.sizes().slice(ndim - nnorm).equals(shape), "Given normalized_shape=", at::IntArrayRef(shape),
+        ", expected input with shape [*", [&] { std::string r; for (int64_t v : shape) r += ", " + std::to_string(v); return r; }(),
+        "], but got input of size", input.sizes());
     std::vector<int64_t> reduce_dims;
     for (int64_t i = ndim - nnorm; i < ndim; i++) reduce_dims.push_back(i);
 
@@ -637,11 +857,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_vulkan(
     if (weight.has_value()) y = at::mul(y, low ? weight->to(at::kFloat) : *weight);
     if (bias.has_value()) y = at::add(y, low ? bias->to(at::kFloat) : *bias);
 
-    if (low) {
-        y = y.to(odt);
-        mean = mean.to(odt);
-        rstd = rstd.to(odt);
-    }
+    // mean and rstd stay float32 for half and bfloat16, as CUDA's (and the reference's off the CPU)
+    if (low) y = y.to(odt);
     return std::make_tuple(y, mean, rstd);
 }
 
@@ -682,7 +899,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_group_norm_vulkan(
         mean = mean.to(odt);
         rstd = rstd.to(odt);
     }
-    return std::make_tuple(y, mean, rstd);
+    // the output keeps the input's memory format (channels_last in, channels_last out), as the CPU
+    return std::make_tuple(y.contiguous(input.suggest_memory_format()), mean, rstd);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_backward_vulkan(
@@ -703,7 +921,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_backward_vulkan
     }
 
     auto sum_over_batch = [&](const at::Tensor& t) -> at::Tensor {
-        return batch_dims.empty() ? t : at::sum(t, batch_dims, /*keepdim=*/false);
+        return batch_dims.empty() ? t.clone() : at::sum(t, batch_dims, /*keepdim=*/false);  // a gradient never aliases grad_out
     };
 
     at::ScalarType odt = input.scalar_type();
@@ -742,12 +960,13 @@ double loss_grad_scale(const at::Tensor& self, int64_t reduction)
 
 at::Tensor& sigmoid_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& output, at::Tensor& grad_input)
 {
-    return fill_out(grad_input, at::mul(grad_output, at::mul(at::rsub(output, 1), output)));
+    // complex: grad * conj(derivative), as the CPU
+    return fill_out(grad_input, at::mul(grad_output, at::mul(at::rsub(output, 1), output).conj().resolve_conj()));
 }
 
 at::Tensor& tanh_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& output, at::Tensor& grad_input)
 {
-    return fill_out(grad_input, at::mul(grad_output, at::rsub(at::mul(output, output), 1)));
+    return fill_out(grad_input, at::mul(grad_output, at::rsub(at::mul(output, output), 1).conj().resolve_conj()));
 }
 
 at::Tensor& leaky_relu_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& negative_slope, bool /* self_is_result */, at::Tensor& grad_input)
@@ -799,8 +1018,9 @@ at::Tensor& hardsigmoid_backward_out_vulkan(const at::Tensor& grad_output, const
 at::Tensor hardswish_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self)
 {
     at::Tensor middle = at::mul(grad_output, at::add(at::div(self, 3), 0.5));
-    at::Tensor upper = at::where(at::le(self, 3), middle, grad_output);
-    return at::where(at::lt(self, -3), at::zeros_like(grad_output), upper);
+    // the boundaries belong to the flat parts: 1 at x = 3, 0 at x = -3 (as the CPU)
+    at::Tensor upper = at::where(at::lt(self, 3), middle, grad_output);
+    return at::where(at::le(self, -3), at::zeros_like(grad_output), upper);
 }
 
 at::Tensor log_sigmoid_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Tensor& /* buffer */)
@@ -947,7 +1167,7 @@ at::Tensor addbmm_vulkan(const at::Tensor& self, const at::Tensor& batch1, const
     at::Scalar a = alpha, c = beta;
     if (at::isIntegralType(self.scalar_type(), /*includeBool=*/true)) { a = alpha.toLong(); c = beta.toLong(); }
     at::Tensor result = at::mul(product, a);
-    if (c.toDouble() != 0.0) result = at::add(result, at::mul(self.expand({n, p}), c));
+    if (c.toComplexDouble() != c10::complex<double>(0.0)) result = at::add(result, at::mul(self.expand({n, p}), c));
     return result.to(self.scalar_type());
 }
 
@@ -1116,9 +1336,7 @@ at::Tensor& narrow_copy_out_vulkan(const at::Tensor& self, int64_t dim, int64_t 
 at::Tensor& range_out_vulkan(const at::Scalar& start, const at::Scalar& end, const at::Scalar& step, at::Tensor& out)
 {
     at::Tensor cpu = at::range(start, end, step, out.options().device(at::kCPU));
-    out.resize_(cpu.sizes());
-    out.copy_(cpu);
-    return out;
+    return write_sequence(out, cpu);
 }
 
 bool is_set_to_vulkan(const at::Tensor& self, const at::Tensor& src)
@@ -1234,6 +1452,9 @@ at::Tensor& silu_backward_out_vulkan(const at::Tensor& grad_output, const at::Te
 
 at::Tensor compute_linear_combination_vulkan(const at::Tensor& input, const at::Tensor& coefficients)
 {
+    TORCH_CHECK(input.dim() > 0 && coefficients.dim() == 2 && coefficients.size(1) == input.size(0),
+        "_compute_linear_combination: expected coefficients of shape [k, input.size(0)], but got input of shape ", input.sizes(),
+        " and coefficients of shape ", coefficients.sizes());
     return at::tensordot(coefficients.to(input.device(), input.scalar_type()), input, {1}, {0});
 }
 
@@ -1359,9 +1580,11 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_log_softmax_backward_data", &log_softmax_backward_vulkan);
     m.impl("_softmax", &softmax_vulkan);
     m.impl("_softmax_backward_data", &softmax_backward_vulkan);
-    m.impl("dot", &dot_vulkan);
-    m.impl("vdot", &dot_vulkan);
+    m.impl("dot", &dot_conj_aware);
+    m.impl("vdot", &vdot_vulkan);
     m.impl("addmv.out", &addmv_out_vulkan);
+    m.impl("addr.out", &addr_out_vulkan);
+    m.impl("addr", &addr_vulkan);
     m.impl("linalg_vector_norm.out", &linalg_vector_norm_out_vulkan);
     m.impl("norm.out", &norm_scalaropt_dim_out_vulkan);
     m.impl("renorm.out", &renorm_out_vulkan);

@@ -1,4 +1,6 @@
 #include <torch/extension.h>
+#include <ATen/Context.h>
+#include <algorithm>
 #include <ATen/WrapDimUtils.h>
 #include <cmath>
 #include <vector>
@@ -157,11 +159,62 @@ at::Tensor c2c(const at::Tensor& self, at::IntArrayRef dims, int64_t normalizati
     return apply_scale(x, norm_scale(normalization, elements)).to(self.scalar_type());
 }
 
+// FakeTensor and torch.compile take an fft's strides from torch's meta functions, which off CUDA give MKL's
+// _exec_fft layout (batch dims in the input's stride order, then the transformed dims, contiguous) for c2c, and for
+// r2c/c2r too where torch has MKL, else a contiguous result
+std::vector<int64_t> sort_fft_dims(at::IntArrayRef strides, at::IntArrayRef dims, bool exclude_last)
+{
+    std::vector<int64_t> sorted(dims.begin(), dims.end());
+    auto end = sorted.end() - (exclude_last && !sorted.empty() ? 1 : 0);
+    std::stable_sort(sorted.begin(), end, [&](int64_t a, int64_t b) { return strides[a] > strides[b]; });
+    return sorted;
+}
+
+std::vector<int64_t> exec_fft_strides(at::IntArrayRef in_strides, at::IntArrayRef out_sizes, at::IntArrayRef dims)
+{
+    int64_t ndim = static_cast<int64_t>(out_sizes.size());
+    std::vector<bool> transformed(ndim, false);
+    for (int64_t d : dims) transformed[d] = true;
+    std::vector<int64_t> permute;
+    for (int64_t d = 0; d < ndim; d++) {
+        if (!transformed[d]) permute.push_back(d);
+    }
+    std::stable_sort(permute.begin(), permute.end(), [&](int64_t a, int64_t b) { return in_strides[a] > in_strides[b]; });
+    int64_t batch_dims = static_cast<int64_t>(permute.size());
+    permute.insert(permute.end(), dims.begin(), dims.end());
+    std::vector<int64_t> strides(ndim);
+    int64_t step = 1;
+    for (int64_t i = ndim - 1; i >= 0; i--) {
+        strides[permute[i]] = step;
+        step *= std::max<int64_t>(out_sizes[permute[i]], 1);
+    }
+    return strides;
+}
+
+at::Tensor with_strides(const at::Tensor& result, const std::vector<int64_t>& strides)
+{
+    if (result.numel() == 0) return unview(result.contiguous());
+    if (result.strides().equals(strides)) return unview(result);
+    at::Tensor out = at::empty_strided(result.sizes(), strides, result.options());
+    out.copy_(result);
+    return out;
+}
+
+std::vector<int64_t> wrap_fft_dims(at::IntArrayRef dims, int64_t ndim)
+{
+    std::vector<int64_t> wrapped;
+    for (int64_t d : dims) wrapped.push_back(c10::maybe_wrap_dim(d, ndim));
+    return wrapped;
+}
+
 at::Tensor fft_c2c_vulkan(const at::Tensor& self, c10::SymIntArrayRef dim, int64_t normalization, bool forward)
 {
     std::vector<int64_t> dims;
     for (const c10::SymInt& d : dim) dims.push_back(d.guard_int(__FILE__, __LINE__));
-    return c2c(self, dims, normalization, forward);
+    if (dims.empty()) return self.clone();
+    dims = wrap_fft_dims(dims, self.dim());
+    at::Tensor result = c2c(self, dims, normalization, forward);
+    return with_strides(result, exec_fft_strides(self.strides(), self.sizes(), sort_fft_dims(self.strides(), dims, false)));
 }
 
 at::Tensor& fft_c2c_out_vulkan(const at::Tensor& self, c10::SymIntArrayRef dim, int64_t normalization, bool forward, at::Tensor& out)
@@ -179,9 +232,11 @@ at::Tensor fft_r2c_vulkan(const at::Tensor& self, at::IntArrayRef dim, int64_t n
     at::Tensor result = c2c(x, dim, normalization, true);
     if (onesided && !dim.empty()) {
         int64_t last = c10::maybe_wrap_dim(dim.back(), self.dim());
-        result = result.narrow(last, 0, self.size(last) / 2 + 1).contiguous();
+        result = result.narrow(last, 0, self.size(last) / 2 + 1);
     }
-    return result;
+    if (!at::hasMKL() || dim.empty()) return unview(result.contiguous());
+    std::vector<int64_t> dims = wrap_fft_dims(dim, self.dim());
+    return with_strides(result, exec_fft_strides(self.strides(), result.sizes(), sort_fft_dims(self.strides(), dims, true)));
 }
 
 at::Tensor& fft_r2c_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, int64_t normalization, bool onesided, at::Tensor& out)
@@ -219,7 +274,16 @@ at::Tensor fft_c2r_vulkan(const at::Tensor& self, at::IntArrayRef dim, int64_t n
     }
     at::Tensor result = transform_dim(full, last, true);
     at::Tensor real = at::view_as_real(result).select(-1, 0).mul(norm_scale(normalization, elements));
-    return real.to(self.scalar_type() == at::kComplexDouble ? at::kDouble : at::kFloat).contiguous();
+    real = real.to(c10::toRealValueType(self.scalar_type()));
+    if (!at::hasMKL()) return unview(real.contiguous());
+    // torch's meta: the c2c over the leading dims first (its layout), then the c2r over the last
+    std::vector<int64_t> dims = wrap_fft_dims(dim, self.dim());
+    std::vector<int64_t> in_strides = self.strides().vec();
+    if (dims.size() > 1 && self.numel() > 0) {
+        std::vector<int64_t> leading(dims.begin(), dims.end() - 1);
+        in_strides = exec_fft_strides(self.strides(), self.sizes(), sort_fft_dims(self.strides(), leading, false));
+    }
+    return with_strides(real, exec_fft_strides(in_strides, real.sizes(), {dims.back()}));
 }
 
 at::Tensor& fft_c2r_out_vulkan(const at::Tensor& self, at::IntArrayRef dim, int64_t normalization, c10::SymInt last_dim_size, at::Tensor& out)

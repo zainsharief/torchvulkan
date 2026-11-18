@@ -107,6 +107,9 @@ KERNELS = [
     Kernel('where', 'ops/where.slang', [
         Entry('where_main', DTYPES),
     ]),
+    Kernel('addc', 'ops/addc.slang', [
+        Entry('addc_main', DTYPES),
+    ]),
     Kernel('reduce', 'ops/reduce.slang', [
         Entry('reduce_main', DTYPES),
     ]),
@@ -178,6 +181,9 @@ KERNELS = [
     ]),
     Kernel('eig', 'ops/eig.slang', [
         Entry('eig_main', [F64, F32]),
+    ]),
+    Kernel('complex_arc', 'ops/complex_arc.slang', [
+        Entry('complex_arc_main', [F32]),
     ]),
     Kernel('fft', 'ops/fft.slang', [
         Entry('fft_main', [F64, F32]),

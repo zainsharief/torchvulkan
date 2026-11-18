@@ -62,8 +62,8 @@ bool dispatch_special_shader(
     at::Tensor b = use_scalar ? at::Tensor() : other.to(out.device(), dtype);
 
     at::TensorIteratorConfig config;
-    config.set_check_mem_overlap(true).resize_outputs(false).add_output(out).add_input(a);
-    if (!use_scalar) config.add_input(b);
+    config.set_check_mem_overlap(true).resize_outputs(false).add_output(out).add_const_input(a);
+    if (!use_scalar) config.add_const_input(b);
     at::TensorIterator iter = config.build();
 
     uint64_t numel = iter.numel();
@@ -129,7 +129,7 @@ at::Tensor& special_out(
     std::vector<int64_t> shape = (!other.defined() || scalar_other) ? lhs.sizes().vec() : at::infer_size(lhs.sizes(), other.sizes());
 
     at::Tensor result = out.scalar_type() == dtype ? out : at::empty({0}, out.options().dtype(dtype));
-    if (result.sizes() != shape) result.resize_(shape);
+    at::native::resize_output(result, shape);
 
     bool ran = scalar_other
         ? dispatch_special_shader(lhs, at::Tensor(), other.item().toDouble(), result, operation)

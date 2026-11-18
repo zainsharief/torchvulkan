@@ -1,5 +1,6 @@
 #pragma once
 #include <ATen/TensorIterator.h>
+#include <ATen/native/Resize.h>
 #include "vulkan/vulkan_context.h"
 #include "vulkan/builders.h"
 #include "vulkan/shader.h"
@@ -300,15 +301,42 @@ inline at::Tensor promote_to_float(const at::Tensor& self)
     return self.to(c10::typeMetaToScalarType(at::get_default_dtype()));
 }
 
+inline void check_out_device(const at::Tensor& out, const at::Tensor& input)
+{
+    TORCH_CHECK(!input.is_privateuseone() || out.device() == input.device(), "Expected out tensor to have device ", input.device(), ", but got ",
+        out.device(), " instead");
+}
+
+// an out= that is also an input (mul_out(self, self, x), as torch's composites do in place) can't grow to the broadcast shape
+inline void check_inplace_broadcast(const at::Tensor& out, const at::Tensor& self, const at::Tensor& other)
+{
+    if (!out.is_alias_of(self) && !out.is_alias_of(other)) return;
+    std::vector<int64_t> shape = at::infer_size(self.sizes(), other.sizes());
+    TORCH_CHECK(out.sizes().equals(shape), "output with shape ", out.sizes(), " doesn't match the broadcast shape ", at::IntArrayRef(shape));
+}
+
 // copies an op result into an out= tensor, resizing it first when the shapes differ
 inline at::Tensor& fill_out(at::Tensor& out, const at::Tensor& res)
 {
+    TORCH_CHECK(!res.is_privateuseone() || out.is_privateuseone(),
+        "Expected out tensor to have device ", res.device(), ", but got ", out.device(), " instead");
     TORCH_CHECK(at::canCast(res.scalar_type(), out.scalar_type()),
         "result type ", res.scalar_type(), " can't be cast to the desired output type ", out.scalar_type()
     );
-    if (out.sizes() != res.sizes()) out.resize_(res.sizes());
+    // warns, as torch does, when it resizes a non-empty out; a resized out takes a dense result's layout, as a
+    // TensorIterator output does
+    if (at::native::resize_output(out, res.sizes()) && res.is_non_overlapping_and_dense() && out.strides() != res.strides()) {
+        out.as_strided_(res.sizes(), res.strides());
+    }
     out.copy_(res);
     return out;
+}
+
+// TensorIterator's same-dtype ops (neg, floor, abs, ...) take an out= only of the result's own dtype
+inline at::Tensor& fill_exact_out(at::Tensor& out, const at::Tensor& res)
+{
+    TORCH_CHECK(out.scalar_type() == res.scalar_type(), "Found dtype ", out.scalar_type(), " but expected ", res.scalar_type());
+    return fill_out(out, res);
 }
 
 // writes an in-place op's result back into self, with the checks torch makes: the result must keep
@@ -337,7 +365,62 @@ inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optiona
 // the dtype a reduction accumulates in is not always the dtype it returns
 inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
 {
+    if (dtype == at::kComplexHalf) return at::kComplexFloat;
     return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+}
+
+// a result built as a view of a private buffer (view_as_complex of real pairs, a moved or narrowed scratch tensor):
+// the same storage as a new tensor, so the op doesn't return a view the way no CPU kernel does
+inline at::Tensor unview(const at::Tensor& t)
+{
+    if (!t.is_view()) return t;
+    at::Tensor fresh = at::empty({0}, t.options());
+    fresh.set_(t.storage(), t.storage_offset(), t.sizes(), t.strides());
+    return fresh;
+}
+
+// resizes out= the way TensorIterator would lay it out (channels_last inputs give a channels_last out); meta copies
+// of the inputs stand in so working out the strides allocates nothing
+inline void resize_output_like(at::Tensor& out, at::IntArrayRef shape, std::initializer_list<at::Tensor> inputs)
+{
+    if (out.sizes().equals(shape)) return;
+    at::TensorIteratorConfig config;
+    config.check_all_same_dtype(false).add_owned_output(at::Tensor());
+    for (const at::Tensor& t : inputs) {
+        // one dtype for all: only the layouts matter, and mixed dtypes with an undefined output trip TensorIterator's checks
+        config.add_owned_const_input(at::empty_strided(t.sizes(), t.strides(), t.options().device(at::kMeta).dtype(at::kByte)));
+    }
+    at::TensorIterator iter = config.build();
+    at::native::resize_output(out, shape);
+    out.as_strided_(shape, iter.output().strides());
+}
+
+// torch's Scalar::to<T> check (out of range, or an imaginary part for a real dtype), which its fills make
+inline void check_scalar_convertible(const at::Scalar& value, at::ScalarType dtype)
+{
+    switch (dtype) {
+        case at::kBool: (void)value.to<bool>(); break;
+        case at::kByte: (void)value.to<uint8_t>(); break;
+        case at::kChar: (void)value.to<int8_t>(); break;
+        case at::kShort: (void)value.to<int16_t>(); break;
+        case at::kInt: (void)value.to<int32_t>(); break;
+        case at::kLong: (void)value.to<int64_t>(); break;
+        case at::kHalf: (void)value.to<at::Half>(); break;
+        case at::kBFloat16: (void)value.to<at::BFloat16>(); break;
+        case at::kFloat: (void)value.to<float>(); break;
+        case at::kDouble: (void)value.to<double>(); break;
+        case at::kComplexHalf: (void)value.to<c10::complex<at::Half>>(); break;
+        case at::kComplexFloat: (void)value.to<c10::complex<float>>(); break;
+        case at::kComplexDouble: (void)value.to<c10::complex<double>>(); break;
+        default: break;
+    }
+}
+
+// a bool byte may hold any nonzero value (a uint8 viewed as bool); kernels share uint8's, so read it as 0/1 first
+inline at::Tensor normalize_bool(const at::Tensor& t)
+{
+    if (t.scalar_type() != at::kBool || !t.is_privateuseone()) return t;
+    return at::ne(t.view(at::kByte), 0);
 }
 
 inline bool is_low_prec(at::ScalarType dtype)
