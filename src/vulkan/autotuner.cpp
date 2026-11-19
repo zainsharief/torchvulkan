@@ -126,18 +126,9 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
     if (configs.empty()) return {};
     if (configs.size() == 1 || !device->shader_manager->supportsTimestamps()) return configs.front();
 
-    TuneConfig best;
-    double best_time = std::numeric_limits<double>::infinity();
-    std::set<std::vector<uint32_t>> timed;
     std::exception_ptr first_error;
-
-    // times a config once; returns whether it is the fastest so far
-    auto consider = [&](const TuneConfig& c) 
+    auto time_of = [&](const TuneConfig& c)
     {
-        if (!timed.insert(c.values).second) return false;
-
-        double time = std::numeric_limits<double>::infinity();
-        
         try {
             TuneDispatch d = build(c);
             std::vector<double> spans(TIMING_SPANS);
@@ -146,30 +137,69 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
                 span = device->shader_manager->getTimestamp(
                     d.key,
                     d.subgroupSize,
-                    d.spec.build(), d.push.build(),
+                    d.spd.build(), d.pcs.build(),
                     d.read, d.write,
                     d.groupX, d.groupY, d.groupZ
                 );
             }
             std::nth_element(spans.begin(), spans.begin() + spans.size() / 2, spans.end());
-            time = spans[spans.size() / 2];
+            return spans[spans.size() / 2];
         } catch (const c10::Error&) {
             // a config the driver cannot build is skipped
             if (!first_error) first_error = std::current_exception();
+            return std::numeric_limits<double>::infinity();
         }
-        
+    };
+
+    // the kernels' params don't connect, so one descent could never leave the kernel it starts in
+    std::vector<TuneSpace> parts;
+    if (!space.kernel_param) parts.push_back(space);
+    else {
+        for (uint32_t kernel : space.params[*space.kernel_param].options) {
+            TuneSpace part = space;
+            part.params[*space.kernel_param].options = {kernel};
+            parts.push_back(part);
+        }
+    }
+
+    TuneConfig best;
+    double best_time = std::numeric_limits<double>::infinity();
+    for (const TuneSpace& part : parts)
+    {
+        auto [config, time] = search(part, time_of);
+        if (time < best_time) {
+            best = config;
+            best_time = time;
+        }
+    }
+
+    if (best.empty() && first_error) std::rethrow_exception(first_error);
+    return best;
+}
+
+std::pair<TuneConfig, double> Autotuner::search(const TuneSpace& space, const std::function<double(const TuneConfig&)>& time_of)
+{
+    const std::vector<TuneConfig> configs = space.configs();
+    TuneConfig best;
+    double best_time = std::numeric_limits<double>::infinity();
+    std::set<std::vector<uint32_t>> timed;
+
+    // times a config once; returns whether it is the fastest so far
+    auto consider = [&](const TuneConfig& c)
+    {
+        if (!timed.insert(c.values).second) return false;
+        double time = time_of(c);
         if (time >= best_time) return false;
         best_time = time;
         best = c;
         return true;
     };
 
-    if (configs.size() <= EXHAUSTIVE_LIMIT) 
+    if (configs.size() <= EXHAUSTIVE_LIMIT)
     {
         for (const TuneConfig& c : configs) consider(c);
-        if (best.empty() && first_error) std::rethrow_exception(first_error);
-        return best;
-    } 
+        return {best, best_time};
+    }
 
     // coordinate descent from the best of a spread of samples: try every option of one param at a time
     // and keep the fastest, until a whole pass finds nothing faster
@@ -189,7 +219,5 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
             }
         }
     }
-
-    if (best.empty() && first_error) std::rethrow_exception(first_error);
-    return best;
+    return {best, best_time};
 }

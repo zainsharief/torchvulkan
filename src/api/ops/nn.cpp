@@ -9,6 +9,7 @@
 #include <vector>
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
 
@@ -51,6 +52,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_forward(
     double eps)
 {
     TORCH_CHECK(input.dim() >= 2, "batch_norm: expected input to have at least 2 dimensions, got ", input.dim());
+    if (auto fused = torchvulkan::batch_norm_shader(input, weight, bias, running_mean, running_var, training, momentum, eps)) return *fused;
     at::ScalarType dtype = input.scalar_type();
     at::Tensor x = is_low_prec(dtype) ? input.to(at::kFloat) : input;
     std::vector<int64_t> dims = batch_norm_dims(input);
@@ -224,6 +226,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_backward_impl(
     double eps,
     std::array<bool, 3> output_mask)
 {
+    if (auto fused = torchvulkan::batch_norm_backward_shader(grad_out, input, weight, running_mean, running_var, save_mean, save_invstd, train, eps, output_mask)) {
+        return *fused;
+    }
     at::ScalarType dtype = input.scalar_type();
     at::ScalarType compute = is_low_prec(dtype) ? at::kFloat : dtype;
     at::Tensor x = input.to(compute);

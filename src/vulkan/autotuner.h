@@ -1,6 +1,7 @@
 #pragma once
 #include <ATen/ATen.h>
 #include <map>
+#include <optional>
 
 #include "builders.h"
 #include "shader.h"
@@ -25,6 +26,7 @@ struct TuneSpace
 {
     std::vector<TuneParam> params;
     std::function<bool(const TuneConfig&)> valid;
+    std::optional<size_t> kernel_param;
     std::vector<TuneConfig> configs() const;
 };
 
@@ -32,8 +34,8 @@ struct TuneDispatch
 {
     ShaderKey key{};
     uint32_t subgroupSize = 0;
-    SpecializationBuilder spec;
-    PushConstantBuilder push;
+    SpecializationBuilder spd;
+    PushConstantBuilder pcs;
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;
@@ -63,4 +65,5 @@ private:
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
+    std::pair<TuneConfig, double> search(const TuneSpace& space, const std::function<double(const TuneConfig&)>& time_of);
 };
