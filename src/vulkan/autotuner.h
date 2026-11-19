@@ -1,6 +1,7 @@
 #pragma once
 #include <ATen/ATen.h>
 #include <map>
+#include <optional>
 
 #include "builders.h"
 #include "shader.h"
@@ -25,6 +26,8 @@ struct TuneSpace
 {
     std::vector<TuneParam> params;
     std::function<bool(const TuneConfig&)> valid;
+    // a param whose options pick different kernels: each kernel's configs are searched on their own
+    std::optional<size_t> kernel_param;
     std::vector<TuneConfig> configs() const;
 };
 
@@ -63,4 +66,5 @@ private:
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
+    std::pair<TuneConfig, double> search(const TuneSpace& space, const std::function<double(const TuneConfig&)>& time_of);
 };

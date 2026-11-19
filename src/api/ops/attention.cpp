@@ -429,6 +429,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
         {"subgroup", subgroup_size_options(device)},
         {"splits", {1, 2, 4, 8, 16, 32}},
     };
+    space.kernel_param = 0;
     space.valid = [&](const TuneConfig& config) {
         AttentionTiling t = attention_tiling(config);
         if (t.wg > max_threads || t.bc > t.wg || t.br > t.wg) return false;
@@ -601,6 +602,7 @@ bool run_backward(
         {"block", blocks},
         {"subgroup", subgroup_size_options(device)},
     };
+    space.kernel_param = 0;
     space.valid = [&](const TuneConfig& config) {
         AttentionTiling t = attention_tiling(config);
         if (t.wg > max_threads || t.bc > t.wg || t.wg % t.bc != 0) return false;

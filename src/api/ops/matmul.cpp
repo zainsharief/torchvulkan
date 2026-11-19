@@ -170,6 +170,83 @@ uint64_t matmul_tune_key(const MatmulOperands& ops, uint32_t M, uint32_t N, uint
     return self_transposed | (other_transposed << 1) | (log2_ceil(M) << 8) | (log2_ceil(N) << 16) | (log2_ceil(K) << 24) | (log2_ceil(B) << 32);
 }
 
+// whether the SIMD kernel can run an M x N output with this tile and subgroup size
+bool matmul_simd_fits(DeviceContext* device, c10::ScalarType compute_type, uint32_t tile_m, uint32_t subgroup, uint32_t M, uint32_t N)
+{
+    const auto& limits = device->properties.limits;
+    uint64_t shared_bytes = c10::elementSize(compute_type) * ((tile_m * (MATMUL_TILE_K + 1)) + (MATMUL_TILE_K * MATMUL_TILE_N));
+    uint64_t max_m = uint64_t(1) << log2_ceil(M);
+    uint64_t max_n = uint64_t(1) << log2_ceil(N);
+    if (MATMUL_WG * MATMUL_WG > limits.maxComputeWorkGroupInvocations || shared_bytes > limits.maxComputeSharedMemorySize) return false;
+    if (ceil_div(max_m, tile_m) > limits.maxComputeWorkGroupCount[1] || ceil_div(max_n, MATMUL_TILE_N) > limits.maxComputeWorkGroupCount[0]) return false;
+    return !device->support_subgroup_control || MATMUL_WG * MATMUL_WG <= subgroup * device->max_workgroup_subgroups;
+}
+
+// the cooperative-matrix tuner times this too: emulated cooperative matrices can lose to it by far
+TuneDispatch matmul_simd_dispatch(
+    const MatmulOperands& ops,
+    const at::Tensor& out,
+    uint32_t has_bias,
+    MatmulActivation activation,
+    const at::Scalar& alpha,
+    const at::Scalar& beta,
+    uint32_t tile_m,
+    uint32_t subgroup,
+    int64_t b0,
+    int64_t batch)
+{
+    c10::ScalarType result_dtype = out.scalar_type();
+    c10::ScalarType compute_type = matmul_accumulate_dtype(result_dtype);
+    uint32_t M = static_cast<uint32_t>(out.size(1));
+    uint32_t N = static_cast<uint32_t>(out.size(2));
+    uint32_t K = static_cast<uint32_t>(ops.self_b.size(2));
+
+    uint32_t vecSize = get_dtype_vec_size(result_dtype);
+    uint32_t isBiasAligned = has_bias ? ops.bias_b.is_contiguous() : 1;
+    uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
+                         ops.self_b.is_contiguous() && ops.other_b.is_contiguous() && isBiasAligned;
+
+    uint32_t strides_a[4], strides_b[4], strides_c[4];
+    uint32_t strides_bias[4] = {0, 0, 0, 0};
+    strides_of(ops.self_b, strides_a);
+    strides_of(ops.other_b, strides_b);
+    strides_of(out, strides_c);
+    if (has_bias) strides_of(ops.bias_b, strides_bias);
+
+    TuneDispatch d;
+    d.key = ShaderKey{torchvulkan::Kernel::MATMUL_SIMD, result_dtype};
+    d.subgroupSize = subgroup;
+    d.spd.push(MATMUL_WG)
+         .push(MATMUL_WG)
+         .push(isAligned)
+         .push(has_bias)
+         .push(static_cast<uint32_t>(activation))
+         .push(tile_m);
+
+    d.pcs.push(get_batch_address(ops.self_b, b0))
+         .push(get_batch_address(ops.other_b, b0))
+         .push(get_batch_address(out, b0))
+         .push(has_bias ? get_batch_address(ops.bias_b, b0) : uint64_t(0)) // the shader only reads the bias when it exists
+         .push_array(strides_a)
+         .push_array(strides_b)
+         .push_array(strides_c)
+         .push_array(strides_bias)
+         .push(M)
+         .push(N)
+         .push(K)
+         .push(uint32_t(0)) // padding
+         .push_scalar(alpha, compute_type)
+         .push_scalar(beta, compute_type);
+
+    d.read = {ops.self_b, ops.other_b};
+    if (has_bias) d.read.push_back(ops.bias_b);
+    d.write = {out};
+    d.groupX = static_cast<uint32_t>(ceil_div(N, MATMUL_TILE_N));
+    d.groupY = static_cast<uint32_t>(ceil_div(M, tile_m));
+    d.groupZ = static_cast<uint32_t>(batch);
+    return d;
+}
+
 at::Tensor dispatch_matmul_simd_shader(
     const at::Tensor& self_,
     const at::Tensor& other_,
@@ -200,9 +277,6 @@ at::Tensor dispatch_matmul_simd_shader(
     );
 
     uint32_t max_shared_memory = limits.maxComputeSharedMemorySize;
-    auto shared_bytes = [&](uint32_t tile_m) {
-        return c10::elementSize(compute_type) * ((tile_m * (MATMUL_TILE_K + 1)) + (MATMUL_TILE_K * MATMUL_TILE_N));
-    };
 
     MatmulOperands ops = prepare_matmul_operands(shape.self, shape.other, bias_, has_bias, result_dtype, M, K, N, B, shape.batch_shape);
     at::Tensor out = at::empty({B, M, N}, ops.self_b.options());
@@ -217,73 +291,21 @@ at::Tensor dispatch_matmul_simd_shader(
         return cpu_fallback();
     }
 
-    uint32_t vecSize = get_dtype_vec_size(result_dtype);
-    uint32_t isBiasAligned = has_bias ? ops.bias_b.is_contiguous() : 1;
-    uint32_t isAligned = (K % vecSize == 0) && (N % vecSize == 0) &&
-                         ops.self_b.is_contiguous() && ops.other_b.is_contiguous() && isBiasAligned;
-
-    uint32_t strides_a[4], strides_b[4], strides_c[4];
-    uint32_t strides_bias[4] = {0, 0, 0, 0};
-    strides_of(ops.self_b, strides_a);
-    strides_of(ops.other_b, strides_b);
-    strides_of(out, strides_c);
-    if (has_bias) strides_of(ops.bias_b, strides_bias);
-
-    std::vector<at::Tensor> readTensors = {ops.self_b, ops.other_b};
-    if (has_bias) readTensors.push_back(ops.bias_b);
-
     // a 1D grid past the limit would be wrapped into rows by dispatchShader, which the tiles don't index for
     TORCH_CHECK(ceil_div(N, MATMUL_TILE_N) <= limits.maxComputeWorkGroupCount[0],
         "torchvulkan [ERROR]: matmul with N = ", N, " needs more column tiles than the device allows.");
 
     materialize_cow(out);
     auto make_dispatch = [&](const TuneConfig& config, int64_t b0, int64_t batch) {
-        uint32_t tile_m = config[0];
-
-        TuneDispatch d;
-        d.key = ShaderKey{torchvulkan::Kernel::MATMUL_SIMD, result_dtype};
-        d.subgroupSize = config[1];
-        d.spd.push(MATMUL_WG)
-             .push(MATMUL_WG)
-             .push(isAligned)
-             .push(has_bias)
-             .push(static_cast<uint32_t>(activation))
-             .push(tile_m);
-
-        d.pcs.push(get_batch_address(ops.self_b, b0))
-             .push(get_batch_address(ops.other_b, b0))
-             .push(get_batch_address(out, b0))
-             .push(has_bias ? get_batch_address(ops.bias_b, b0) : uint64_t(0)) // the shader only reads the bias when it exists
-             .push_array(strides_a)
-             .push_array(strides_b)
-             .push_array(strides_c)
-             .push_array(strides_bias)
-             .push(M)
-             .push(N)
-             .push(K)
-             .push(uint32_t(0)) // padding
-             .push_scalar(alpha, compute_type)
-             .push_scalar(beta, compute_type);
-
-        d.read = readTensors;
-        d.write = {out};
-        d.groupX = static_cast<uint32_t>(ceil_div(N, MATMUL_TILE_N));
-        d.groupY = static_cast<uint32_t>(ceil_div(M, tile_m));
-        d.groupZ = static_cast<uint32_t>(batch);
-        return d;
+        return matmul_simd_dispatch(ops, out, has_bias, activation, alpha, beta, config[0], config[1], b0, batch);
     };
 
-    uint64_t max_m = uint64_t(1) << log2_ceil(M);
     TuneSpace space;
     space.params = {
         {"tile_m", {128, 64}},
         {"subgroup", subgroup_size_options(device)},
     };
-    space.valid = [&](const TuneConfig& config) {
-        uint32_t tile_m = config[0];
-        if (shared_bytes(tile_m) > max_shared_memory || ceil_div(max_m, tile_m) > limits.maxComputeWorkGroupCount[1]) return false;
-        return !device->support_subgroup_control || MATMUL_WG * MATMUL_WG <= config[1] * device->max_workgroup_subgroups;
-    };
+    space.valid = [&](const TuneConfig& config) { return matmul_simd_fits(device, compute_type, config[0], config[1], M, N); };
 
     const int64_t max_batch = limits.maxComputeWorkGroupCount[2];
     const TuneConfig& config = device->tuner->select(
@@ -309,6 +331,12 @@ at::Tensor dispatch_matmul_simd_shader(
 CoopTiling matmul_coop_tiling(const TuneConfig& config)
 {
     return CoopTiling{config[0], config[1], config[2], config[3], config[4], config[5], config[7], config[6]};
+}
+
+// the tuner's pick between the cooperative-matrix kernel and the SIMD one
+bool matmul_coop_kernel(const TuneConfig& config)
+{
+    return config[8] == 1;
 }
 
 bool coop_transposed(const at::Tensor& t)
@@ -409,6 +437,7 @@ at::Tensor dispatch_matmul_coop_shader(
 
     materialize_cow(out);
     auto make_dispatch = [&](const TuneConfig& config, int64_t b0, int64_t batch) {
+        if (!matmul_coop_kernel(config)) return matmul_simd_dispatch(ops, out, has_bias, activation, alpha, beta, config[9], config[7], b0, batch);
         CoopTiling t = matmul_coop_tiling(config);
         uint32_t tile_m = coop_tile_m(t);
         uint32_t tile_n = coop_tile_n(t);
@@ -475,8 +504,18 @@ at::Tensor dispatch_matmul_coop_shader(
         {"bk", {8, 16, 32, 64}},
         {"shared", {0, 1}},
         {"subgroup", subgroup_size_options(device)},
+        {"kernel", {0, 1}},
+        {"simd_tile_m", {128, 64}},
     };
+    space.kernel_param = 8;
     space.valid = [&](const TuneConfig& config) {
+        // each kernel takes only the first option of the other's params
+        for (size_t i = 0; i < 9; i++) {
+            if (i != 7 && !matmul_coop_kernel(config) && config[i] != space.params[i].options.front()) return false;
+        }
+        if (!matmul_coop_kernel(config)) return matmul_simd_fits(device, accumulate_type, config[9], config[7], M, N);
+        if (config[9] != space.params[9].options.front()) return false;
+
         CoopTiling t = matmul_coop_tiling(config);
         uint64_t subgroups = t.warps_m * t.warps_n;
         uint64_t tile_m = coop_tile_m(t);
@@ -509,7 +548,7 @@ at::Tensor dispatch_matmul_coop_shader(
     const int64_t target_grid = 512;
     int64_t grid = ceil_div(M, coop_tile_m(tiling)) * ceil_div(N, coop_tile_n(tiling)) * B;
     int64_t split = 1;
-    if (promoted_type == accumulate_type && B == 1 && grid < target_grid && K >= 4096) {
+    if (matmul_coop_kernel(config) && promoted_type == accumulate_type && B == 1 && grid < target_grid && K >= 4096) {
         while (
             split * 2 * grid <= target_grid && (K % (split * 2)) == 0 &&
             ((K / (split * 2)) % 64) == 0 && (K / (split * 2)) >= 512

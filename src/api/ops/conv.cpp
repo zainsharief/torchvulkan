@@ -408,6 +408,85 @@ void conv_operands(
     for (const at::Tensor& t : writes) materialize_cow(t);
 }
 
+// conv items per SIMD dispatch: the grid's x dimension is limited
+int64_t conv_simd_items(ConvMode mode, const ConvProblem& p, const at::Tensor& x)
+{
+    if (mode == ConvMode::GRAD_WEIGHT) return p.n;
+    DeviceContext* device = get_device_context(x);
+    SubpixelSplit subpixel = subpixel_split(mode, p, device);
+    int64_t rows = mode == ConvMode::GRAD_INPUT ? p.cx : p.cy;
+    int64_t positions = mode == ConvMode::FORWARD ? c10::multiply_integers(p.out) : subpixel.phases ? subpixel.positions : c10::multiply_integers(p.in);
+    ConvLaunch launch = conv_launch(device, x.scalar_type(), rows);
+    int64_t columns_per_workgroup = launch.direct ? CONV_WG * CONV_WG * CONV_DIRECT_COLUMNS : CONV_TILE_N;
+    return std::max<int64_t>(1, static_cast<int64_t>(device->properties.limits.maxComputeWorkGroupCount[0]) * columns_per_workgroup / positions);
+}
+
+// the cooperative-matrix tuner times this too: emulated cooperative matrices can lose to it by far
+TuneDispatch conv_simd_dispatch(
+    ConvMode mode,
+    const ConvProblem& p,
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& y,
+    const at::Tensor& bias,
+    const std::vector<at::Tensor>& reads,
+    const std::vector<at::Tensor>& writes,
+    const Metadata& metadata,
+    int64_t splits,
+    int64_t chunk,
+    int64_t item0,
+    int64_t items)
+{
+    DeviceContext* device = get_device_context(x);
+    at::ScalarType dtype = x.scalar_type();
+    int64_t taps = c10::multiply_integers(p.g.kernel);
+    int64_t inputs = c10::multiply_integers(p.in);
+    int64_t outputs = c10::multiply_integers(p.out);
+    int64_t vec = get_dtype_vec_size(dtype);
+    bool has_bias = bias.defined();
+
+    SubpixelSplit subpixel = subpixel_split(mode, p, device);
+    int64_t rows = mode == ConvMode::GRAD_INPUT ? p.cx : p.cy;
+    int64_t positions = mode == ConvMode::FORWARD ? outputs : subpixel.phases ? subpixel.positions : inputs;
+    int64_t depth = mode == ConvMode::FORWARD ? p.cx * taps : mode == ConvMode::GRAD_INPUT ? p.cy * (subpixel.phases ? subpixel.taps : taps) : chunk;
+    ConvLaunch launch = conv_launch(device, dtype, rows);
+    int64_t columns = mode == ConvMode::GRAD_WEIGHT ? p.cx * taps : items * positions;
+    uint32_t aligned = !subpixel.phases && (depth % vec == 0) && (columns % vec == 0);
+
+    TuneDispatch d;
+    d.key = ShaderKey{torchvulkan::Kernel::CONV, dtype};
+    d.subgroupSize = device->default_subgroup_size;
+    d.spd.push(CONV_WG)
+         .push(CONV_WG)
+         .push(aligned)
+         .push(static_cast<uint32_t>(has_bias))
+         .push(uint32_t(0)) // ACTIVATION
+         .push(launch.tile_m)
+         .push(static_cast<uint32_t>(mode));
+    push_conv_geometry(d.spd, p.g, subpixel);
+    d.spd.push(static_cast<uint32_t>(launch.direct));
+
+    uint64_t x_address = get_tensor_address(x) + item0 * p.groups * p.cx * inputs * x.element_size();
+    uint64_t y_address = get_tensor_address(y) + item0 * p.groups * p.cy * outputs * y.element_size();
+
+    d.pcs.push(x_address)
+         .push(get_tensor_address(weight))
+         .push(y_address)
+         .push(has_bias ? get_tensor_address(bias) : uint64_t(0))
+         .push_metadata(&metadata)
+         .push(static_cast<uint32_t>(items))
+         .push(static_cast<uint32_t>(splits))
+         .push(static_cast<uint32_t>(chunk));
+
+    auto [grid_x, grid_y] = conv_grid(launch, rows, columns);
+    d.read = reads;
+    d.write = writes;
+    d.groupX = static_cast<uint32_t>(grid_x);
+    d.groupY = static_cast<uint32_t>(grid_y);
+    d.groupZ = static_cast<uint32_t>(p.groups * (subpixel.phases ? subpixel.phases : splits));
+    return d;
+}
+
 CoopTiling coop_tiling(const TuneConfig& config)
 {
     return CoopTiling{config[0], config[1], config[2], config[3], config[4], config[5], config[6]};
@@ -451,12 +530,16 @@ bool dispatch_conv_coop_shader(
     MetadataBuilder metadataBuilder = conv_metadata(p);
     Metadata metadata = metadataBuilder.build();
 
+    // the last param picks the cooperative-matrix kernel (1) or the SIMD one (0)
+    const size_t kernel_param = 7;
     auto items_per_dispatch = [&](const TuneConfig& config) {
+        if (config[kernel_param] == 0) return conv_simd_items(mode, p, x);
         if (mode == ConvMode::GRAD_WEIGHT) return p.n;
         return std::max<int64_t>(1, static_cast<int64_t>(limits.maxComputeWorkGroupCount[0]) * coop_tile_n(coop_tiling(config)) / positions);
     };
 
     auto make_dispatch = [&](const TuneConfig& config, int64_t item0, int64_t items) {
+        if (config[kernel_param] == 0) return conv_simd_dispatch(mode, p, x, weight, y, bias, reads, writes, metadata, splits, chunk, item0, items);
         CoopTiling t = coop_tiling(config);
         uint32_t threads = coop_threads(t);
         uint32_t tile_m = coop_tile_m(t);
@@ -521,8 +604,17 @@ bool dispatch_conv_coop_shader(
         {"frags_n", {1, 2, 4}},
         {"bk", {8, 16, 32, 64}},
         {"subgroup", subgroup_size_options(device)},
+        {"kernel", {0, 1}},
     };
+    space.kernel_param = kernel_param;
     space.valid = [&](const TuneConfig& config) {
+        if (config[kernel_param] == 0) {
+            // the SIMD kernel takes only the first option of the cooperative-matrix params
+            for (size_t i = 0; i < kernel_param; i++) {
+                if (config[i] != space.params[i].options.front()) return false;
+            }
+            return true;
+        }
         CoopTiling t = coop_tiling(config);
         uint64_t subgroups = t.warps_m * t.warps_n;
         uint64_t threads = coop_threads(t);
@@ -573,23 +665,6 @@ void dispatch_conv_shader(
 {
     DeviceContext* device = get_device_context(x);
     if (device->support_coopmat && dispatch_conv_coop_shader(mode, p, x, weight, y, bias, splits, chunk)) return;
-    at::ScalarType dtype = x.scalar_type();
-    int64_t taps = c10::multiply_integers(p.g.kernel);
-    int64_t inputs = c10::multiply_integers(p.in);
-    int64_t outputs = c10::multiply_integers(p.out);
-    int64_t vec = get_dtype_vec_size(dtype);
-    bool has_bias = bias.defined();
-    const auto& limits = device->properties.limits;
-
-    SubpixelSplit subpixel = subpixel_split(mode, p, device);
-    int64_t rows = mode == ConvMode::GRAD_INPUT ? p.cx : p.cy;
-    int64_t positions = mode == ConvMode::FORWARD ? outputs : subpixel.phases ? subpixel.positions : inputs;
-    int64_t depth = mode == ConvMode::FORWARD ? p.cx * taps : mode == ConvMode::GRAD_INPUT ? p.cy * (subpixel.phases ? subpixel.taps : taps) : chunk;
-    ConvLaunch launch = conv_launch(device, dtype, rows);
-    int64_t columns_per_workgroup = launch.direct ? CONV_WG * CONV_WG * CONV_DIRECT_COLUMNS : CONV_TILE_N;
-    int64_t items_per_dispatch = mode == ConvMode::GRAD_WEIGHT
-        ? p.n
-        : std::max<int64_t>(1, static_cast<int64_t>(limits.maxComputeWorkGroupCount[0]) * columns_per_workgroup / positions);
 
     std::vector<at::Tensor> reads, writes;
     conv_operands(mode, x, weight, y, bias, reads, writes);
@@ -597,48 +672,10 @@ void dispatch_conv_shader(
     MetadataBuilder metadataBuilder = conv_metadata(p);
     Metadata metadata = metadataBuilder.build();
 
+    int64_t items_per_dispatch = conv_simd_items(mode, p, x);
     for (int64_t item0 = 0; item0 < p.n; item0 += items_per_dispatch) {
         int64_t items = std::min(items_per_dispatch, p.n - item0);
-        int64_t columns = mode == ConvMode::GRAD_WEIGHT ? p.cx * taps : items * positions;
-        uint32_t aligned = !subpixel.phases && (depth % vec == 0) && (columns % vec == 0);
-
-        SpecializationBuilder spd{};
-        spd.push(CONV_WG)
-           .push(CONV_WG)
-           .push(aligned)
-           .push(static_cast<uint32_t>(has_bias))
-           .push(uint32_t(0)) // ACTIVATION
-           .push(launch.tile_m)
-           .push(static_cast<uint32_t>(mode));
-        push_conv_geometry(spd, p.g, subpixel);
-        spd.push(static_cast<uint32_t>(launch.direct));
-
-        uint64_t x_address = get_tensor_address(x) + item0 * p.groups * p.cx * inputs * x.element_size();
-        uint64_t y_address = get_tensor_address(y) + item0 * p.groups * p.cy * outputs * y.element_size();
-
-        PushConstantBuilder pcs{};
-        pcs.push(x_address)
-           .push(get_tensor_address(weight))
-           .push(y_address)
-           .push(has_bias ? get_tensor_address(bias) : uint64_t(0))
-           .push_metadata(&metadata)
-           .push(static_cast<uint32_t>(items))
-           .push(static_cast<uint32_t>(splits))
-           .push(static_cast<uint32_t>(chunk));
-
-        auto [grid_x, grid_y] = conv_grid(launch, rows, columns);
-
-        device->shader_manager->dispatchShader(
-            ShaderKey{torchvulkan::Kernel::CONV, dtype},
-            device->default_subgroup_size,
-            spd.build(),
-            pcs.build(),
-            /* read = */ reads,
-            /* write = */ writes,
-            static_cast<uint32_t>(grid_x),
-            static_cast<uint32_t>(grid_y),
-            static_cast<uint32_t>(p.groups * (subpixel.phases ? subpixel.phases : splits))
-        );
+        dispatch_tuned_shader(device, conv_simd_dispatch(mode, p, x, weight, y, bias, reads, writes, metadata, splits, chunk, item0, items));
     }
 }
 
