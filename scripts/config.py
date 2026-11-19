@@ -211,6 +211,9 @@ KERNELS = [
     Kernel('winograd', 'ops/winograd.slang', [
         Entry('winograd_main', FLOATS),
     ]),
+    Kernel('winograd_fused', 'ops/winograd.slang', [
+        Entry('winograd_main', FLOATS),
+    ], defines=('FUSED',)),
     Kernel('matmul_coop', 'ops/matmul_coop.slang', [
         Entry('matmul_coop_main', DTYPES, ('vec',)),
     ], coop_dims=(18, 1009)), # BLOCK_SIZE, COOP_DIM in matmul_coop.slang

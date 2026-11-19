@@ -764,6 +764,46 @@ void dispatch_winograd_shader(
     );
 }
 
+// the cooperative-matrix tuner times this too: emulated cooperative matrices can lose to it by far
+TuneDispatch winograd_fused_dispatch(
+    const at::Tensor& src,
+    const at::Tensor& weight,
+    const at::Tensor& bias,
+    const at::Tensor& dst,
+    bool flip,
+    uint32_t rows,
+    uint32_t cols,
+    const WinogradTiles& t,
+    uint32_t threads,
+    uint32_t row_threads,
+    uint32_t thread_rows,
+    uint32_t thread_cols,
+    uint32_t bk)
+{
+    DeviceContext* device = get_device_context(src);
+
+    TuneDispatch d;
+    d.key = ShaderKey{torchvulkan::Kernel::WINOGRAD_FUSED, src.scalar_type()};
+    d.subgroupSize = device->default_subgroup_size;
+    d.spd.push(uint32_t(0)) // MODE
+         .push(threads)
+         .push(static_cast<uint32_t>(flip))
+         .push(static_cast<uint32_t>(bias.defined()))
+         .push(row_threads)
+         .push(thread_rows)
+         .push(thread_cols)
+         .push(bk);
+
+    push_winograd_constants(d.pcs, src, dst, bias, weight, rows, cols, t);
+
+    d.read = {src, weight};
+    if (bias.defined()) d.read.push_back(bias);
+    d.write = {dst};
+    d.groupX = static_cast<uint32_t>(ceil_div(t.tiles, threads / row_threads * thread_cols));
+    d.groupY = static_cast<uint32_t>(ceil_div(rows, row_threads * thread_rows));
+    return d;
+}
+
 bool dispatch_winograd_coop_shader(
     const at::Tensor& src,
     const at::Tensor& weight,
@@ -785,7 +825,10 @@ bool dispatch_winograd_coop_shader(
     std::vector<at::Tensor> reads = {src, weight};
     if (has_bias) reads.push_back(bias);
 
+    // param 7 picks the cooperative-matrix kernel (1) or the SIMD one (0), which takes params 8 on
+    const size_t kernel_param = 7;
     auto make_dispatch = [&](const TuneConfig& config) {
+        if (config[kernel_param] == 0) return winograd_fused_dispatch(src, weight, bias, dst, flip, rows, cols, t, config[8], config[9], config[10], config[11], config[12]);
         CoopTiling c = coop_tiling(config);
 
         TuneDispatch d;
@@ -836,8 +879,31 @@ bool dispatch_winograd_coop_shader(
         {"frags_n", {1, 2, 4}},
         {"bk", {8, 16, 32}},
         {"subgroup", subgroup_size_options(device)},
+        {"kernel", {0, 1}},
+        {"simd_wg", {64, 128, 256}},
+        {"simd_row_threads", {1, 2, 4, 8, 16, 32}},
+        {"simd_thread_rows", {1, 2, 4}},
+        {"simd_thread_cols", {1, 2, 4}},
+        {"simd_bk", {4, 8, 16}},
     };
+    space.kernel_param = kernel_param;
     space.valid = [&](const TuneConfig& config) {
+        // each kernel takes only the first option of the other's params
+        bool coop = config[kernel_param] == 1;
+        for (size_t i = 0; i < space.params.size(); i++) {
+            if (i != kernel_param && (i < kernel_param) != coop && config[i] != space.params[i].options.front()) return false;
+        }
+        if (!coop) {
+            uint64_t threads = config[8], row_threads = config[9], thread_rows = config[10], thread_cols = config[11], bk = config[12];
+            uint64_t tile_rows = row_threads * thread_rows;
+            uint64_t tile_cols = threads / row_threads * thread_cols;
+            // must match SimdShared in winograd.slang
+            uint64_t staged = c10::elementSize(dtype) * 16 * bk * (tile_rows + tile_cols);
+            if (thread_rows * thread_cols > 4 || staged > limits.maxComputeSharedMemorySize) return false;
+            if (!fits_workgroup_size(device, threads, device->default_subgroup_size)) return false;
+            if (tile_rows > std::max<uint64_t>(2 * max_rows, row_threads) || tile_cols > 2 * max_cols) return false;
+            return ceil_div(t.tiles, tile_cols) <= limits.maxComputeWorkGroupCount[0] && ceil_div(rows, tile_rows) <= limits.maxComputeWorkGroupCount[1];
+        }
         CoopTiling c = coop_tiling(config);
         uint64_t tile_rows = coop_tile_m(c);
         uint64_t tile_cols = coop_tile_n(c);
