@@ -399,7 +399,7 @@ VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, uint32_t subgrou
     size_t totalSize = 0;
     for (size_t i = 0; i < spec.numConstants; i++)
     {
-        mapEntries[i].constantID = static_cast<uint32_t>(i);
+        mapEntries[i].constantID = spec.ids[i];
         mapEntries[i].offset = static_cast<uint32_t>(spec.offsets[i]);
         mapEntries[i].size = spec.sizes[i];
         totalSize += spec.sizes[i];

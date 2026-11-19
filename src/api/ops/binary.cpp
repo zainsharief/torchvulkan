@@ -37,7 +37,9 @@ enum class BinaryOp {
     XLOGY = 16,
     LOGADDEXP = 17,
     LOGADDEXP2 = 18,
-    FLOOR_DIVIDE = 19
+    FLOOR_DIVIDE = 19,
+    GELU_BACKWARD = 20,
+    GELU_TANH_BACKWARD = 21
 };
 
 // at::native::alpha_check
@@ -70,11 +72,12 @@ std::optional<at::Tensor> dispatch_binary_shader(
     at::Tensor a = self.to(promoted_type);
     at::Tensor b = use_scalar ? at::Tensor() : other.to(a.options());
 
+    at::Tensor target = OutputTarget::take(promoted_type, use_scalar ? a.sizes() : at::IntArrayRef(at::infer_size(a.sizes(), b.sizes())), {a, b});
     // with a scalar the CPU's iterator also holds the 0-dim scalar, which makes a dense output take self's strides
     // exactly (size-1 dims included): allocated so here
-    at::Tensor undefined_out = use_scalar && a.is_non_overlapping_and_dense() ? at::empty_strided(a.sizes(), a.strides(), a.options()) : at::Tensor();
+    if (!target.defined() && use_scalar && a.is_non_overlapping_and_dense()) target = at::empty_strided(a.sizes(), a.strides(), a.options());
     at::TensorIteratorConfig config;
-    config.set_check_mem_overlap(true).add_output(undefined_out).add_const_input(a);
+    config.set_check_mem_overlap(true).add_output(target).add_const_input(a);
     if (!use_scalar) config.add_const_input(b);
     at::TensorIterator iter = config.build();
 
@@ -387,6 +390,12 @@ at::Tensor threshold_backward_vulkan(const at::Tensor& grad_output, const at::Te
     return binary_op_vulkan(grad_output, self, threshold, BinaryOp::THRESHOLD_BACKWARD, [threshold](const at::Tensor& a, const at::Tensor& b) { return at::threshold_backward(a, b, threshold); });
 }
 
+at::Tensor gelu_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, c10::string_view approximate) {
+    auto fallback = [approximate](const at::Tensor& a, const at::Tensor& b) { return at::gelu_backward(a, b, approximate); };
+    if (!self.is_floating_point() || (approximate != "none" && approximate != "tanh")) return fallback(grad_output.cpu(), self.cpu()).to(self.device());
+    return binary_op_vulkan(grad_output, self, (int)1, approximate == "tanh" ? BinaryOp::GELU_TANH_BACKWARD : BinaryOp::GELU_BACKWARD, fallback);
+}
+
 at::Tensor fmax_vulkan(const at::Tensor& self, const at::Tensor& other) {
     TORCH_CHECK_TYPE(!self.is_complex() && !other.is_complex(), "fmax not implemented for complex tensors.");
     return binary_op_vulkan(self, other, (int)1, BinaryOp::FMAX, [](const at::Tensor& a, const at::Tensor& b) { return at::fmax(a, b); });
@@ -533,95 +542,95 @@ at::Tensor clamp_tensor_vulkan(const at::Tensor& self, const c10::optional<at::T
 }
 
 at::Tensor& clamp_min_out_vulkan(const at::Tensor& self, const at::Scalar& min, at::Tensor& out) {
-    return fill_out(out, clamp_min_scalar_vulkan(self, min));
+    return fill_out(out, [&] { return clamp_min_scalar_vulkan(self, min); });
 }
 
 at::Tensor& clamp_max_out_vulkan(const at::Tensor& self, const at::Scalar& max, at::Tensor& out) {
-    return fill_out(out, clamp_max_scalar_vulkan(self, max));
+    return fill_out(out, [&] { return clamp_max_scalar_vulkan(self, max); });
 }
 
 at::Tensor& clamp_min_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& min, at::Tensor& out) {
-    return fill_out(out, clamp_min_tensor_vulkan(self, min));
+    return fill_out(out, [&] { return clamp_min_tensor_vulkan(self, min); });
 }
 
 at::Tensor& clamp_max_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& max, at::Tensor& out) {
-    return fill_out(out, clamp_max_tensor_vulkan(self, max));
+    return fill_out(out, [&] { return clamp_max_tensor_vulkan(self, max); });
 }
 
 at::Tensor& clamp_out_vulkan(const at::Tensor& self, const c10::optional<at::Scalar>& min, const c10::optional<at::Scalar>& max, at::Tensor& out) {
-    return fill_out(out, clamp_scalar_vulkan(self, min, max));
+    return fill_out(out, [&] { return clamp_scalar_vulkan(self, min, max); });
 }
 
 at::Tensor& clamp_tensor_out_vulkan(const at::Tensor& self, const c10::optional<at::Tensor>& min, const c10::optional<at::Tensor>& max, at::Tensor& out) {
-    return fill_out(out, clamp_tensor_vulkan(self, min, max));
+    return fill_out(out, [&] { return clamp_tensor_vulkan(self, min, max); });
 }
 
 at::Tensor& add_out_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
-    return fill_out(out, torchvulkan::add_vulkan(self, other, alpha));
+    return fill_out(out, [&] { return torchvulkan::add_vulkan(self, other, alpha); });
 }
 
 at::Tensor& subtract_out_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
-    return fill_out(out, subtract_vulkan(self, other, alpha));
+    return fill_out(out, [&] { return subtract_vulkan(self, other, alpha); });
 }
 
 at::Tensor& multiply_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, torchvulkan::multiply_vulkan(self, other));
+    return fill_out(out, [&] { return torchvulkan::multiply_vulkan(self, other); });
 }
 
 at::Tensor& divide_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, torchvulkan::divide_vulkan(self, other));
+    return fill_out(out, [&] { return torchvulkan::divide_vulkan(self, other); });
 }
 
 at::Tensor& atan2_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, atan2_vulkan(self, other));
+    return fill_out(out, [&] { return atan2_vulkan(self, other); });
 }
 
 at::Tensor& fmax_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, fmax_vulkan(self, other));
+    return fill_out(out, [&] { return fmax_vulkan(self, other); });
 }
 
 at::Tensor& fmin_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, fmin_vulkan(self, other));
+    return fill_out(out, [&] { return fmin_vulkan(self, other); });
 }
 
 at::Tensor& fmod_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, fmod_vulkan(self, other));
+    return fill_out(out, [&] { return fmod_vulkan(self, other); });
 }
 
 at::Tensor& hypot_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, hypot_vulkan(self, other));
+    return fill_out(out, [&] { return hypot_vulkan(self, other); });
 }
 
 at::Tensor& logaddexp_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, logaddexp_vulkan(self, other));
+    return fill_out(out, [&] { return logaddexp_vulkan(self, other); });
 }
 
 at::Tensor& logaddexp2_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, logaddexp2_vulkan(self, other));
+    return fill_out(out, [&] { return logaddexp2_vulkan(self, other); });
 }
 
 at::Tensor& maximum_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, maximum_vulkan(self, other));
+    return fill_out(out, [&] { return maximum_vulkan(self, other); });
 }
 
 at::Tensor& minimum_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, minimum_vulkan(self, other));
+    return fill_out(out, [&] { return minimum_vulkan(self, other); });
 }
 
 at::Tensor& remainder_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, remainder_vulkan(self, other));
+    return fill_out(out, [&] { return remainder_vulkan(self, other); });
 }
 
 at::Tensor remainder_scalar_tensor_vulkan(const at::Scalar& self, const at::Tensor& other) {
@@ -632,11 +641,15 @@ at::Tensor remainder_scalar_tensor_vulkan(const at::Scalar& self, const at::Tens
 
 at::Tensor& xlogy_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, xlogy_vulkan(self, other));
+    return fill_out(out, [&] { return xlogy_vulkan(self, other); });
 }
 
 at::Tensor& threshold_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, const at::Scalar& threshold, at::Tensor& grad_input) {
-    return fill_out(grad_input, threshold_backward_vulkan(grad_output, self, threshold));
+    return fill_out(grad_input, [&] { return threshold_backward_vulkan(grad_output, self, threshold); });
+}
+
+at::Tensor& gelu_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, c10::string_view approximate, at::Tensor& grad_input) {
+    return fill_out(grad_input, [&] { return gelu_backward_vulkan(grad_output, self, approximate); });
 }
 
 at::Tensor add_relu_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
@@ -648,64 +661,132 @@ at::Tensor add_relu_scalar_vulkan(const at::Tensor& self, const at::Scalar& othe
 }
 
 at::Tensor& add_relu_out_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha, at::Tensor& out) {
-    return fill_out(out, add_relu_vulkan(self, other, alpha));
+    return fill_out(out, [&] { return add_relu_vulkan(self, other, alpha); });
 }
 
 at::Tensor& add_relu_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
-    return copy_inplace_result(self, add_relu_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return add_relu_vulkan(self, other, alpha); });
 }
 
 at::Tensor& add_relu_scalar_vulkan_(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-    return copy_inplace_result(self, add_relu_scalar_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return add_relu_scalar_vulkan(self, other, alpha); });
 }
 
 at::Tensor& add_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
     check_inplace_device(self, other);
-    return copy_inplace_result(self, torchvulkan::add_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return torchvulkan::add_vulkan(self, other, alpha); });
 }
 
 at::Tensor& add_scalar_vulkan_(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-    return copy_inplace_result(self, add_scalar_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return add_scalar_vulkan(self, other, alpha); });
 }
 
 at::Tensor& subtract_vulkan_(at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
     check_inplace_device(self, other);
-    return copy_inplace_result(self, subtract_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return subtract_vulkan(self, other, alpha); });
 }
 
 at::Tensor& subtract_scalar_vulkan_(at::Tensor& self, const at::Scalar& other, const at::Scalar& alpha) {
-    return copy_inplace_result(self, subtract_scalar_vulkan(self, other, alpha));
+    return copy_inplace_result(self, [&] { return subtract_scalar_vulkan(self, other, alpha); });
 }
 
 at::Tensor& multiply_vulkan_(at::Tensor& self, const at::Tensor& other) {
     check_inplace_device(self, other);
-    return copy_inplace_result(self, torchvulkan::multiply_vulkan(self, other));
+    return copy_inplace_result(self, [&] { return torchvulkan::multiply_vulkan(self, other); });
 }
 
 at::Tensor& multiply_scalar_vulkan_(at::Tensor& self, const at::Scalar& other) {
-    return copy_inplace_result(self, multiply_scalar_vulkan(self, other));
+    return copy_inplace_result(self, [&] { return multiply_scalar_vulkan(self, other); });
 }
 
 at::Tensor& divide_vulkan_(at::Tensor& self, const at::Tensor& other) {
     check_inplace_device(self, other);
-    return copy_inplace_result(self, torchvulkan::divide_vulkan(self, other));
+    return copy_inplace_result(self, [&] { return torchvulkan::divide_vulkan(self, other); });
 }
 
 at::Tensor& divide_scalar_vulkan_(at::Tensor& self, const at::Scalar& other) {
-    return copy_inplace_result(self, torchvulkan::divide_scalar_vulkan(self, other));
+    return copy_inplace_result(self, [&] { return torchvulkan::divide_scalar_vulkan(self, other); });
+}
+
+std::optional<at::Tensor> dispatch_addc_shader(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value,
+                                               bool divide, at::ScalarType dtype)
+{
+    DeviceContext* device = get_device_context(self.is_privateuseone() ? self : tensor1.is_privateuseone() ? tensor1 : tensor2);
+    if (!is_dtype_supported(device, dtype)) return std::nullopt;
+    at::Device where = self.is_privateuseone() ? self.device() : tensor1.is_privateuseone() ? tensor1.device() : tensor2.device();
+    at::Tensor s = self.to(where, dtype), a = tensor1.to(where, dtype), b = tensor2.to(where, dtype);
+    at::Tensor out = at::empty(at::infer_size(at::infer_size(s.sizes(), a.sizes()), b.sizes()), s.options());
+    at::TensorIterator iter = at::TensorIteratorConfig()
+        .add_output(out)
+        .add_const_input(s)
+        .add_const_input(a)
+        .add_const_input(b)
+        .build();
+    uint64_t numel = iter.numel();
+    if (numel == 0) return out;
+    int32_t out_dims = static_cast<int32_t>(iter.ndim());
+    if (out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) return std::nullopt;
+
+    uint32_t contiguous = iter.is_contiguous() ? 1 : 0;
+    uint32_t workgroupSizeX = get_dtype_workgroup_size(dtype, 1, device);
+    SpecializationBuilder spd{};
+    spd.push(contiguous)
+       .push(out_dims)
+       .push(workgroupSizeX)
+       .push(divide ? 1u : 0u)
+       .push(value.toComplexDouble() != c10::complex<double>(1.0) ? 1u : 0u);
+
+    MetadataBuilder metadataBuilder = get_iter_metadata(iter, {1, 2, 3});
+    Metadata metadata = metadataBuilder.build();
+
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(s))
+       .push(get_tensor_address(a))
+       .push(get_tensor_address(b))
+       .push(get_output_address(out))
+       .push_metadata(contiguous ? nullptr : &metadata)
+       .push(numel)
+       .push_scalar(value, is_low_prec(dtype) ? at::kFloat : dtype);  // the kernel's accumulate type
+
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::ADDC, dtype},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {s, a, b},
+        /* write = */ {out},
+        get_group_count(numel, workgroupSizeX), 1, 1
+    );
+    return out;
+}
+
+// self + value * (tensor1 op tensor2); half and bfloat16 compute it all in float32 and round once, as the CPU
+at::Tensor addc_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, bool divide)
+{
+    at::native::ResultTypeState state{};
+    for (const at::Tensor* t : {&self, &tensor1, &tensor2}) state = at::native::update_result_type_state(*t, state);
+    at::ScalarType dtype = at::native::result_type(state);
+    if (!at::isComplexType(dtype) && dtype != at::kBool) {
+        if (std::optional<at::Tensor> fused = dispatch_addc_shader(self, tensor1, tensor2, value, divide, dtype)) return *fused;
+    }
+    bool low = is_low_prec(dtype);
+    auto widen = [low](const at::Tensor& t) { return low ? t.to(at::kFloat) : t; };
+    at::Tensor combined = divide ? torchvulkan::divide_vulkan(widen(tensor1), widen(tensor2)) : torchvulkan::multiply_vulkan(widen(tensor1), widen(tensor2));
+    // a bool value (value=True) scales like 1, without add's boolean-alpha check
+    at::Scalar scale = value.isBoolean() ? at::Scalar(static_cast<int64_t>(value.toBool())) : value;
+    at::Tensor result = torchvulkan::add_vulkan(widen(self), combined, scale);
+    return low ? result.to(dtype) : result;
 }
 
 at::Tensor& addcmul_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
-    at::Tensor product = torchvulkan::multiply_vulkan(tensor1, tensor2);
-    return copy_inplace_result(self, torchvulkan::add_vulkan(self, product, value));
+    return copy_inplace_result(self, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/false));
 }
 
 at::Tensor& addcdiv_vulkan_(at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value) {
     TORCH_CHECK(!(at::isIntegralType(tensor1.scalar_type(), true) && at::isIntegralType(tensor2.scalar_type(), true)),
         "Integer division with addcdiv is no longer supported, and in a future release addcdiv will perform a true division of tensor1 and tensor2."
     );
-    at::Tensor quotient = torchvulkan::divide_vulkan(tensor1, tensor2);
-    return copy_inplace_result(self, torchvulkan::add_vulkan(self, quotient, value));
+    return copy_inplace_result(self, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/true));
 }
 
 // as torch computes it: from whichever end is nearer, so weight 1 gives exactly `end`
@@ -759,11 +840,11 @@ at::Tensor floor_divide_vulkan(const at::Tensor& self, const at::Tensor& other) 
 
 at::Tensor& floor_divide_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) {
     check_inplace_broadcast(out, self, other);
-    return fill_out(out, floor_divide_vulkan(self, other));
+    return fill_out(out, [&] { return floor_divide_vulkan(self, other); });
 }
 
 at::Tensor& floor_divide_vulkan_(at::Tensor& self, const at::Tensor& other) {
-    return copy_inplace_result(self, floor_divide_vulkan(self, other));
+    return copy_inplace_result(self, [&] { return floor_divide_vulkan(self, other); });
 }
 
 at::Tensor rsub_tensor_vulkan(const at::Tensor& self, const at::Tensor& other, const at::Scalar& alpha) {
@@ -792,15 +873,15 @@ at::Tensor& lerp_tensor_vulkan_out(const at::Tensor& self, const at::Tensor& end
 }
 
 at::Tensor& pow_tensor_tensor_out_vulkan(const at::Tensor& self, const at::Tensor& exponent, at::Tensor& out) {
-    return fill_out(out, pow_vulkan(self, exponent));
+    return fill_out(out, [&] { return pow_vulkan(self, exponent); });
 }
 
 at::Tensor& pow_tensor_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& exponent, at::Tensor& out) {
-    return fill_out(out, pow_tensor_scalar_vulkan(self, exponent));
+    return fill_out(out, [&] { return pow_tensor_scalar_vulkan(self, exponent); });
 }
 
 at::Tensor& pow_scalar_out_vulkan(const at::Scalar& self, const at::Tensor& exponent, at::Tensor& out) {
-    return fill_out(out, pow_scalar_vulkan(self, exponent));
+    return fill_out(out, [&] { return pow_scalar_vulkan(self, exponent); });
 }
 
 at::ScalarType bits_dtype(at::ScalarType dtype) {
@@ -932,7 +1013,7 @@ at::Tensor& div_out_mode_vulkan(const at::Tensor& self, const at::Tensor& other,
 
 at::Tensor& addcmul_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, at::Tensor& out)
 {
-    return fill_out(out, torchvulkan::add_vulkan(self, torchvulkan::multiply_vulkan(tensor1, tensor2), value));
+    return fill_out(out, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/false));
 }
 
 at::Tensor& addcdiv_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1, const at::Tensor& tensor2, const at::Scalar& value, at::Tensor& out)
@@ -940,12 +1021,72 @@ at::Tensor& addcdiv_out_vulkan(const at::Tensor& self, const at::Tensor& tensor1
     TORCH_CHECK(!(at::isIntegralType(tensor1.scalar_type(), true) && at::isIntegralType(tensor2.scalar_type(), true)),
         "Integer division with addcdiv is no longer supported, and in a future release addcdiv will perform a true division of tensor1 and tensor2."
     );
-    return fill_out(out, torchvulkan::add_vulkan(self, torchvulkan::divide_vulkan(tensor1, tensor2), value));
+    return fill_out(out, addc_vulkan(self, tensor1, tensor2, value, /*divide=*/true));
+}
+
+// torch's foreach ops with a scalar tensor run its slow kernels here, so make the checks its accelerator kernels make
+// (mul and div also take a CPU scalar tensor)
+void check_foreach_scalar_tensor(at::TensorList tensors, const at::Tensor& scalar, bool cpu_ok)
+{
+    TORCH_CHECK(scalar.dim() == 0 && scalar.numel() == 1, "scalar tensor expected to be 0 dim but it has ", scalar.dim(), " dimensions and ",
+        scalar.numel(), " elements.");
+    bool one_device = std::all_of(tensors.begin(), tensors.end(), [&](const at::Tensor& t) { return t.device() == tensors[0].device(); });
+    if (!tensors.empty() && one_device && tensors[0].is_privateuseone() && !(cpu_ok && scalar.is_cpu())) {
+        TORCH_CHECK(scalar.device() == tensors[0].device(), "scalar tensor expected to be on ", tensors[0].device(), " but is on ", scalar.device());
+    }
+}
+
+std::vector<at::Tensor> foreach_add_tensor_vulkan(at::TensorList tensors, const at::Tensor& scalar, const at::Scalar& alpha)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/false);
+    return at::native::foreach_tensor_add_tensor_kernel_slow(tensors, scalar, alpha);
+}
+
+void foreach_add_tensor_vulkan_(at::TensorList tensors, const at::Tensor& scalar, const at::Scalar& alpha)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/false);
+    at::native::foreach_tensor_add_tensor_kernel_slow_(tensors, scalar, alpha);
+}
+
+std::vector<at::Tensor> foreach_mul_tensor_vulkan(at::TensorList tensors, const at::Tensor& scalar)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/true);
+    return at::native::foreach_tensor_mul_tensor_kernel_slow(tensors, scalar);
+}
+
+void foreach_mul_tensor_vulkan_(at::TensorList tensors, const at::Tensor& scalar)
+{
+    check_foreach_scalar_tensor(tensors, scalar, /*cpu_ok=*/true);
+    at::native::foreach_tensor_mul_tensor_kernel_slow_(tensors, scalar);
+}
+
+void ldexp_vulkan_kernel(at::TensorIteratorBase& iter)
+{
+    at::Tensor out = iter.tensor(0);
+    const at::Tensor& self = iter.tensor(1);
+    bool wide = self.scalar_type() == at::kDouble;
+    int64_t limit = wide ? 2200 : 300;
+    at::Tensor x = self.to(wide ? at::kDouble : at::kFloat);
+    at::Tensor e = at::clamp(iter.tensor(2).to(at::kLong), -limit, limit);
+    at::Tensor first = at::div(e, 3, "trunc");
+    at::Tensor second = at::div(at::sub(e, first), 2, "trunc");
+    at::Tensor third = at::sub(at::sub(e, first), second);
+    at::Tensor two = at::scalar_tensor(2.0, x.options());
+    at::Tensor result = at::mul(at::mul(at::mul(x, at::pow(two, first)), at::pow(two, second)), at::pow(two, third));
+    out.copy_(result);
 }
 
 } // namespace
 
+namespace at::native {
+REGISTER_PRIVATEUSE1_DISPATCH(ldexp_stub, &ldexp_vulkan_kernel)
+} // namespace at::native
+
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+    m.impl("_foreach_add.Tensor", &foreach_add_tensor_vulkan);
+    m.impl("_foreach_add_.Tensor", &foreach_add_tensor_vulkan_);
+    m.impl("_foreach_mul.Tensor", &foreach_mul_tensor_vulkan);
+    m.impl("_foreach_mul_.Tensor", &foreach_mul_tensor_vulkan_);
     m.impl("add.Tensor", &torchvulkan::add_vulkan);
     m.impl("add.Scalar", &add_scalar_vulkan);
     m.impl("add_.Tensor", &add_vulkan_);
@@ -1018,6 +1159,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("lerp_.Scalar", &lerp_scalar_vulkan_);
     m.impl("lerp.Scalar_out", &lerp_scalar_vulkan_out);
     m.impl("threshold_backward", &threshold_backward_vulkan);
+    m.impl("gelu_backward", &gelu_backward_vulkan);
+    m.impl("gelu_backward.grad_input", &gelu_backward_out_vulkan);
     m.impl("floor_divide", &floor_divide_vulkan);
     m.impl("div.Tensor_mode", &div_mode_vulkan);
     m.impl("div.out_mode", &div_out_mode_vulkan);

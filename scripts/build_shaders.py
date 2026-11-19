@@ -70,7 +70,8 @@ def main(args):
         kernel_names.append(kernel.name)
 
         for name, source, function, spec_args, aten in kernel_variants(kernel, args.src):
-            cmake.append('torchvulkan_add_shader(' + ' '.join([name, cmake_quote(source), function] + spec_args) + ')')
+            coop_dims = ['COOP_DIMS', *map(str, kernel.coop_dims)] if kernel.coop_dims is not None else []
+            cmake.append('torchvulkan_add_shader(' + ' '.join([name, cmake_quote(source), function, *coop_dims, 'SPECIALIZE', *spec_args]) + ')')
             variants.append({'name': name, 'kernel': kernel.name, 'aten': aten})
 
     write_if_changed(args.out / 'variants.cmake', '\n'.join(cmake) + '\n')
