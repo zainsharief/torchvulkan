@@ -106,30 +106,28 @@ void finishTile<T : ITorchVulkan & ICoopElement, S : IMatmulStore<T.Accum>>(
     uint lane = ti % SUBGROUP_SIZE;
     uint scratch = (ti / SUBGROUP_SIZE) * BLOCK_SIZE * BLOCK_SIZE;
 
-    // structured control flow only, as in matmul_coop's epilogue
+    // structured control flow only, as in matmul_coop's epilogue; blocks past the edge run the barriers too, as every
+    // subgroup must there
     [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
     {
         [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
         {
             uint row = tile.row0 + tile.warp_row + mi * BLOCK_SIZE;
             uint col = tile.col0 + tile.warp_col + nj * BLOCK_SIZE;
-            if (row < tile.M && col < tile.N)
+            acc[mi * WARP_FRAGS_N + nj].Store<linalg::CoopMatMatrixLayout.RowMajor>(EpilogueShared<A>.smem, scratch, BLOCK_SIZE);
+            GroupMemoryBarrierWithWaveSync();
+            for (uint i = lane; i < BLOCK_SIZE * BLOCK_SIZE; i += SUBGROUP_SIZE)
             {
-                acc[mi * WARP_FRAGS_N + nj].Store<linalg::CoopMatMatrixLayout.RowMajor>(EpilogueShared<A>.smem, scratch, BLOCK_SIZE);
-                GroupMemoryBarrierWithWaveSync();
-                for (uint i = lane; i < BLOCK_SIZE * BLOCK_SIZE; i += SUBGROUP_SIZE)
+                uint r = row + i / BLOCK_SIZE;
+                uint c = col + i % BLOCK_SIZE;
+                if (r < tile.M && c < tile.N)
                 {
-                    uint r = row + i / BLOCK_SIZE;
-                    uint c = col + i % BLOCK_SIZE;
-                    if (r < tile.M && c < tile.N)
-                    {
-                        A v = EpilogueShared<A>.smem[scratch + i];
-                        if (HAS_BIAS == 1) v = v + ((T*)bias)[tile.group * tile.M + r].toAccum();
-                        out.store(tile.batch, r, c, v);
-                    }
+                    A v = EpilogueShared<A>.smem[scratch + i];
+                    if (HAS_BIAS == 1) v = v + ((T*)bias)[tile.group * tile.M + r].toAccum();
+                    out.store(tile.batch, r, c, v);
                 }
-                GroupMemoryBarrierWithWaveSync();
             }
+            GroupMemoryBarrierWithWaveSync();
         }
     }
 }

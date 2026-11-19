@@ -317,7 +317,8 @@ void loadRowStats<T : ITorchVulkan & ICoopElement>(uint t, uint base, uint r0, A
 }
 
 void storeGradient<T : ITorchVulkan & ICoopElement>(
-    uint lane, uint warp, Accumulator<T.Accum> acc, T* dst, uint base, uint row0, uint rows, uint col0, uint width, T.Accum scale, BackwardLayout m)
+    bool live, uint lane, uint warp, Accumulator<T.Accum> acc, T* dst, uint base, uint row0, uint rows, uint col0, uint width, T.Accum scale,
+    BackwardLayout m)
 {
     typealias A = T.Accum;
     uint scratch = m.scratch_off + warp * BLOCK_SIZE * BLOCK_SIZE;
@@ -327,7 +328,7 @@ void storeGradient<T : ITorchVulkan & ICoopElement>(
     {
         uint r = row0 + i / BLOCK_SIZE;
         uint c = col0 + i % BLOCK_SIZE;
-        if (r < rows && c < width) dst[base + r * width + c] = T.fromAccum(SharedA<A>.smem[scratch + i] * scale);
+        if (live && r < rows && c < width) dst[base + r * width + c] = T.fromAccum(SharedA<A>.smem[scratch + i] * scale);
     }
     GroupMemoryBarrierWithWaveSync();
 }
@@ -406,16 +407,14 @@ void attentionCoopBackwardKV<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, 
     [unroll] for (uint i = 0; i < FRAGS; i++)
     {
         uint f = warp + i * warps;
-        if (f < total)
-        {
-            bool value = f >= nk;
-            uint g2 = value ? f - nk : f;
-            uint cols = value ? dv_cols : dk_cols;
-            uint row0 = c0 + (g2 / cols) * BLOCK_SIZE;
-            uint col0 = (g2 % cols) * BLOCK_SIZE;
-            if (value) storeGradient<T>(lane, warp, acc[i], (T*)pcs.grad_b, kv_row * pcs.S * DV, row0, pcs.S, col0, DV, A.ext_one(), m);
-            else storeGradient<T>(lane, warp, acc[i], (T*)pcs.grad_a, kv_row * pcs.S * D, row0, pcs.S, col0, D, scale, m);
-        }
+        bool value = f >= nk;
+        uint g2 = value ? f - nk : f;
+        uint cols = value ? dv_cols : dk_cols;
+        uint row0 = c0 + (g2 / cols) * BLOCK_SIZE;
+        uint col0 = (g2 % cols) * BLOCK_SIZE;
+        uint width = value ? DV : D;
+        T* dst = (T*)(value ? pcs.grad_b : pcs.grad_a);
+        storeGradient<T>(f < total, lane, warp, acc[i], dst, kv_row * pcs.S * width, row0, pcs.S, col0, width, value ? A.ext_one() : scale, m);
     }
 }
 
@@ -480,11 +479,8 @@ void attentionCoopBackwardQ<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, A
     [unroll] for (uint i = 0; i < FRAGS; i++)
     {
         uint f = warp + i * warps;
-        if (f < total)
-        {
-            uint row0 = r0 + (f / dq_cols) * BLOCK_SIZE;
-            storeGradient<T>(lane, warp, acc[i], (T*)pcs.grad_a, q_row * D, row0, pcs.L, (f % dq_cols) * BLOCK_SIZE, D, scale, m);
-        }
+        uint row0 = r0 + (f / dq_cols) * BLOCK_SIZE;
+        storeGradient<T>(f < total, lane, warp, acc[i], (T*)pcs.grad_a, q_row * D, row0, pcs.L, (f % dq_cols) * BLOCK_SIZE, D, scale, m);
     }
 }
 

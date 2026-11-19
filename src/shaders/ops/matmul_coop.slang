@@ -369,6 +369,8 @@ void finishTile<T : ITorchVulkan & ICoopElement>(
     T* tensor_bias = (T*)pcs.tensor_bias;
     uint lane = ti % SUBGROUP_SIZE;
     uint scratch = (ti / SUBGROUP_SIZE) * BLOCK_SIZE * BLOCK_SIZE;
+    bool direct = tile.tile_m + SMEM_ROWS_A <= pcs.m_dim && tile.tile_n + SMEM_COLS_B <= pcs.n_dim
+        && OUT_ALIGNED == 1 && HAS_BIAS == 0 && ACTIVATION == 0;
 
     // no continue or early exit: Metal spills the accumulators when the control flow isn't structured
     [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
@@ -380,14 +382,12 @@ void finishTile<T : ITorchVulkan & ICoopElement>(
             Accumulator<A> value = acc[mi * WARP_FRAGS_N + nj];
             if (HAS_ALPHA == 1) value = value * pcs.alpha;
 
-            bool inside = row < pcs.m_dim && col < pcs.n_dim;
-            bool whole = (row + BLOCK_SIZE <= pcs.m_dim) && (col + BLOCK_SIZE <= pcs.n_dim);
-            if (whole && OUT_ALIGNED == 1 && HAS_BIAS == 0 && ACTIVATION == 0)
+            if (direct)
             {
                 uint out_idx = tile.batch_offset_out + row * pcs.strides_out.row + col * pcs.strides_out.col;
                 Output<T>(value).Store<linalg::CoopMatMatrixLayout.RowMajor>(tensor_out, out_idx, pcs.strides_out.row);
             }
-            else if (inside)
+            else
             {
                 value.Store<linalg::CoopMatMatrixLayout.RowMajor>(EpilogueShared<A>.smem, scratch, BLOCK_SIZE);
                 GroupMemoryBarrierWithWaveSync();
