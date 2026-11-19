@@ -292,19 +292,19 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
                 // AMD's timestamps around a single emulated cooperative-matrix dispatch can read microseconds
                 // for milliseconds of work
                 span_of(part, 1);
-                time = span_of(part, 2) / share;
+                time = span_of(part, 2) / share + d.extra_ns;
                 s.timed[c.values] = {time, false};
             }
             if (!probe && time <= SLOW_FACTOR * s.best_time) {
                 // short kernels get several spans of several runs, against noise; a long one is measured
                 // well enough by a dispatch or two, and timing it fifteen times only slows the search
-                const double estimate = std::clamp(time, 1.0, TIMING_TARGET_NS); // ns, from the probe
+                const double estimate = std::clamp(time - d.extra_ns, 1.0, TIMING_TARGET_NS); // ns, from the probe
                 const uint32_t runs = estimate * 3 * TIMING_SPANS <= TIMING_TARGET_NS ? 3 : 1;
                 const size_t span_count = std::clamp<size_t>(static_cast<size_t>(TIMING_TARGET_NS / (estimate * runs)), 1, TIMING_SPANS);
                 std::vector<double> spans(span_count);
                 for (double& span : spans) span = span_of(d, runs);
                 std::nth_element(spans.begin(), spans.begin() + spans.size() / 2, spans.end());
-                time = spans[spans.size() / 2];
+                time = spans[spans.size() / 2] + d.extra_ns;
                 s.timed[c.values] = {time, true};
                 s.best_time = std::min(s.best_time, time);
             }

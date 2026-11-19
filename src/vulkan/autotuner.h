@@ -44,6 +44,7 @@ struct TuneDispatch
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;
+    double extra_ns = 0; // work the config adds outside this dispatch (an attention split's merge), added to its time
 };
 
 // the state of one select(): what has been timed, and the best full timing over all kernels
