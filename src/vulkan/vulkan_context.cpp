@@ -44,6 +44,8 @@ static bool isEnvSet(const char* name)
 static VkResult loadVulkan()
 {
 #ifdef __APPLE__
+    setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
+
     Dl_info info{};
     if (!isEnvSet("TORCHVULKAN_SYSTEM_VULKAN") && dladdr(reinterpret_cast<const void*>(&loadVulkan), &info) && info.dli_fname != nullptr) 
     {
