@@ -301,9 +301,11 @@ at::Tensor embedding_vulkan(
     const at::Tensor& indices,
     c10::SymInt /* padding_idx */,
     bool /* scale_grad_by_freq */,
-    bool sparse)
+    bool /* sparse: the forward is the same */)
 {
-    TORCH_CHECK(!sparse, "torchvulkan [NOT IMPLEMENTED]: sparse embedding gradients are not supported.");
+    TORCH_CHECK(indices.scalar_type() == at::kLong || indices.scalar_type() == at::kInt,
+        "Expected tensor for argument #1 'indices' to have one of the following scalar types: Long, Int; but got ", indices.toString(),
+        " instead (while checking arguments for embedding)");
     TORCH_CHECK(weight.dim() == 2, "'weight' must be 2-D");
 
     std::vector<int64_t> out_shape(indices.sizes().begin(), indices.sizes().end());

@@ -55,6 +55,14 @@ T aaFilter<T : __BuiltinFloatingPointType>(T x)
 {
     x = abs(x);
     if (MODE == 4) return x < T(1) ? T(1) - x : T(0);
+    if (MODE == 6)
+    {
+        // Lanczos, a = 3
+        if (x >= T(3)) return T(0);
+        if (x == T(0)) return T(1);
+        T px = T(3.14159265358979) * x;
+        return T(3) * sin(px) * sin(px / T(3)) / (px * px);
+    }
     if (x < T(1)) return cubicConvolution1<T>(x, T(-0.5));
     if (x < T(2)) return cubicConvolution2<T>(x, T(-0.5));
     return T(0);
@@ -93,6 +101,7 @@ struct Taps<T : __BuiltinFloatingPointType>
         }
         case 4:
         case 5:
+        case 6:
         {
             T w = aaFilter<T>(halfShiftedProduct<T>(T(j + first) - center, invscale));
             return (total != T(0)) ? w / total : w;

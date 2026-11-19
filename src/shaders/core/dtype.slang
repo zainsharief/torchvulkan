@@ -107,6 +107,9 @@ public interface IDtypeOps
     static This ext_logaddexp(This a, This b);
     static This ext_logaddexp2(This a, This b);
     static This ext_gelu(This a);
+    static This ext_gelu_tanh(This a);
+    static This ext_gelu_backward(This grad, This self);
+    static This ext_gelu_tanh_backward(This grad, This self);
 }
 
 public extension int64_t : ITorchVulkan
@@ -732,6 +735,20 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
 
     // the exact (erf) form, as torch computes gelu with approximate='none'
     public static T ext_gelu(T a) { return T(0.5) * a * (T(1.0) + ext_erf(a * T(0.7071067811865476))); }
+    public static T ext_gelu_tanh(T a) { return T(0.5) * a * (T(1.0) + ext_tanh(T(0.7978845608028654) * (a + T(0.044715) * a * a * a))); }
+    public static T ext_gelu_backward(T grad, T a)
+    {
+        T cdf = T(0.5) * (T(1.0) + ext_erf(a * T(0.7071067811865476)));
+        T pdf = ext_exp(T(-0.5) * a * a) * T(0.3989422804014327);
+        return grad * (cdf + a * pdf);
+    }
+    public static T ext_gelu_tanh_backward(T grad, T a)
+    {
+        T x2 = a * a;
+        T t = ext_tanh(T(0.7978845608028654) * (a + T(0.044715) * x2 * a));
+        T dinner = T(0.7978845608028654) * (T(1.0) + T(3.0 * 0.044715) * x2);
+        return grad * (T(0.5) * (T(1.0) + t) + T(0.5) * a * (T(1.0) - t * t) * dinner);
+    }
 }
 
 public extension<T : __BuiltinIntegerType> T : IDtypeOps
@@ -873,6 +890,9 @@ public extension<T : __BuiltinIntegerType> T : IDtypeOps
     public static T ext_logaddexp(T a, T b) { return _from_f32(float.ext_logaddexp(_to_f32(a), _to_f32(b))); }
     public static T ext_logaddexp2(T a, T b) { return _from_f32(float.ext_logaddexp2(_to_f32(a), _to_f32(b))); }
     public static T ext_gelu(T a) { return _from_f32(float.ext_gelu(_to_f32(a))); }
+    public static T ext_gelu_tanh(T a) { return _from_f32(float.ext_gelu_tanh(_to_f32(a))); }
+    public static T ext_gelu_backward(T grad, T a) { return _from_f32(float.ext_gelu_backward(_to_f32(grad), _to_f32(a))); }
+    public static T ext_gelu_tanh_backward(T grad, T a) { return _from_f32(float.ext_gelu_tanh_backward(_to_f32(grad), _to_f32(a))); }
 }
 
 public extension BFloat16 : IDtypeOps
@@ -954,6 +974,9 @@ public extension BFloat16 : IDtypeOps
     public static BFloat16 ext_logaddexp(BFloat16 a, BFloat16 b) { return BFloat16(float.ext_logaddexp(float(a), float(b))); }
     public static BFloat16 ext_logaddexp2(BFloat16 a, BFloat16 b) { return BFloat16(float.ext_logaddexp2(float(a), float(b))); }
     public static BFloat16 ext_gelu(BFloat16 a) { return BFloat16(float.ext_gelu(float(a))); }
+    public static BFloat16 ext_gelu_tanh(BFloat16 a) { return BFloat16(float.ext_gelu_tanh(float(a))); }
+    public static BFloat16 ext_gelu_backward(BFloat16 grad, BFloat16 a) { return BFloat16(float.ext_gelu_backward(float(grad), float(a))); }
+    public static BFloat16 ext_gelu_tanh_backward(BFloat16 grad, BFloat16 a) { return BFloat16(float.ext_gelu_tanh_backward(float(grad), float(a))); }
 }
 
 // conversion between any two dtypes
