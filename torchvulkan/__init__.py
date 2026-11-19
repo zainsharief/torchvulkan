@@ -93,6 +93,8 @@ def memory_stats(device=None) -> dict:
         "allocated_bytes.all.current": allocated,
         "allocated_bytes.all.peak": peak,
         "reserved_bytes.all.current": _C._memory_reserved(index),
+        # host memory held by cached staging buffers for copies to and from the CPU
+        "staging_cached_bytes.all.current": _C._staging_cached_bytes(index),
     }
 
 DeviceProperties = namedtuple("DeviceProperties", ["name", "total_memory", "vendor_id", "device_id", "api_version", "driver_version", "subgroup_size", "has_fp64", "has_int64", "has_fp16", "has_bf16", "has_int16", "has_int8"])
