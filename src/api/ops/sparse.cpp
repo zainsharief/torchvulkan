@@ -1,0 +1,386 @@
+#include <torch/extension.h>
+#include <ATen/ops/_coalesced_native.h>
+#include <ATen/ops/_conj_physical_native.h>
+#include <ATen/ops/_dimV_native.h>
+#include <ATen/ops/_indices_native.h>
+#include <ATen/ops/_nnz_native.h>
+#include <ATen/ops/_sparse_broadcast_to_native.h>
+#include <ATen/ops/_sparse_coo_tensor_with_dims_and_tensors_native.h>
+#include <ATen/ops/_sparse_coo_tensor_with_dims_native.h>
+#include <ATen/ops/_sparse_mm_native.h>
+#include <ATen/ops/_to_dense_native.h>
+#include <ATen/ops/_to_sparse_bsc_native.h>
+#include <ATen/ops/_to_sparse_bsr_native.h>
+#include <ATen/ops/_to_sparse_csc_native.h>
+#include <ATen/ops/_to_sparse_csr_native.h>
+#include <ATen/ops/_to_sparse_native.h>
+#include <ATen/ops/_values_native.h>
+#include <ATen/ops/abs_native.h>
+#include <ATen/ops/add_native.h>
+#include <ATen/ops/addmm_native.h>
+#include <ATen/ops/angle_native.h>
+#include <ATen/ops/any_native.h>
+#include <ATen/ops/asin_native.h>
+#include <ATen/ops/asinh_native.h>
+#include <ATen/ops/atan_native.h>
+#include <ATen/ops/atanh_native.h>
+#include <ATen/ops/cat_native.h>
+#include <ATen/ops/ccol_indices_native.h>
+#include <ATen/ops/ceil_native.h>
+#include <ATen/ops/clone_native.h>
+#include <ATen/ops/col_indices_native.h>
+#include <ATen/ops/conj_physical_native.h>
+#include <ATen/ops/copy_native.h>
+#include <ATen/ops/copy_sparse_to_sparse_native.h>
+#include <ATen/ops/crow_indices_native.h>
+#include <ATen/ops/deg2rad_native.h>
+#include <ATen/ops/dense_dim_native.h>
+#include <ATen/ops/div_native.h>
+#include <ATen/ops/empty_like_native.h>
+#include <ATen/ops/empty_native.h>
+#include <ATen/ops/erf_native.h>
+#include <ATen/ops/erfinv_native.h>
+#include <ATen/ops/expm1_native.h>
+#include <ATen/ops/fill_native.h>
+#include <ATen/ops/floor_divide_native.h>
+#include <ATen/ops/floor_native.h>
+#include <ATen/ops/frac_native.h>
+#include <ATen/ops/indices_native.h>
+#include <ATen/ops/is_coalesced_native.h>
+#include <ATen/ops/isinf_native.h>
+#include <ATen/ops/isnan_native.h>
+#include <ATen/ops/isneginf_native.h>
+#include <ATen/ops/isposinf_native.h>
+#include <ATen/ops/linalg_vector_norm_native.h>
+#include <ATen/ops/log1p_native.h>
+#include <ATen/ops/mm_native.h>
+#include <ATen/ops/mul_native.h>
+#include <ATen/ops/mv_native.h>
+#include <ATen/ops/nan_to_num_native.h>
+#include <ATen/ops/narrow_copy_native.h>
+#include <ATen/ops/native_norm_native.h>
+#include <ATen/ops/neg_native.h>
+#include <ATen/ops/norm_native.h>
+#include <ATen/ops/normal_native.h>
+#include <ATen/ops/permute_native.h>
+#include <ATen/ops/pow_native.h>
+#include <ATen/ops/rad2deg_native.h>
+#include <ATen/ops/relu_native.h>
+#include <ATen/ops/resize_as_sparse_native.h>
+#include <ATen/ops/resize_native.h>
+#include <ATen/ops/round_native.h>
+#include <ATen/ops/row_indices_native.h>
+#include <ATen/ops/select_copy_native.h>
+#include <ATen/ops/select_native.h>
+#include <ATen/ops/sgn_native.h>
+#include <ATen/ops/sign_native.h>
+#include <ATen/ops/signbit_native.h>
+#include <ATen/ops/sin_native.h>
+#include <ATen/ops/sinh_native.h>
+#include <ATen/ops/sparse_dim_native.h>
+#include <ATen/ops/sparse_mask_native.h>
+#include <ATen/ops/sparse_resize_and_clear_native.h>
+#include <ATen/ops/sparse_resize_native.h>
+#include <ATen/ops/sqrt_native.h>
+#include <ATen/ops/sub_native.h>
+#include <ATen/ops/sum_native.h>
+#include <ATen/ops/tan_native.h>
+#include <ATen/ops/tanh_native.h>
+#include <ATen/ops/threshold_backward_native.h>
+#include <ATen/ops/trunc_native.h>
+#include <ATen/ops/unsqueeze_native.h>
+#include <ATen/ops/values_native.h>
+#include <ATen/ops/view_as_complex_native.h>
+#include <ATen/ops/view_as_real_native.h>
+#include <ATen/ops/zero_native.h>
+#include <ATen/ops/zeros_native.h>
+
+// Sparse tensors: torch's sparse kernels that CPU and CUDA share are device-generic (they work on the indices and values
+// through other ops), so they serve the vulkan sparse keys as they are. The ones CPU and CUDA each implement themselves
+// are composed from vulkan ops in sparse_ops.cpp.
+TORCH_LIBRARY_IMPL(aten, SparsePrivateUse1, m) {
+    m.impl("abs", TORCH_FN(at::native::abs_sparse));
+    m.impl("abs_", TORCH_FN(at::native::abs_sparse_));
+    m.impl("abs.out", TORCH_FN(at::native::abs_sparse_out));
+    m.impl("view_as_real", TORCH_FN(at::native::view_as_real_sparse));
+    m.impl("view_as_complex", TORCH_FN(at::native::view_as_complex_sparse));
+    m.impl("sgn", TORCH_FN(at::native::sgn_sparse));
+    m.impl("sgn_", TORCH_FN(at::native::sgn_sparse_));
+    m.impl("sgn.out", TORCH_FN(at::native::sgn_sparse_out));
+    m.impl("conj_physical.out", TORCH_FN(at::native::conj_physical_out_sparse));
+    m.impl("add.Tensor", TORCH_FN(at::native::add_sparse));
+    m.impl("add_.Tensor", TORCH_FN(at::native::add_sparse_));
+    m.impl("asinh", TORCH_FN(at::native::asinh_sparse));
+    m.impl("asinh_", TORCH_FN(at::native::asinh_sparse_));
+    m.impl("asinh.out", TORCH_FN(at::native::asinh_sparse_out));
+    m.impl("atanh", TORCH_FN(at::native::atanh_sparse));
+    m.impl("atanh_", TORCH_FN(at::native::atanh_sparse_));
+    m.impl("atanh.out", TORCH_FN(at::native::atanh_sparse_out));
+    m.impl("asin", TORCH_FN(at::native::asin_sparse));
+    m.impl("asin_", TORCH_FN(at::native::asin_sparse_));
+    m.impl("asin.out", TORCH_FN(at::native::asin_sparse_out));
+    m.impl("atan", TORCH_FN(at::native::atan_sparse));
+    m.impl("atan_", TORCH_FN(at::native::atan_sparse_));
+    m.impl("atan.out", TORCH_FN(at::native::atan_sparse_out));
+    m.impl("cat", TORCH_FN(at::native::cat_sparse));
+    m.impl("ceil", TORCH_FN(at::native::ceil_sparse));
+    m.impl("ceil_", TORCH_FN(at::native::ceil_sparse_));
+    m.impl("ceil.out", TORCH_FN(at::native::ceil_sparse_out));
+    m.impl("copy_", TORCH_FN(at::native::copy_sparse_wrapper_));
+    m.impl("div.Tensor", static_cast<at::Tensor (*)(const at::Tensor &, const at::Tensor &)>(&at::native::div_sparse));
+    m.impl("div_.Tensor", static_cast<at::Tensor & (*)(at::Tensor &, const at::Tensor &)>(&at::native::div_sparse_));
+    m.impl("div.out", static_cast<at::Tensor & (*)(const at::Tensor &, const at::Tensor &, at::Tensor &)>(&at::native::div_out_sparse_zerodim));
+    m.impl("div.Tensor_mode", static_cast<at::Tensor (*)(const at::Tensor &, const at::Tensor &, ::std::optional<c10::string_view>)>(&at::native::div_sparse));
+    m.impl("div_.Tensor_mode", static_cast<at::Tensor & (*)(at::Tensor &, const at::Tensor &, ::std::optional<c10::string_view>)>(&at::native::div_sparse_));
+    m.impl("div.out_mode", static_cast<at::Tensor & (*)(const at::Tensor &, const at::Tensor &, ::std::optional<c10::string_view>, at::Tensor &)>(&at::native::div_out_sparse_zerodim));
+    m.impl("empty.memory_format", TORCH_FN(at::native::empty_sparse));
+    m.impl("empty_like", TORCH_FN(at::native::empty_like_sparse_coo));
+    m.impl("erf", TORCH_FN(at::native::erf_sparse));
+    m.impl("erf_", TORCH_FN(at::native::erf_sparse_));
+    m.impl("erf.out", TORCH_FN(at::native::erf_sparse_out));
+    m.impl("expm1", TORCH_FN(at::native::expm1_sparse));
+    m.impl("expm1_", TORCH_FN(at::native::expm1_sparse_));
+    m.impl("expm1.out", TORCH_FN(at::native::expm1_sparse_out));
+    m.impl("floor", TORCH_FN(at::native::floor_sparse));
+    m.impl("floor_", TORCH_FN(at::native::floor_sparse_));
+    m.impl("floor.out", TORCH_FN(at::native::floor_sparse_out));
+    m.impl("floor_divide", TORCH_FN(at::native::floor_divide_sparse));
+    m.impl("floor_divide_.Tensor", TORCH_FN(at::native::floor_divide_sparse_));
+    m.impl("floor_divide.out", TORCH_FN(at::native::floor_divide_out_sparse_zerodim));
+    m.impl("frac", TORCH_FN(at::native::frac_sparse));
+    m.impl("frac_", TORCH_FN(at::native::frac_sparse_));
+    m.impl("frac.out", TORCH_FN(at::native::frac_sparse_out));
+    m.impl("isnan", TORCH_FN(at::native::isnan_sparse));
+    m.impl("nan_to_num", TORCH_FN(at::native::nan_to_num_sparse));
+    m.impl("nan_to_num_", TORCH_FN(at::native::nan_to_num_sparse_));
+    m.impl("nan_to_num.out", TORCH_FN(at::native::nan_to_num_sparse_out));
+    m.impl("log1p", TORCH_FN(at::native::log1p_sparse));
+    m.impl("log1p_", TORCH_FN(at::native::log1p_sparse_));
+    m.impl("log1p.out", TORCH_FN(at::native::log1p_sparse_out));
+    m.impl("mm", static_cast<at::Tensor (*)(const at::Tensor &, const at::Tensor &)>(&at::native::_sparse_mm));
+    m.impl("mm.out", TORCH_FN(at::native::_sparse_mm_out));
+    m.impl("mul.Tensor", TORCH_FN(at::native::mul_sparse));
+    m.impl("mul_.Tensor", TORCH_FN(at::native::mul_sparse_));
+    m.impl("mv", TORCH_FN(at::native::mv_sparse));
+    m.impl("narrow_copy", TORCH_FN(at::native::narrow_copy_sparse));
+    m.impl("permute", TORCH_FN(at::native::permute_sparse_coo));
+    m.impl("rad2deg", TORCH_FN(at::native::rad2deg_sparse));
+    m.impl("rad2deg_", TORCH_FN(at::native::rad2deg_sparse_));
+    m.impl("rad2deg.out", TORCH_FN(at::native::rad2deg_sparse_out));
+    m.impl("deg2rad", TORCH_FN(at::native::deg2rad_sparse));
+    m.impl("deg2rad_", TORCH_FN(at::native::deg2rad_sparse_));
+    m.impl("deg2rad.out", TORCH_FN(at::native::deg2rad_sparse_out));
+    m.impl("neg", TORCH_FN(at::native::neg_sparse));
+    m.impl("neg_", TORCH_FN(at::native::neg_sparse_));
+    m.impl("neg.out", TORCH_FN(at::native::neg_out_sparse));
+    m.impl("round", TORCH_FN(at::native::round_sparse));
+    m.impl("round_", TORCH_FN(at::native::round_sparse_));
+    m.impl("round.out", TORCH_FN(at::native::round_sparse_out));
+    m.impl("relu", TORCH_FN(at::native::relu_sparse));
+    m.impl("relu_", TORCH_FN(at::native::relu_sparse_));
+    m.impl("sin", TORCH_FN(at::native::sin_sparse));
+    m.impl("sin_", TORCH_FN(at::native::sin_sparse_));
+    m.impl("sin.out", TORCH_FN(at::native::sin_sparse_out));
+    m.impl("sinh", TORCH_FN(at::native::sinh_sparse));
+    m.impl("sinh_", TORCH_FN(at::native::sinh_sparse_));
+    m.impl("sinh.out", TORCH_FN(at::native::sinh_sparse_out));
+    m.impl("sum", TORCH_FN(at::native::sum_coo));
+    m.impl("sum.dim_IntList", TORCH_FN(at::native::sum_sparse_coo));
+    m.impl("sqrt", TORCH_FN(at::native::sqrt_sparse));
+    m.impl("sqrt_", TORCH_FN(at::native::sqrt_sparse_));
+    m.impl("sqrt.out", TORCH_FN(at::native::sqrt_sparse_out));
+    m.impl("tan", TORCH_FN(at::native::tan_sparse));
+    m.impl("tan_", TORCH_FN(at::native::tan_sparse_));
+    m.impl("tan.out", TORCH_FN(at::native::tan_sparse_out));
+    m.impl("tanh", TORCH_FN(at::native::tanh_sparse));
+    m.impl("tanh_", TORCH_FN(at::native::tanh_sparse_));
+    m.impl("tanh.out", TORCH_FN(at::native::tanh_sparse_out));
+    m.impl("threshold_backward.grad_input", TORCH_FN(at::native::threshold_backward_sparse_out));
+    m.impl("threshold_backward", TORCH_FN(at::native::threshold_backward_sparse));
+    m.impl("trunc", TORCH_FN(at::native::trunc_sparse));
+    m.impl("trunc_", TORCH_FN(at::native::trunc_sparse_));
+    m.impl("trunc.out", TORCH_FN(at::native::trunc_sparse_out));
+    m.impl("unsqueeze", TORCH_FN(at::native::unsqueeze_sparse));
+    m.impl("zeros.out", TORCH_FN(at::native::zeros_sparse_out));
+    m.impl("native_norm", static_cast<at::Tensor (*)(const at::Tensor &, const at::Scalar &)>(&at::native::norm_sparse));
+    m.impl("native_norm.ScalarOpt_dim_dtype", static_cast<at::Tensor (*)(const at::Tensor &, const ::std::optional<at::Scalar> &, at::IntArrayRef, bool, ::std::optional<at::ScalarType>)>(&at::native::norm_sparse));
+    m.impl("norm.ScalarOpt_dim_dtype", TORCH_FN(at::native::sparse_dtype_norm));
+    m.impl("norm.ScalarOpt_dim", TORCH_FN(at::native::sparse_norm));
+    m.impl("clone", TORCH_FN(at::native::clone_sparse));
+    m.impl("resize_as_sparse_", TORCH_FN(at::native::resize_as_sparse_));
+    m.impl("zero_", TORCH_FN(at::native::zero_sparse_));
+    m.impl("sub.out", TORCH_FN(at::native::sub_out_sparse));
+    m.impl("sub.Tensor", TORCH_FN(at::native::sub_sparse));
+    m.impl("sub_.Tensor", TORCH_FN(at::native::sub_sparse_));
+    m.impl("_sparse_coo_tensor_with_dims", TORCH_FN(at::native::new_with_dims_sparse));
+    m.impl("_sparse_coo_tensor_with_dims_and_tensors", TORCH_FN(at::native::new_with_dims_and_tensor_sparse_symint));
+    m.impl("sparse_resize_", TORCH_FN(at::native::sparse_resize_));
+    m.impl("sparse_resize_and_clear_", TORCH_FN(at::native::sparse_resize_and_clear_));
+    m.impl("sparse_mask", TORCH_FN(at::native::sparse_mask));
+    m.impl("_to_dense", TORCH_FN(at::native::sparse_to_dense));
+    m.impl("sparse_dim", TORCH_FN(at::native::sparse_dim_sparse));
+    m.impl("_dimI", TORCH_FN(at::native::sparse_dim_sparse));
+    m.impl("dense_dim", TORCH_FN(at::native::dense_dim_sparse));
+    m.impl("_dimV", TORCH_FN(at::native::dense_dim_sparse));
+    m.impl("_nnz", TORCH_FN(at::native::_nnz_sparse));
+    m.impl("is_coalesced", TORCH_FN(at::native::is_coalesced_sparse));
+    m.impl("_indices", TORCH_FN(at::native::_indices_sparse));
+    m.impl("_values", TORCH_FN(at::native::_values_sparse));
+    m.impl("_coalesced_", TORCH_FN(at::native::_coalesced_sparse_));
+    m.impl("indices", TORCH_FN(at::native::indices_sparse));
+    m.impl("values", TORCH_FN(at::native::values_sparse));
+    m.impl("copy_sparse_to_sparse_", TORCH_FN(at::native::copy_sparse_));
+    m.impl("_to_sparse.sparse_dim", static_cast<at::Tensor (*)(const at::Tensor &, int64_t)>(&at::native::sparse_coo_to_sparse));
+    m.impl("_to_sparse", static_cast<at::Tensor (*)(const at::Tensor &, ::std::optional<at::Layout>, at::OptionalIntArrayRef, ::std::optional<int64_t>)>(&at::native::sparse_coo_to_sparse));
+    m.impl("_to_sparse_csr", TORCH_FN(at::native::coo_to_sparse_csr));
+    m.impl("_to_sparse_csc", TORCH_FN(at::native::coo_to_sparse_csc));
+    m.impl("_to_sparse_bsr", TORCH_FN(at::native::coo_to_sparse_bsr));
+    m.impl("_to_sparse_bsc", TORCH_FN(at::native::coo_to_sparse_bsc));
+    m.impl("erfinv", TORCH_FN(at::native::erfinv_sparse));
+    m.impl("erfinv_", TORCH_FN(at::native::erfinv_sparse_));
+    m.impl("erfinv.out", TORCH_FN(at::native::erfinv_sparse_out));
+    m.impl("sign", TORCH_FN(at::native::sign_sparse));
+    m.impl("sign_", TORCH_FN(at::native::sign_sparse_));
+    m.impl("sign.out", TORCH_FN(at::native::sign_sparse_out));
+    m.impl("signbit", TORCH_FN(at::native::signbit_sparse));
+    m.impl("signbit.out", TORCH_FN(at::native::signbit_sparse_out));
+    m.impl("any", TORCH_FN(at::native::any_sparse));
+    m.impl("pow.Tensor_Scalar_out", TORCH_FN(at::native::pow_out_sparse_scalar));
+    m.impl("pow.Tensor_Scalar", TORCH_FN(at::native::pow_sparse_scalar));
+    m.impl("isinf", TORCH_FN(at::native::isinf_sparse));
+    m.impl("isposinf", TORCH_FN(at::native::isposinf_sparse));
+    m.impl("isposinf.out", TORCH_FN(at::native::isposinf_sparse_out));
+    m.impl("isneginf", TORCH_FN(at::native::isneginf_sparse));
+    m.impl("isneginf.out", TORCH_FN(at::native::isneginf_sparse_out));
+    m.impl("linalg_vector_norm", TORCH_FN(at::native::linalg_vector_norm_sparse));
+}
+
+TORCH_LIBRARY_IMPL(aten, SparseCsrPrivateUse1, m) {
+    m.impl("abs", TORCH_FN(at::native::abs_sparse_csr));
+    m.impl("abs_", TORCH_FN(at::native::abs_sparse_csr_));
+    m.impl("abs.out", TORCH_FN(at::native::abs_sparse_csr_out));
+    m.impl("angle", TORCH_FN(at::native::angle_sparse_csr));
+    m.impl("angle.out", TORCH_FN(at::native::angle_sparse_csr_out));
+    m.impl("sgn", TORCH_FN(at::native::sgn_sparse_csr));
+    m.impl("sgn_", TORCH_FN(at::native::sgn_sparse_csr_));
+    m.impl("sgn.out", TORCH_FN(at::native::sgn_sparse_csr_out));
+    m.impl("_conj_physical", TORCH_FN(at::native::conj_physical_sparse_csr));
+    m.impl("conj_physical.out", TORCH_FN(at::native::conj_physical_sparse_csr_out));
+    m.impl("conj_physical_", TORCH_FN(at::native::conj_physical_sparse_csr_));
+    m.impl("add.Tensor", TORCH_FN(at::native::add_sparse_csr));
+    m.impl("add_.Tensor", TORCH_FN(at::native::add_sparse_csr_));
+    m.impl("asinh", TORCH_FN(at::native::asinh_sparse_csr));
+    m.impl("asinh_", TORCH_FN(at::native::asinh_sparse_csr_));
+    m.impl("asinh.out", TORCH_FN(at::native::asinh_sparse_csr_out));
+    m.impl("atanh", TORCH_FN(at::native::atanh_sparse_csr));
+    m.impl("atanh_", TORCH_FN(at::native::atanh_sparse_csr_));
+    m.impl("atanh.out", TORCH_FN(at::native::atanh_sparse_csr_out));
+    m.impl("asin", TORCH_FN(at::native::asin_sparse_csr));
+    m.impl("asin_", TORCH_FN(at::native::asin_sparse_csr_));
+    m.impl("asin.out", TORCH_FN(at::native::asin_sparse_csr_out));
+    m.impl("atan", TORCH_FN(at::native::atan_sparse_csr));
+    m.impl("atan_", TORCH_FN(at::native::atan_sparse_csr_));
+    m.impl("atan.out", TORCH_FN(at::native::atan_sparse_csr_out));
+    m.impl("ceil", TORCH_FN(at::native::ceil_sparse_csr));
+    m.impl("ceil_", TORCH_FN(at::native::ceil_sparse_csr_));
+    m.impl("ceil.out", TORCH_FN(at::native::ceil_sparse_csr_out));
+    m.impl("copy_", TORCH_FN(at::native::copy_sparse_compressed_));
+    m.impl("resize_", TORCH_FN(at::native::resize_sparse_csr_));
+    m.impl("empty_like", TORCH_FN(at::native::empty_like_sparse_csr));
+    m.impl("erf", TORCH_FN(at::native::erf_sparse_csr));
+    m.impl("erf_", TORCH_FN(at::native::erf_sparse_csr_));
+    m.impl("erf.out", TORCH_FN(at::native::erf_sparse_csr_out));
+    m.impl("expm1", TORCH_FN(at::native::expm1_sparse_csr));
+    m.impl("expm1_", TORCH_FN(at::native::expm1_sparse_csr_));
+    m.impl("expm1.out", TORCH_FN(at::native::expm1_sparse_csr_out));
+    m.impl("fill_.Scalar", TORCH_FN(at::native::fill_sparse_csr_));
+    m.impl("floor", TORCH_FN(at::native::floor_sparse_csr));
+    m.impl("floor_", TORCH_FN(at::native::floor_sparse_csr_));
+    m.impl("floor.out", TORCH_FN(at::native::floor_sparse_csr_out));
+    m.impl("frac", TORCH_FN(at::native::frac_sparse_csr));
+    m.impl("frac_", TORCH_FN(at::native::frac_sparse_csr_));
+    m.impl("frac.out", TORCH_FN(at::native::frac_sparse_csr_out));
+    m.impl("isnan", TORCH_FN(at::native::isnan_sparse_csr));
+    m.impl("log1p", TORCH_FN(at::native::log1p_sparse_csr));
+    m.impl("log1p_", TORCH_FN(at::native::log1p_sparse_csr_));
+    m.impl("log1p.out", TORCH_FN(at::native::log1p_sparse_csr_out));
+    m.impl("mm", TORCH_FN(at::native::_sparse_csr_mm));
+    m.impl("mm.out", TORCH_FN(at::native::_sparse_csr_mm_out));
+    m.impl("mul.Tensor", TORCH_FN(at::native::mul_sparse_csr));
+    m.impl("mul_.Tensor", TORCH_FN(at::native::mul_sparse_csr_));
+    m.impl("mul.out", TORCH_FN(at::native::mul_out_sparse_csr));
+    m.impl("mul.Scalar", TORCH_FN(at::native::mul_scalar_sparse_csr));
+    m.impl("mul_.Scalar", TORCH_FN(at::native::mul__scalar_sparse_csr));
+    m.impl("rad2deg", TORCH_FN(at::native::rad2deg_sparse_csr));
+    m.impl("rad2deg_", TORCH_FN(at::native::rad2deg_sparse_csr_));
+    m.impl("rad2deg.out", TORCH_FN(at::native::rad2deg_sparse_csr_out));
+    m.impl("deg2rad", TORCH_FN(at::native::deg2rad_sparse_csr));
+    m.impl("deg2rad_", TORCH_FN(at::native::deg2rad_sparse_csr_));
+    m.impl("deg2rad.out", TORCH_FN(at::native::deg2rad_sparse_csr_out));
+    m.impl("neg", TORCH_FN(at::native::neg_sparse_csr));
+    m.impl("neg_", TORCH_FN(at::native::neg_sparse_csr_));
+    m.impl("neg.out", TORCH_FN(at::native::neg_sparse_csr_out));
+    m.impl("round", TORCH_FN(at::native::round_sparse_csr));
+    m.impl("round_", TORCH_FN(at::native::round_sparse_csr_));
+    m.impl("round.out", TORCH_FN(at::native::round_sparse_csr_out));
+    m.impl("relu", TORCH_FN(at::native::relu_sparse_csr));
+    m.impl("relu_", TORCH_FN(at::native::relu_sparse_csr_));
+    m.impl("select.int", TORCH_FN(at::native::select_sparse_csr));
+    m.impl("sin", TORCH_FN(at::native::sin_sparse_csr));
+    m.impl("sin_", TORCH_FN(at::native::sin_sparse_csr_));
+    m.impl("sin.out", TORCH_FN(at::native::sin_sparse_csr_out));
+    m.impl("sinh", TORCH_FN(at::native::sinh_sparse_csr));
+    m.impl("sinh_", TORCH_FN(at::native::sinh_sparse_csr_));
+    m.impl("sinh.out", TORCH_FN(at::native::sinh_sparse_csr_out));
+    m.impl("sum", TORCH_FN(at::native::sum_csr));
+    m.impl("sum.dim_IntList", TORCH_FN(at::native::sum_sparse_compressed));
+    m.impl("sqrt", TORCH_FN(at::native::sqrt_sparse_csr));
+    m.impl("sqrt_", TORCH_FN(at::native::sqrt_sparse_csr_));
+    m.impl("sqrt.out", TORCH_FN(at::native::sqrt_sparse_csr_out));
+    m.impl("tan", TORCH_FN(at::native::tan_sparse_csr));
+    m.impl("tan_", TORCH_FN(at::native::tan_sparse_csr_));
+    m.impl("tan.out", TORCH_FN(at::native::tan_sparse_csr_out));
+    m.impl("tanh", TORCH_FN(at::native::tanh_sparse_csr));
+    m.impl("tanh_", TORCH_FN(at::native::tanh_sparse_csr_));
+    m.impl("tanh.out", TORCH_FN(at::native::tanh_sparse_csr_out));
+    m.impl("threshold_backward.grad_input", TORCH_FN(at::native::threshold_backward_sparse_compressed_out));
+    m.impl("threshold_backward", TORCH_FN(at::native::threshold_backward_sparse_compressed));
+    m.impl("trunc", TORCH_FN(at::native::trunc_sparse_csr));
+    m.impl("trunc_", TORCH_FN(at::native::trunc_sparse_csr_));
+    m.impl("trunc.out", TORCH_FN(at::native::trunc_sparse_csr_out));
+    m.impl("clone", TORCH_FN(at::native::clone_sparse_compressed));
+    m.impl("resize_as_sparse_", TORCH_FN(at::native::resize_as_sparse_compressed_));
+    m.impl("zero_", TORCH_FN(at::native::zero_sparse_csr_));
+    m.impl("addmm", TORCH_FN(at::native::addmm_sparse_compressed_dense));
+    m.impl("sparse_mask", TORCH_FN(at::native::sparse_mask_sparse_compressed));
+    m.impl("_to_dense", TORCH_FN(at::native::sparse_compressed_to_dense));
+    m.impl("sparse_dim", TORCH_FN(at::native::sparse_dim_sparse_csr));
+    m.impl("dense_dim", TORCH_FN(at::native::dense_dim_sparse_csr));
+    m.impl("_nnz", TORCH_FN(at::native::_nnz_sparse_csr));
+    m.impl("values", TORCH_FN(at::native::values_sparse_csr));
+    m.impl("crow_indices", TORCH_FN(at::native::crow_indices_sparse_csr));
+    m.impl("col_indices", TORCH_FN(at::native::col_indices_sparse_csr));
+    m.impl("ccol_indices", TORCH_FN(at::native::ccol_indices_sparse_csr));
+    m.impl("row_indices", TORCH_FN(at::native::row_indices_sparse_csr));
+    m.impl("_to_sparse.sparse_dim", static_cast<at::Tensor (*)(const at::Tensor &, int64_t)>(&at::native::sparse_compressed_to_sparse));
+    m.impl("_to_sparse", static_cast<at::Tensor (*)(const at::Tensor &, ::std::optional<at::Layout>, at::OptionalIntArrayRef, ::std::optional<int64_t>)>(&at::native::sparse_compressed_to_sparse));
+    m.impl("_to_sparse_csr", TORCH_FN(at::native::sparse_compressed_to_sparse_csr));
+    m.impl("_to_sparse_csc", TORCH_FN(at::native::sparse_compressed_to_sparse_csc));
+    m.impl("_to_sparse_bsr", TORCH_FN(at::native::sparse_compressed_to_sparse_bsr));
+    m.impl("_to_sparse_bsc", TORCH_FN(at::native::sparse_compressed_to_sparse_bsc));
+    m.impl("erfinv", TORCH_FN(at::native::erfinv_sparse_csr));
+    m.impl("erfinv_", TORCH_FN(at::native::erfinv_sparse_csr_));
+    m.impl("erfinv.out", TORCH_FN(at::native::erfinv_sparse_csr_out));
+    m.impl("sign", TORCH_FN(at::native::sign_sparse_csr));
+    m.impl("sign_", TORCH_FN(at::native::sign_sparse_csr_));
+    m.impl("sign.out", TORCH_FN(at::native::sign_sparse_csr_out));
+    m.impl("signbit", TORCH_FN(at::native::signbit_sparse_csr));
+    m.impl("signbit.out", TORCH_FN(at::native::signbit_sparse_csr_out));
+    m.impl("normal_", TORCH_FN(at::native::normal_sparse_csr_));
+    m.impl("isinf", TORCH_FN(at::native::isinf_sparse_csr));
+    m.impl("isposinf", TORCH_FN(at::native::isposinf_sparse_csr));
+    m.impl("isposinf.out", TORCH_FN(at::native::isposinf_sparse_csr_out));
+    m.impl("isneginf", TORCH_FN(at::native::isneginf_sparse_csr));
+    m.impl("isneginf.out", TORCH_FN(at::native::isneginf_sparse_csr_out));
+    m.impl("select_copy.int", TORCH_FN(at::native::select_copy_sparse_csr));
+}

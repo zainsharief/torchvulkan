@@ -141,8 +141,10 @@ void torchvulkan::resize_bytes_vulkan(c10::StorageImpl* storage, size_t nbytes)
 {
     TORCH_CHECK(storage->resizable(), "torchvulkan [ERROR]: Trying to resize storage that is not resizable.");
 
+    // allocate on the storage's own device, not the current one
     c10::OptionalDeviceGuard guard;
-    if (storage->data() != nullptr) guard.reset_device(storage->data_ptr().device());
+    const c10::Device device = storage->data_ptr().device();
+    if (device.type() == c10::DeviceType::PrivateUse1 && device.has_index()) guard.reset_device(device);
 
     at::DataPtr new_data = storage->allocator()->allocate(nbytes);
 

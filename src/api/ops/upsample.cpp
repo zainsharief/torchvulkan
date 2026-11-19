@@ -15,7 +15,8 @@ enum class ResampleMode {
     LINEAR = 2,
     CUBIC = 3,
     AA_LINEAR = 4,
-    AA_CUBIC = 5
+    AA_CUBIC = 5,
+    AA_LANCZOS = 6
 };
 
 using Scales = std::vector<c10::optional<double>>;
@@ -29,7 +30,7 @@ double axis_scale(int64_t input, int64_t output, bool align_corners, c10::option
 
 double aa_support(ResampleMode mode, double scale)
 {
-    double interp_size = mode == ResampleMode::AA_LINEAR ? 2.0 : 4.0;
+    double interp_size = mode == ResampleMode::AA_LINEAR ? 2.0 : mode == ResampleMode::AA_LANCZOS ? 6.0 : 4.0;
     return scale >= 1.0 ? interp_size * 0.5 * scale : interp_size * 0.5;
 }
 
@@ -79,7 +80,7 @@ void dispatch_resample_shader(
     );
 }
 
-bool is_aa(ResampleMode mode) { return mode == ResampleMode::AA_LINEAR || mode == ResampleMode::AA_CUBIC; }
+bool is_aa(ResampleMode mode) { return mode == ResampleMode::AA_LINEAR || mode == ResampleMode::AA_CUBIC || mode == ResampleMode::AA_LANCZOS; }
 
 at::ScalarType compute_dtype(const at::Tensor& self)
 {
@@ -102,6 +103,13 @@ double resample_filter(ResampleMode mode, double x)
 {
     x = std::abs(x);
     if (mode == ResampleMode::LINEAR || mode == ResampleMode::AA_LINEAR) return x < 1.0 ? 1.0 - x : 0.0;
+    if (mode == ResampleMode::AA_LANCZOS) {
+        // Lanczos with a = 3 (PIL's), sinc(x) sinc(x / 3)
+        if (x >= 3.0) return 0.0;
+        if (x == 0.0) return 1.0;
+        double px = M_PI * x;
+        return 3.0 * std::sin(px) * std::sin(px / 3.0) / (px * px);
+    }
     double a = mode == ResampleMode::AA_CUBIC ? -0.5 : -0.75;
     if (x < 1.0) return cubic_convolution1(x, a);
     if (x < 2.0) return cubic_convolution2(x, a);
@@ -111,7 +119,7 @@ double resample_filter(ResampleMode mode, double x)
 FixedPointTaps fixed_point_taps(int64_t input, int64_t output, bool align_corners, c10::optional<double> opt_scale, ResampleMode mode)
 {
     bool antialias = is_aa(mode);
-    int64_t interp_size = (mode == ResampleMode::LINEAR || mode == ResampleMode::AA_LINEAR) ? 2 : 4;
+    int64_t interp_size = (mode == ResampleMode::LINEAR || mode == ResampleMode::AA_LINEAR) ? 2 : mode == ResampleMode::AA_LANCZOS ? 6 : 4;
     double scale = at::native::area_pixel_compute_scale<double>(input, output, align_corners, opt_scale);
     double support = antialias && scale >= 1.0 ? interp_size * 0.5 * scale : interp_size * 0.5;
     int64_t max_interp = antialias ? static_cast<int64_t>(std::ceil(support)) * 2 + 1 : interp_size;
@@ -429,6 +437,17 @@ at::Tensor& upsample_bicubic2d_aa_out_vulkan(
     return fill_out(out, resample_forward(self, to_ints(output_size), {scales_h, scales_w}, ResampleMode::AA_CUBIC, align_corners));
 }
 
+at::Tensor& upsample_lanczos2d_aa_out_vulkan(
+    const at::Tensor& self,
+    c10::SymIntArrayRef output_size,
+    bool align_corners,
+    c10::optional<double> scales_h,
+    c10::optional<double> scales_w,
+    at::Tensor& out)
+{
+    return fill_out(out, resample_forward(self, to_ints(output_size), {scales_h, scales_w}, ResampleMode::AA_LANCZOS, align_corners));
+}
+
 at::Tensor& upsample_nearest1d_backward_out_vulkan(
     const at::Tensor& grad_output,
     c10::SymIntArrayRef output_size,
@@ -567,6 +586,18 @@ at::Tensor& upsample_bicubic2d_aa_backward_out_vulkan(
     return fill_out(grad_input, resample_backward(grad_output, to_ints(output_size), to_ints(input_size), {scales_h, scales_w}, ResampleMode::AA_CUBIC, align_corners));
 }
 
+at::Tensor& upsample_lanczos2d_aa_backward_out_vulkan(
+    const at::Tensor& grad_output,
+    c10::SymIntArrayRef output_size,
+    c10::SymIntArrayRef input_size,
+    bool align_corners,
+    c10::optional<double> scales_h,
+    c10::optional<double> scales_w,
+    at::Tensor& grad_input)
+{
+    return fill_out(grad_input, resample_backward(grad_output, to_ints(output_size), to_ints(input_size), {scales_h, scales_w}, ResampleMode::AA_LANCZOS, align_corners));
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -582,6 +613,7 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("upsample_bicubic2d.out", &upsample_bicubic2d_out_vulkan);
     m.impl("_upsample_bilinear2d_aa.out", &upsample_bilinear2d_aa_out_vulkan);
     m.impl("_upsample_bicubic2d_aa.out", &upsample_bicubic2d_aa_out_vulkan);
+    m.impl("_upsample_lanczos2d_aa.out", &upsample_lanczos2d_aa_out_vulkan);
     m.impl("upsample_nearest1d_backward.grad_input", &upsample_nearest1d_backward_out_vulkan);
     m.impl("_upsample_nearest_exact1d_backward.grad_input", &upsample_nearest_exact1d_backward_out_vulkan);
     m.impl("upsample_nearest2d_backward.grad_input", &upsample_nearest2d_backward_out_vulkan);
@@ -594,4 +626,5 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("upsample_bicubic2d_backward.grad_input", &upsample_bicubic2d_backward_out_vulkan);
     m.impl("_upsample_bilinear2d_aa_backward.grad_input", &upsample_bilinear2d_aa_backward_out_vulkan);
     m.impl("_upsample_bicubic2d_aa_backward.grad_input", &upsample_bicubic2d_aa_backward_out_vulkan);
+    m.impl("_upsample_lanczos2d_aa_backward.grad_input", &upsample_lanczos2d_aa_backward_out_vulkan);
 }

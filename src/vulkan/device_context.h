@@ -11,6 +11,16 @@
 class VulkanShaderManager;
 class Autotuner;
 
+struct CoopMatShape {
+    c10::ScalarType a;
+    c10::ScalarType b;
+    c10::ScalarType c;
+    c10::ScalarType result;
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+};
+
 struct DeviceContext {
     c10::DeviceIndex index = -1;
     VkDevice device = VK_NULL_HANDLE;
@@ -39,6 +49,7 @@ struct DeviceContext {
     bool support_int8 = false;
 
     bool support_coopmat = false;
+    std::vector<CoopMatShape> coopmat_shapes;
     bool support_bfloat16_coopmat = false;
     bool support_subgroup_control = false;
     bool support_subgroup_extended_types = false;

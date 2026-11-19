@@ -8,7 +8,7 @@
 #include <type_traits>
 
 #define MAX_PUSH_CONSTANT_BYTES 128
-#define MAX_SPEC_CONSTANTS 32
+#define MAX_SPEC_CONSTANTS 48
 #define MAX_SPEC_DATA_BYTES 256
 #define MAX_DIMS 64
 #define MAX_METADATA_SECTIONS 8
@@ -17,6 +17,7 @@ struct SpecializationArgs {
     const void* data = nullptr;
     const size_t* offsets = nullptr;
     const size_t* sizes = nullptr;
+    const uint32_t* ids = nullptr;
     const uint32_t numConstants = 0;
     const std::string_view key{};
 };
@@ -30,9 +31,11 @@ public:
         static_assert(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>, "specialization constants must be non-bool arithmetic types");
         TORCH_CHECK(numConstants_ < MAX_SPEC_CONSTANTS, "torchvulkan [ERROR]: Too many specialization constants!");
         TORCH_CHECK(data_size_ + sizeof(T) <= MAX_SPEC_DATA_BYTES, "torchvulkan [ERROR]: Specialization constant data exceeded buffer!");
+        TORCH_CHECK(key_size_ + 1 + sizeof(T) <= key_buffer.size(), "torchvulkan [ERROR]: Specialization constant data exceeded buffer!");
 
         offsets_array[numConstants_] = data_size_;
         sizes_array[numConstants_] = sizeof(T);
+        ids_array[numConstants_] = next_id_++;
         numConstants_++;
 
         std::memcpy(data_buffer.data() + data_size_, &value, sizeof(T));
@@ -45,20 +48,34 @@ public:
         return *this;
     }
 
+    // the next push goes to constant_id `id`: a module's constants can start past an imported library's
+    SpecializationBuilder& at(uint32_t id) {
+        TORCH_CHECK(id >= next_id_, "torchvulkan [ERROR]: specialization constant ids must increase.");
+        TORCH_CHECK(key_size_ + 5 <= key_buffer.size(), "torchvulkan [ERROR]: Specialization constant data exceeded buffer!");
+        next_id_ = id;
+        key_buffer[key_size_] = 0; // a size no constant has
+        std::memcpy(key_buffer.data() + key_size_ + 1, &id, sizeof(id));
+        key_size_ += 1 + sizeof(id);
+        return *this;
+    }
+
     const void* data() const { return data_buffer.data(); }
     const size_t* offsets() const { return offsets_array.data(); }
     const size_t* sizes() const { return sizes_array.data(); }
+    const uint32_t* ids() const { return ids_array.data(); }
     uint32_t numConstants() const { return numConstants_; }
 
     std::string_view key() const { return std::string_view(reinterpret_cast<const char*>(key_buffer.data()), key_size_); }
-    SpecializationArgs build() const { return {data(), offsets(), sizes(), numConstants(), key()}; }
+    SpecializationArgs build() const { return {data(), offsets(), sizes(), ids(), numConstants(), key()}; }
 
 private:
     std::array<uint8_t, MAX_SPEC_DATA_BYTES> data_buffer{};
     std::array<size_t, MAX_SPEC_CONSTANTS> offsets_array{};
     std::array<size_t, MAX_SPEC_CONSTANTS> sizes_array{};
+    std::array<uint32_t, MAX_SPEC_CONSTANTS> ids_array{};
     std::array<uint8_t, MAX_SPEC_CONSTANTS + MAX_SPEC_DATA_BYTES> key_buffer{};
     uint32_t numConstants_ = 0;
+    uint32_t next_id_ = 0;
     size_t data_size_ = 0;
     size_t key_size_ = 0;
 };
