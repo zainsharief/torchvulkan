@@ -1,4 +1,4 @@
-module attention_args;
+module attention;
 
 __exported import core.dtype;
 

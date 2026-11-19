@@ -554,9 +554,9 @@ inline std::vector<uint32_t> coop_block_sizes(const DeviceContext* device, at::S
     return sizes;
 }
 
-const uint32_t COOP_PAD = 8; // PAD in matmul_coop.slang
+const uint32_t COOP_PAD = 8; // PAD in helpers/gemm_coop.slang
 
-// the tile of a kernel built on matmul_coop.slang
+// the tile of a kernel built on helpers/gemm_coop.slang
 struct CoopTiling {
     uint32_t block;
     uint32_t warps_m;

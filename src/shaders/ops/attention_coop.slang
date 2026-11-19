@@ -1,7 +1,7 @@
 module attention_coop;
 
 __exported import core.dtype;
-import ops.attention_args;
+import helpers.attention;
 
 [[vk::constant_id(0)]] public const uint WG = 128;
 [[vk::constant_id(1)]] public const uint SUBGROUP_SIZE = 32;

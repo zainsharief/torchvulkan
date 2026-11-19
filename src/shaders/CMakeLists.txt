@@ -24,18 +24,16 @@ endif()
 
 file(GLOB_RECURSE SHADER_MODULES CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/src/shaders/core/*.slang"
+     "${CMAKE_SOURCE_DIR}/src/shaders/helpers/*.slang"
      "${CMAKE_SOURCE_DIR}/src/shaders/ops/*.slang")
 
 set(SPV_FILES "")
 
 function(torchvulkan_add_shader NAME SOURCE ENTRY)
-    cmake_parse_arguments(SHADER "" "" "COOP_DIMS;DEFINES;SPECIALIZE" ${ARGN})
+    cmake_parse_arguments(SHADER "" "" "COOP_DIMS;SPECIALIZE" ${ARGN})
     set(SPECIALIZE_ARGS "")
     foreach(ARG ${SHADER_SPECIALIZE})
         list(APPEND SPECIALIZE_ARGS -specialize ${ARG})
-    endforeach()
-    foreach(DEFINE ${SHADER_DEFINES})
-        list(APPEND SPECIALIZE_ARGS -D${DEFINE})
     endforeach()
 
     set(SPV_OUT "${SHADER_OUT_DIR}/${NAME}.spv")

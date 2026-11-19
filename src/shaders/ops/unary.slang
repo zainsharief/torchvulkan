@@ -1,6 +1,6 @@
 module unary;
 
-__exported import ops.unary_ops;
+__exported import helpers.unary_ops;
 import core.indexing;
 
 [[vk::constant_id(0)]] public const uint OP_TYPE = 0;

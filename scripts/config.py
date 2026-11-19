@@ -84,7 +84,6 @@ class Kernel:
     module: str # path relative to src/shaders
     entries: list
     coop_dims: tuple = None # (spec constant id, placeholder) that scripts/splice_coop_dims.py swaps into CoopMat dimensions
-    defines: tuple = () # preprocessor macros, so one module can build several kernels
 
 
 KERNELS = [
@@ -130,11 +129,11 @@ KERNELS = [
     Kernel('norm', 'ops/norm.slang', [
         Entry('norm_main', FLOATS),
     ]),
-    Kernel('attention', 'ops/attention.slang', [
-        Entry('attention_main', FLOATS),
+    Kernel('attention_simd', 'ops/attention_simd.slang', [
+        Entry('attention_simd_main', FLOATS),
     ]),
-    Kernel('attention_backward', 'ops/attention.slang', [
-        Entry('attention_backward_main', FLOATS),
+    Kernel('attention_simd_backward', 'ops/attention_simd.slang', [
+        Entry('attention_simd_backward_main', FLOATS),
     ]),
     Kernel('nllloss', 'ops/nllloss.slang', [
         Entry('nllloss_main', FLOATS),
@@ -205,30 +204,30 @@ KERNELS = [
     Kernel('matmul_simd', 'ops/matmul_simd.slang', [
         Entry('matmul_simd_main', DTYPES, ('vec',)),
     ]),
-    Kernel('conv', 'ops/conv.slang', [
-        Entry('conv_main', FLOATS, ('vec',)),
+    Kernel('conv_simd', 'ops/conv_simd.slang', [
+        Entry('conv_simd_main', FLOATS, ('vec',)),
     ]),
-    Kernel('winograd', 'ops/winograd.slang', [
-        Entry('winograd_main', FLOATS),
+    Kernel('winograd_transform', 'ops/winograd_transform.slang', [
+        Entry('winograd_transform_main', FLOATS),
     ]),
-    Kernel('winograd_fused', 'ops/winograd.slang', [
-        Entry('winograd_main', FLOATS),
-    ], defines=('FUSED',)),
+    Kernel('winograd_simd', 'ops/winograd_simd.slang', [
+        Entry('winograd_simd_main', FLOATS),
+    ]),
     Kernel('matmul_coop', 'ops/matmul_coop.slang', [
         Entry('matmul_coop_main', DTYPES, ('vec',)),
-    ], coop_dims=(18, 1009)), # BLOCK_SIZE, COOP_DIM in matmul_coop.slang
-    Kernel('conv_coop', 'ops/conv.slang', [
-        Entry('conv_main', FLOATS, ('vec',)),
-    ], coop_dims=(18, 1009), defines=('COOPMAT',)),
+    ], coop_dims=(18, 1009)), # BLOCK_SIZE, COOP_DIM in helpers/gemm_coop.slang
+    Kernel('conv_coop', 'ops/conv_coop.slang', [
+        Entry('conv_coop_main', FLOATS, ('vec',)),
+    ], coop_dims=(18, 1009)),
     Kernel('attention_coop', 'ops/attention_coop.slang', [
         Entry('attention_coop_main', FLOATS),
     ], coop_dims=(11, 1009)), # BLOCK_SIZE, COOP_DIM in attention_coop.slang
     Kernel('attention_coop_backward', 'ops/attention_coop.slang', [
         Entry('attention_coop_backward_main', FLOATS),
     ], coop_dims=(11, 1009)),
-    Kernel('winograd_coop', 'ops/winograd.slang', [
-        Entry('winograd_main', FLOATS),
-    ], coop_dims=(18, 1009), defines=('COOPMAT',)),
+    Kernel('winograd_coop', 'ops/winograd_coop.slang', [
+        Entry('winograd_coop_main', FLOATS),
+    ], coop_dims=(18, 1009)),
     Kernel('random', 'ops/random.slang', [
         Entry('random_main', DTYPES, ('vec',)),
     ]),

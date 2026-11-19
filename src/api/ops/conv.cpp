@@ -259,7 +259,10 @@ const uint32_t CONV_TILE_K = 16;
 const uint32_t CONV_WG = 16;
 const int64_t CONV_DIRECT_ROWS = 8;
 const int64_t CONV_DIRECT_COLUMNS = 8;
-const size_t CONV_PARAMS = 33; // PARAMS in conv.slang
+const size_t CONV_PARAMS = 33; // PARAMS in helpers/conv.slang
+// conv's and winograd's own spec constants start here, past the GEMM libraries': CONV_SPEC in helpers/conv.slang, FLIP in
+// helpers/winograd.slang
+const uint32_t OP_SPEC = 24;
 
 uint32_t conv_tile_m(DeviceContext* device, at::ScalarType dtype)
 {
@@ -339,8 +342,8 @@ MetadataBuilder conv_metadata(const ConvProblem& p)
     return metadata;
 }
 
-const int64_t CONV_MAX_PHASE_TAPS = 64; // MAX_PHASE_TAPS in conv.slang
-const uint32_t CONV_GATHER_COLUMNS = 4; // GATHER_COLUMNS in conv.slang
+const int64_t CONV_MAX_PHASE_TAPS = 64; // MAX_PHASE_TAPS in helpers/conv.slang
+const uint32_t CONV_GATHER_COLUMNS = 4; // GATHER_COLUMNS in conv_coop.slang
 
 bool conv_padded(const ConvGeometry& g)
 {
@@ -454,7 +457,7 @@ TuneDispatch conv_simd_dispatch(
     uint32_t aligned = !subpixel.phases && (depth % vec == 0) && (columns % vec == 0);
 
     TuneDispatch d;
-    d.key = ShaderKey{torchvulkan::Kernel::CONV, dtype};
+    d.key = ShaderKey{torchvulkan::Kernel::CONV_SIMD, dtype};
     d.subgroupSize = device->default_subgroup_size;
     d.spd.push(CONV_WG)
          .push(CONV_WG)
@@ -462,9 +465,10 @@ TuneDispatch conv_simd_dispatch(
          .push(static_cast<uint32_t>(has_bias))
          .push(uint32_t(0)) // ACTIVATION
          .push(launch.tile_m)
+         .push(static_cast<uint32_t>(launch.direct))
+         .at(OP_SPEC)
          .push(static_cast<uint32_t>(mode));
     push_conv_geometry(d.spd, p.g, subpixel);
-    d.spd.push(static_cast<uint32_t>(launch.direct));
 
     uint64_t x_address = get_tensor_address(x) + item0 * p.groups * p.cx * inputs * x.element_size();
     uint64_t y_address = get_tensor_address(y) + item0 * p.groups * p.cy * outputs * y.element_size();
@@ -570,6 +574,7 @@ bool dispatch_conv_coop_shader(
              .push(t.block)
              .push(uint32_t(1)) // USE_SHARED_MEMORY
              .push(static_cast<uint32_t>(ceil_div(t.bk * tile_n / gathered, threads))) // LOADS_B
+             .at(OP_SPEC)
              .push(static_cast<uint32_t>(mode));
         push_conv_geometry(d.spd, p.g, subpixel);
 
@@ -621,7 +626,7 @@ bool dispatch_conv_coop_shader(
         uint64_t tile_m = coop_tile_m(t);
         uint64_t tile_n = coop_tile_n(t);
 
-        // must match Shared<T> and EpilogueShared in matmul_coop.slang, and params and the phase taps in conv.slang
+        // must match Shared<T> and EpilogueShared in helpers/gemm_coop.slang, and params and the phase taps in helpers/conv.slang
         uint64_t stage_b = k_major ? tile_n * (t.bk + COOP_PAD) : t.bk * (tile_n + COOP_PAD);
         uint64_t staged = c10::elementSize(dtype) * 2 * (tile_m * (t.bk + COOP_PAD) + stage_b);
         uint64_t epilogue = c10::elementSize(accumulate) * subgroups * t.block * t.block;
@@ -743,8 +748,9 @@ void dispatch_winograd_shader(
     SpecializationBuilder spd{};
     spd.push(static_cast<uint32_t>(mode))
        .push(WINOGRAD_WG)
-       .push(static_cast<uint32_t>(flip))
-       .push(static_cast<uint32_t>(bias.defined()));
+       .push(static_cast<uint32_t>(bias.defined()))
+       .at(OP_SPEC)
+       .push(static_cast<uint32_t>(flip));
 
     PushConstantBuilder pcs{};
     push_winograd_constants(pcs, src, dst, bias, at::Tensor(), rows, cols, t);
@@ -754,7 +760,7 @@ void dispatch_winograd_shader(
     uint32_t columns = mode == WinogradMode::FILTER || mode == WinogradMode::FILTER_GRAD ? cols : t.tiles;
 
     device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::WINOGRAD, src.scalar_type()},
+        ShaderKey{torchvulkan::Kernel::WINOGRAD_TRANSFORM, src.scalar_type()},
         device->default_subgroup_size,
         spd.build(),
         pcs.build(),
@@ -765,7 +771,7 @@ void dispatch_winograd_shader(
 }
 
 // the cooperative-matrix tuner times this too: emulated cooperative matrices can lose to it by far
-TuneDispatch winograd_fused_dispatch(
+TuneDispatch winograd_simd_dispatch(
     const at::Tensor& src,
     const at::Tensor& weight,
     const at::Tensor& bias,
@@ -783,16 +789,16 @@ TuneDispatch winograd_fused_dispatch(
     DeviceContext* device = get_device_context(src);
 
     TuneDispatch d;
-    d.key = ShaderKey{torchvulkan::Kernel::WINOGRAD_FUSED, src.scalar_type()};
+    d.key = ShaderKey{torchvulkan::Kernel::WINOGRAD_SIMD, src.scalar_type()};
     d.subgroupSize = device->default_subgroup_size;
-    d.spd.push(uint32_t(0)) // MODE
-         .push(threads)
-         .push(static_cast<uint32_t>(flip))
+    d.spd.push(threads)
          .push(static_cast<uint32_t>(bias.defined()))
          .push(row_threads)
          .push(thread_rows)
          .push(thread_cols)
-         .push(bk);
+         .push(bk)
+         .at(OP_SPEC)
+         .push(static_cast<uint32_t>(flip));
 
     push_winograd_constants(d.pcs, src, dst, bias, weight, rows, cols, t);
 
@@ -828,7 +834,7 @@ bool dispatch_winograd_coop_shader(
     // param 7 picks the cooperative-matrix kernel (1) or the SIMD one (0), which takes params 8 on
     const size_t kernel_param = 7;
     auto make_dispatch = [&](const TuneConfig& config) {
-        if (config[kernel_param] == 0) return winograd_fused_dispatch(src, weight, bias, dst, flip, rows, cols, t, config[8], config[9], config[10], config[11], config[12]);
+        if (config[kernel_param] == 0) return winograd_simd_dispatch(src, weight, bias, dst, flip, rows, cols, t, config[8], config[9], config[10], config[11], config[12]);
         CoopTiling c = coop_tiling(config);
 
         TuneDispatch d;
@@ -855,8 +861,7 @@ bool dispatch_winograd_coop_shader(
              .push(c.block)
              .push(uint32_t(1)) // USE_SHARED_MEMORY
              .push(uint32_t(1)) // LOADS_B
-             .push(uint32_t(0)) // MODE
-             .push(WINOGRAD_WG)
+             .at(OP_SPEC)
              .push(static_cast<uint32_t>(flip));
 
         push_winograd_constants(d.pcs, src, dst, bias, weight, rows, cols, t);
@@ -897,7 +902,7 @@ bool dispatch_winograd_coop_shader(
             uint64_t threads = config[8], row_threads = config[9], thread_rows = config[10], thread_cols = config[11], bk = config[12];
             uint64_t tile_rows = row_threads * thread_rows;
             uint64_t tile_cols = threads / row_threads * thread_cols;
-            // must match SimdShared in winograd.slang
+            // must match Shared in winograd_simd.slang
             uint64_t staged = c10::elementSize(dtype) * 16 * bk * (tile_rows + tile_cols);
             if (thread_rows * thread_cols > 4 || staged > limits.maxComputeSharedMemorySize) return false;
             if (!fits_workgroup_size(device, threads, device->default_subgroup_size)) return false;
@@ -911,7 +916,7 @@ bool dispatch_winograd_coop_shader(
         if (c.warps_m * c.warps_n > 8 || !fits_workgroup_size(device, coop_threads(c), c.subgroup)) return false;
         if (16 * c.frags_m * c.frags_n * c.block * c.block / c.subgroup > 64) return false;
 
-        // must match FusedShared and FusedScratch in winograd.slang
+        // must match FusedShared and FusedScratch in winograd_coop.slang
         uint64_t staged = c10::elementSize(dtype) * 16 * (tile_rows * (c.bk + COOP_PAD) + c.bk * (tile_cols + COOP_PAD));
         uint64_t scratch = c10::elementSize(accumulate) * tile_rows * tile_cols;
         if (staged + scratch > limits.maxComputeSharedMemorySize) return false;

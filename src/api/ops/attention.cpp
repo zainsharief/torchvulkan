@@ -216,7 +216,7 @@ AttentionTiling attention_tiling(const TuneConfig& config)
     return t;
 }
 
-// must match attentionShared() in attention.slang
+// must match the shared offsets in attention_simd.slang
 uint64_t simd_shared(AttentionMode mode, uint64_t br, uint64_t bc, uint64_t d, uint64_t dv)
 {
     switch (mode) {
@@ -338,7 +338,7 @@ TuneDispatch attention_forward_dispatch(
              .push(t.splits)
              .push(keys);
     } else {
-        d.key = ShaderKey{torchvulkan::Kernel::ATTENTION, a.dtype};
+        d.key = ShaderKey{torchvulkan::Kernel::ATTENTION_SIMD, a.dtype};
         d.subgroupSize = get_device_context(a.q)->default_subgroup_size;
         d.spd.push(static_cast<uint32_t>(AttentionMode::FORWARD))
              .push(t.wg)
@@ -456,7 +456,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     };
 
     const TuneConfig& config = device->tuner->select(
-        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION, a.dtype},
+        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION_SIMD, a.dtype},
         attention_tune_key(a),
         space,
         [&](const TuneConfig& c) {
@@ -525,7 +525,7 @@ TuneDispatch attention_backward_dispatch(
              .push(static_cast<uint32_t>(coop_backward_frags(mode, t.br, t.bc, Dp, Dvp, t.block, subgroups)));
     } else {
         uint32_t rows = mode == AttentionMode::BACKWARD_KV ? t.bc : t.br;
-        d.key = ShaderKey{torchvulkan::Kernel::ATTENTION_BACKWARD, a.dtype};
+        d.key = ShaderKey{torchvulkan::Kernel::ATTENTION_SIMD_BACKWARD, a.dtype};
         d.subgroupSize = get_device_context(a.q)->default_subgroup_size;
         d.spd.push(static_cast<uint32_t>(mode))
              .push(t.wg)
@@ -625,7 +625,7 @@ bool run_backward(
 
     int64_t max_batch = limits.maxComputeWorkGroupCount[2];
     const TuneConfig& config = device->tuner->select(
-        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP_BACKWARD : torchvulkan::Kernel::ATTENTION_BACKWARD, a.dtype},
+        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP_BACKWARD : torchvulkan::Kernel::ATTENTION_SIMD_BACKWARD, a.dtype},
         attention_tune_key(a) | (static_cast<uint64_t>(mode) << 46),
         space,
         [&](const TuneConfig& c) { return attention_backward_dispatch(mode, a, c, dout, lse, delta, grad_a, grad_b, 0, std::min(max_batch, a.B)); }

@@ -521,7 +521,7 @@ at::Tensor dispatch_matmul_coop_shader(
         uint64_t tile_m = coop_tile_m(t);
         uint64_t tile_n = coop_tile_n(t);
 
-        // must match Shared<T> and EpilogueShared in matmul_coop.slang
+        // must match Shared<T> and EpilogueShared in helpers/gemm_coop.slang
         uint64_t stage_a = self_transposed ? t.bk * (tile_m + COOP_PAD) : tile_m * (t.bk + COOP_PAD);
         uint64_t stage_b = other_transposed ? tile_n * (t.bk + COOP_PAD) : t.bk * (tile_n + COOP_PAD);
         uint64_t staged = t.shared ? 2 * (stage_a + stage_b) : tile_m * t.bk + t.bk * tile_n;

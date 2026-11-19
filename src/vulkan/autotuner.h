@@ -26,7 +26,6 @@ struct TuneSpace
 {
     std::vector<TuneParam> params;
     std::function<bool(const TuneConfig&)> valid;
-    // a param whose options pick different kernels: each kernel's configs are searched on their own
     std::optional<size_t> kernel_param;
     std::vector<TuneConfig> configs() const;
 };

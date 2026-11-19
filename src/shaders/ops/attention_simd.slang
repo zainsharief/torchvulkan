@@ -1,7 +1,7 @@
-module attention;
+module attention_simd;
 
 __exported import core.dtype;
-import ops.attention_args;
+import helpers.attention;
 
 [[vk::constant_id(0)]] public const uint MODE = 0;
 [[vk::constant_id(1)]] public const uint WG = 128;
@@ -379,7 +379,7 @@ void attentionBackwardQ<T : ITorchVulkan>(uint3 wg, uint t, AttentionBackwardPus
 
 [shader("compute")]
 [numthreads(WG, 1, 1)]
-void attention_main<T : ITorchVulkan>(
+void attention_simd_main<T : ITorchVulkan>(
     uint3 wg : SV_GroupID,
     uint t : SV_GroupIndex,
     uniform AttentionPushConstants pcs)
@@ -389,7 +389,7 @@ void attention_main<T : ITorchVulkan>(
 
 [shader("compute")]
 [numthreads(WG, 1, 1)]
-void attention_backward_main<T : ITorchVulkan>(
+void attention_simd_backward_main<T : ITorchVulkan>(
     uint3 wg : SV_GroupID,
     uint t : SV_GroupIndex,
     uniform AttentionBackwardPushConstants pcs)
