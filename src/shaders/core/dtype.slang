@@ -793,9 +793,6 @@ public extension<T : __BuiltinIntegerType> T : IDtypeOps
 
     public static T ext_fmax(T a, T b) { return max(a, b); }
     public static T ext_fmin(T a, T b) { return min(a, b); }
-    // The remainder of truncating division, the sign of a's (C's %). Written with a division rather
-    // than %: Vulkan leaves OpSRem and OpSMod undefined when either operand is negative (NVIDIA's
-    // driver returns the unsigned remainder), while OpSDiv is defined for negative operands.
     static T truncRemainder(T a, T b) { return a - (a / b) * b; }
 
     public static T ext_fmod(T a, T b) { if (b == T(0)) return T(0); return truncRemainder(a, b); }
