@@ -810,14 +810,16 @@ public extension<T : __BuiltinIntegerType> T : IDtypeOps
 
     public static T ext_fmax(T a, T b) { return max(a, b); }
     public static T ext_fmin(T a, T b) { return min(a, b); }
-    public static T ext_fmod(T a, T b) { if (b == T(0)) return T(0); return a % b; }
+    static T truncRemainder(T a, T b) { return a - (a / b) * b; }
+
+    public static T ext_fmod(T a, T b) { if (b == T(0)) return T(0); return truncRemainder(a, b); }
 
     // remainder takes the sign of the divisor where fmod takes the dividend's;
     // for unsigned T neither operand is ever negative, so the fixup never fires
     public static T ext_remainder(T a, T b)
     {
         if (b == T(0)) return T(0);
-        T r = a % b;
+        T r = truncRemainder(a, b);
         if (r != T(0) && ((r < T(0)) != (b < T(0)))) r += b;
         return r;
     }
@@ -827,7 +829,7 @@ public extension<T : __BuiltinIntegerType> T : IDtypeOps
     {
         if (b == T(0)) return T(0);
         T q = a / b;
-        if ((a < T(0)) != (b < T(0)) && a % b != T(0)) q -= T(1);
+        if ((a < T(0)) != (b < T(0)) && q * b != a) q -= T(1);
         return q;
     }
 
