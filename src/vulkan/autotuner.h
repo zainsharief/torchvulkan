@@ -32,8 +32,8 @@ struct TuneDispatch
 {
     ShaderKey key{};
     uint32_t subgroupSize = 0;
-    SpecializationBuilder spec;
-    PushConstantBuilder push;
+    SpecializationBuilder spd;
+    PushConstantBuilder pcs;
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;

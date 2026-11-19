@@ -146,7 +146,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
                 span = device->shader_manager->getTimestamp(
                     d.key,
                     d.subgroupSize,
-                    d.spec.build(), d.push.build(),
+                    d.spd.build(), d.pcs.build(),
                     d.read, d.write,
                     d.groupX, d.groupY, d.groupZ
                 );

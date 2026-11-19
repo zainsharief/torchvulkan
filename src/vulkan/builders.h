@@ -8,7 +8,7 @@
 #include <type_traits>
 
 #define MAX_PUSH_CONSTANT_BYTES 128
-#define MAX_SPEC_CONSTANTS 32
+#define MAX_SPEC_CONSTANTS 48
 #define MAX_SPEC_DATA_BYTES 256
 #define MAX_DIMS 64
 #define MAX_METADATA_SECTIONS 8

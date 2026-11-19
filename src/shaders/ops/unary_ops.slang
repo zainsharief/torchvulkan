@@ -56,4 +56,5 @@ public struct DigammaOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T
 public struct I0Op<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_i0(a); } }
 public struct I1Op<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_i1(a); } }
 
-public struct GeluOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.ext_gelu(a); } }
+public struct GeluOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.fromAccum(T.Accum.ext_gelu(a.toAccum())); } }
+public struct GeluTanhOp<T : ITorchVulkan> : IUnaryOp<T> { public static T eval(T a) { return T.fromAccum(T.Accum.ext_gelu_tanh(a.toAccum())); } }

@@ -8,6 +8,7 @@ __exported import ops.unary_ops;
 [[vk::constant_id(2)]] public const uint IS_ALIGNED = 1;
 [[vk::constant_id(3)]] public const uint HAS_BIAS = 0;
 [[vk::constant_id(4)]] public const uint ACTIVATION = 0;
+[[vk::constant_id(5)]] public const uint TILE_M = 128;
 
 public struct TensorStrides
 {
@@ -140,7 +141,6 @@ public struct Activation<T : ITorchVulkan> : IUnaryOp<T>
 public void matmulTile<
     T : __BuiltinArithmeticType,
     let VEC : int,
-    let TILE_M : int,
     A : IMatmulLoader<T>,
     B : IMatmulLoader<T>,
     E : IMatmulEpilogue<T>,
@@ -164,8 +164,12 @@ public void matmulTile<
     const int VECTORS_PER_TILE_ROW_K = TILE_K / VEC;
     const int VECTORS_PER_THREAD_ROW_M = THREAD_SIZE_N / VEC;
 
-    vector<T, VEC> accum[THREAD_SIZE_M * (THREAD_SIZE_N / VEC)];
-    [ForceUnroll] for (int acc = 0; acc < THREAD_SIZE_M * (THREAD_SIZE_N / VEC); ++acc) accum[acc] = vector<T, VEC>(T(0));
+    // 2D: Slang can't emit an array size that multiplies the TILE_M spec constant by VEC
+    vector<T, VEC> accum[THREAD_SIZE_M][THREAD_SIZE_N / VEC];
+    [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i)
+    {
+        [unroll] for (int j = 0; j < THREAD_SIZE_N / VEC; ++j) accum[i][j] = vector<T, VEC>(T(0));
+    }
 
     uint thread_idx = li.y * WG_x + li.x;
     uint threads = WG_x * WG_y;
@@ -269,7 +273,7 @@ public void matmulTile<
 
                 [unroll] for (int j = 0; j < THREAD_SIZE_N / VEC; ++j)
                 {
-                    accum[i * VECTORS_PER_THREAD_ROW_M + j] += b_frag[j] * a_val;
+                    accum[i][j] += b_frag[j] * a_val;
                 }
             }
         }
@@ -288,7 +292,7 @@ public void matmulTile<
         [unroll] for (int j_vec = 0; j_vec < VECTORS_PER_THREAD_ROW_M; ++j_vec)
         {
             uint g_col_base = global_col_start + (j_vec * VEC);
-            vector<T, VEC> result_vec = accum[i * VECTORS_PER_THREAD_ROW_M + j_vec];
+            vector<T, VEC> result_vec = accum[i][j_vec];
 
             if (IS_ALIGNED == 1)
             {
@@ -318,7 +322,7 @@ public void matmulTile<
 
 [shader("compute")]
 [numthreads(WG_x, WG_y, 1)]
-void matmul_simd_main<T : ITorchVulkan, let VEC : int, let TILE_M : int>(
+void matmul_simd_main<T : ITorchVulkan, let VEC : int>(
     uint3 li : SV_GroupThreadID,
     uint3 wg : SV_GroupID,
     uniform MatmulPushConstants<T.Accum> pcs)
@@ -335,6 +339,6 @@ void matmul_simd_main<T : ITorchVulkan, let VEC : int, let TILE_M : int>(
     AccumMatrix<T> out = AccumMatrix<T>(pcs.tensor_out, pcs.strides_C);
     Epilogue epilogue = Epilogue(pcs.alpha, pcs.beta, bias);
 
-    matmulTile<Acc, VEC, TILE_M, AccumMatrix<T>, AccumMatrix<T>, Epilogue, AccumMatrix<T>>(
+    matmulTile<Acc, VEC, AccumMatrix<T>, AccumMatrix<T>, Epilogue, AccumMatrix<T>>(
         li, wg, wg.z, smemA, smemB, a, b, epilogue, out, pcs.M, pcs.N, pcs.K);
 }

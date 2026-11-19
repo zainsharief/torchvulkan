@@ -82,7 +82,9 @@ class Entry:
 class Kernel:
     name: str
     module: str # path relative to src/shaders
-    entries: list 
+    entries: list
+    coop_dims: tuple = None # (spec constant id, placeholder) that scripts/splice_coop_dims.py swaps into CoopMat dimensions
+    defines: tuple = () # preprocessor macros, so one module can build several kernels
 
 
 KERNELS = [
@@ -124,6 +126,15 @@ KERNELS = [
     ]),
     Kernel('scan_arg', 'ops/scan_arg.slang', [
         Entry('scan_arg_main', DTYPES),
+    ]),
+    Kernel('norm', 'ops/norm.slang', [
+        Entry('norm_main', FLOATS),
+    ]),
+    Kernel('attention', 'ops/attention.slang', [
+        Entry('attention_main', FLOATS),
+    ]),
+    Kernel('attention_backward', 'ops/attention.slang', [
+        Entry('attention_backward_main', FLOATS),
     ]),
     Kernel('nllloss', 'ops/nllloss.slang', [
         Entry('nllloss_main', FLOATS),
@@ -191,30 +202,30 @@ KERNELS = [
     Kernel('cast', 'ops/cast.slang', [
         Entry('cast_main', DTYPES, ('vec',), pairwise=True),
     ]),
-    Kernel('matmul_simd_128', 'ops/matmul_simd.slang', [
-        Entry('matmul_simd_main', [d for d in DTYPES if d.bytes < 8], ('vec',), constants=(128,)),
+    Kernel('matmul_simd', 'ops/matmul_simd.slang', [
+        Entry('matmul_simd_main', DTYPES, ('vec',)),
     ]),
-    Kernel('matmul_simd_64', 'ops/matmul_simd.slang', [
-        Entry('matmul_simd_main', DTYPES, ('vec',), constants=(64,)),
+    Kernel('conv', 'ops/conv.slang', [
+        Entry('conv_main', FLOATS, ('vec',)),
     ]),
-    Kernel('conv_128', 'ops/conv.slang', [
-        Entry('conv_main', [d for d in FLOATS if d.bytes < 8], ('vec',), constants=(128,)),
+    Kernel('winograd', 'ops/winograd.slang', [
+        Entry('winograd_main', FLOATS),
     ]),
-    Kernel('conv_64', 'ops/conv.slang', [
-        Entry('conv_main', FLOATS, ('vec',), constants=(64,)),
-    ]),
-    Kernel('matmul_coop_8', 'ops/matmul_coop.slang', [
-        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(8,)),
-    ]),
-    Kernel('matmul_coop_16', 'ops/matmul_coop.slang', [
-        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(16,)),
-    ]),
-    Kernel('matmul_coop_32', 'ops/matmul_coop.slang', [
-        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(32,)),
-    ]),
-    Kernel('matmul_coop_64', 'ops/matmul_coop.slang', [
-        Entry('matmul_coop_main', DTYPES, ('vec',), constants=(64,)),
-    ]),
+    Kernel('matmul_coop', 'ops/matmul_coop.slang', [
+        Entry('matmul_coop_main', DTYPES, ('vec',)),
+    ], coop_dims=(18, 1009)), # BLOCK_SIZE, COOP_DIM in matmul_coop.slang
+    Kernel('conv_coop', 'ops/conv.slang', [
+        Entry('conv_main', FLOATS, ('vec',)),
+    ], coop_dims=(18, 1009), defines=('COOPMAT',)),
+    Kernel('attention_coop', 'ops/attention_coop.slang', [
+        Entry('attention_coop_main', FLOATS),
+    ], coop_dims=(11, 1009)), # BLOCK_SIZE, COOP_DIM in attention_coop.slang
+    Kernel('attention_coop_backward', 'ops/attention_coop.slang', [
+        Entry('attention_coop_backward_main', FLOATS),
+    ], coop_dims=(11, 1009)),
+    Kernel('winograd_coop', 'ops/winograd.slang', [
+        Entry('winograd_main', FLOATS),
+    ], coop_dims=(18, 1009), defines=('COOPMAT',)),
     Kernel('random', 'ops/random.slang', [
         Entry('random_main', DTYPES, ('vec',)),
     ]),

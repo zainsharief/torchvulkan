@@ -63,6 +63,27 @@ static VkResult loadVulkan()
     return volkInitialize();
 }
 
+inline constexpr VkComponentTypeKHR COMPONENT_TYPE_BFLOAT16 = static_cast<VkComponentTypeKHR>(1000141000);
+
+static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
+{
+    switch (type) {
+        case VK_COMPONENT_TYPE_FLOAT16_KHR: return at::ScalarType::Half;
+        case VK_COMPONENT_TYPE_FLOAT32_KHR: return at::ScalarType::Float;
+        case VK_COMPONENT_TYPE_FLOAT64_KHR: return at::ScalarType::Double;
+        case COMPONENT_TYPE_BFLOAT16:       return at::ScalarType::BFloat16;
+        case VK_COMPONENT_TYPE_SINT8_KHR:   return at::ScalarType::Char;
+        case VK_COMPONENT_TYPE_SINT16_KHR:  return at::ScalarType::Short;
+        case VK_COMPONENT_TYPE_SINT32_KHR:  return at::ScalarType::Int;
+        case VK_COMPONENT_TYPE_SINT64_KHR:  return at::ScalarType::Long;
+        case VK_COMPONENT_TYPE_UINT8_KHR:   return at::ScalarType::Byte;
+        case VK_COMPONENT_TYPE_UINT16_KHR:  return at::ScalarType::UInt16;
+        case VK_COMPONENT_TYPE_UINT32_KHR:  return at::ScalarType::UInt32;
+        case VK_COMPONENT_TYPE_UINT64_KHR:  return at::ScalarType::UInt64;
+        default:                            return at::ScalarType::Undefined;
+    }
+}
+
 static std::atomic<bool> contextInitialized{false};
 static std::atomic<bool> inBadFork{false};
 static std::atomic<uint64_t> validationErrors{0};
@@ -461,8 +482,11 @@ void VulkanContext::createDeviceWithExtensions()
                                      property.CType == COMPONENT_TYPE_BFLOAT16 || property.ResultType == COMPONENT_TYPE_BFLOAT16;
                 if (uses_bfloat16 && !device->support_bfloat16_coopmat) continue;
 
-                CoopMatConfig config{property.MSize, property.NSize, property.KSize};
-                device->cache.addCoopMatConfig(property.AType, property.BType, property.CType, property.ResultType, config);
+                device->coopmat_shapes.push_back({
+                    coop_component_to_scalar(property.AType), coop_component_to_scalar(property.BType),
+                    coop_component_to_scalar(property.CType), coop_component_to_scalar(property.ResultType),
+                    property.MSize, property.NSize, property.KSize
+                });
             }
         }
 
