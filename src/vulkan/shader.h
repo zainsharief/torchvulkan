@@ -8,8 +8,10 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -98,8 +100,13 @@ public:
         const PushConstants& pushConstants,
         at::TensorList readTensors,
         at::TensorList writeTensors,
-        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ,
+        uint32_t runs = TIMESTAMP_RUNS
     );
+
+    // builds the pipeline without recording anything; safe to call from several threads. Returns
+    // whether it had to be built
+    bool prepare(ShaderKey key, uint32_t subgroupSize, const SpecializationArgs& specConstants);
 
     bool supportsTimestamps() const { return timestampValidBits > 0; }
     uint32_t resolveBinary(ShaderKey key) const;
@@ -152,7 +159,10 @@ private:
     ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     VkShaderModule allocateShaderModule(uint32_t binary);
     
-    VkPipeline createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
+    std::set<std::tuple<uint32_t, uint32_t, std::string>> compiling_; // (binary, subgroup size, spec key) being built
+    std::condition_variable compiled_;
+
+    VkPipeline createPipeline(uint32_t binary, VkShaderModule shaderModule, uint32_t subgroupSize, const SpecializationArgs& spec);
     void displayPipelineStatistics(VkPipeline pipeline);
     void clearCache();
 };
