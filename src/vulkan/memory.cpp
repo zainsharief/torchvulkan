@@ -56,9 +56,15 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     bdaInfo.buffer = buffer_;
     bufferAddress_ = owner_->device_table.vkGetBufferDeviceAddress(owner_->device, &bdaInfo);
 
+    owner_->trackBuffer(this);
     return result;
 }
 
 void VulkanBuffer::invalidate() { vmaInvalidateAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }
 void VulkanBuffer::flush() { vmaFlushAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }
-VulkanBuffer::~VulkanBuffer() { if (buffer_ != VK_NULL_HANDLE) vmaDestroyBuffer(owner_->allocator, buffer_, allocation_); }
+VulkanBuffer::~VulkanBuffer()
+{
+    if (buffer_ == VK_NULL_HANDLE) return;
+    owner_->untrackBuffer(this);
+    vmaDestroyBuffer(owner_->allocator, buffer_, allocation_);
+}

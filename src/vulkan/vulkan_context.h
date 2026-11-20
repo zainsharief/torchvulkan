@@ -29,11 +29,16 @@ public:
     bool strictAllocationEnabled() { return strictAllocation_; }
     static uint64_t ValidationErrorCount();
     static bool IsInBadFork();
+    static bool IsShutDown();
     static bool IsInitialized();
+    // schedules the teardown at exit, late enough to run before any layer's own cleanup (torchvulkan
+    // calls it from Python's atexit); no-op on Windows
+    static void Shutdown();
 
 private:
     VulkanContext();
     ~VulkanContext();
+    static void ShutdownAtExit();
 
     void initVulkan();
     void createDeviceContexts();

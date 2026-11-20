@@ -89,14 +89,40 @@ void DeviceContext::recordFree(size_t bytes)
     total_freed_bytes.fetch_add(bytes);
 }
 
+void DeviceContext::trackBuffer(VulkanBuffer* buffer)
+{
+    std::lock_guard<std::mutex> lock(live_mutex);
+    live_buffers.insert(buffer);
+}
+
+void DeviceContext::untrackBuffer(VulkanBuffer* buffer)
+{
+    std::lock_guard<std::mutex> lock(live_mutex);
+    live_buffers.erase(buffer);
+}
+
 DeviceContext::~DeviceContext()
 {
+    // finish in-flight work before freeing anything it may still use
+    if (device != VK_NULL_HANDLE) device_table.vkDeviceWaitIdle(device);
+
     delete tuner;
     tuner = nullptr;
     delete shader_manager;
     shader_manager = nullptr;
 
     cache.clear();
+
+    // Buffers still alive here belong to tensors Python never freed: interpreter shutdown doesn't free every object,
+    // and a daemon thread (ComfyUI's prompt worker) keeps its frame's tensors until the process ends. Vulkan requires
+    // a device's child objects to be destroyed before the device (VUID-vkDestroyDevice-device-05137) and VMA every
+    // allocation before the allocator, so destroy them; their deleters return early once the context is shut down.
+    std::unordered_set<VulkanBuffer*> leftover;
+    {
+        std::lock_guard<std::mutex> lock(live_mutex);
+        leftover.swap(live_buffers);
+    }
+    for (VulkanBuffer* buffer : leftover) delete buffer;
 
     if (commandPool != VK_NULL_HANDLE) device_table.vkDestroyCommandPool(device, commandPool, nullptr);
     if (allocator != VK_NULL_HANDLE) vmaDestroyAllocator(allocator);

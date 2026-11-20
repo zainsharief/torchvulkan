@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef __APPLE__
@@ -88,6 +89,8 @@ static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
 
 static std::atomic<bool> contextInitialized{false};
 static std::atomic<bool> inBadFork{false};
+static std::atomic<bool> contextShutDown{false};
+static std::atomic<VulkanContext*> contextInstance{nullptr};
 static std::atomic<uint64_t> validationErrors{0};
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
@@ -119,21 +122,42 @@ static int deviceTypeRank(VkPhysicalDeviceType type)
 #ifndef _WIN32
 // a forked child shares the parent's driver state, which is not valid in the child
 static void markForkedChild() { inBadFork = contextInitialized.load(); }
+
+// Destroys the devices and the instance at process exit, from C's atexit: after Python has
+// finalised (tensors are freed by then) and before the shared libraries are unloaded. Without it the
+// VkDevice outlives the process: NVIDIA's Linux driver keeps worker threads running while a device
+// exists ("[vkps] Update"), and they crash once exit unloads the driver underneath them. A forked
+// child leaves the parent's driver state alone.
+void VulkanContext::ShutdownAtExit()
+{
+    if (inBadFork) return;
+    VulkanContext* context = contextInstance.exchange(nullptr);
+    if (context == nullptr) return;
+    contextShutDown = true;
+    delete context;
+}
 #endif
 
-VulkanContext& VulkanContext::Instance() 
+VulkanContext& VulkanContext::Instance()
 {
-    TORCH_CHECK(!inBadFork, 
+    TORCH_CHECK(!inBadFork,
         "torchvulkan [ERROR]: Cannot use Vulkan in a forked subprocess after the parent process initialised it. "
         "Use the 'spawn' start method (e.g. multiprocessing_context='spawn' for a DataLoader)."
     );
+    TORCH_CHECK(!contextShutDown, "torchvulkan [ERROR]: Vulkan was used after the process began shutting down.");
 
     static VulkanContext* vulkanContextInstance = []() {
 #ifndef _WIN32
         pthread_atfork(nullptr, nullptr, markForkedChild);
 #endif
         VulkanContext* context = new VulkanContext();
+        contextInstance = context;
         contextInitialized = true;
+#ifndef _WIN32
+        // not on Windows: there atexit in a DLL runs during DLL unload, where calling into the
+        // driver is unsafe, and the driver does not crash at exit
+        std::atexit(ShutdownAtExit);
+#endif
         return context;
     }();
     return *vulkanContextInstance;
@@ -640,9 +664,29 @@ bool VulkanContext::IsInBadFork()
     return inBadFork;
 }
 
+bool VulkanContext::IsShutDown()
+{
+    return contextShutDown;
+}
+
 bool VulkanContext::IsInitialized()
 {
     return contextInitialized;
+}
+
+// Called from Python's atexit, while the interpreter is finalising: registers ShutdownAtExit with C's
+// atexit again, now that every layer has built its state. C runs exit handlers newest first, so the
+// teardown then runs before anything a layer registered for its own cleanup, and still after Python
+// has freed the tensors. The registration made when the context was created runs too late on its
+// own: the validation layer builds its device state after it, so exit destroyed that state first and
+// vkDeviceWaitIdle crashed inside the layer. It stays as a fallback and then finds nothing to do.
+void VulkanContext::Shutdown()
+{
+#ifndef _WIN32
+    static bool scheduled = false;
+    if (!scheduled) std::atexit(ShutdownAtExit);
+    scheduled = true;
+#endif
 }
 
 void VulkanContext::createGenerators()
