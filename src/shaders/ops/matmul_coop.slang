@@ -59,7 +59,7 @@ vector<T, VEC> zeroVector<T : ITorchVulkan, let VEC : int>()
     return v;
 }
 
-vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k)
+vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k, bool full)
 {
     T* tensor_a = (T*)pcs.tensor_a;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -67,10 +67,13 @@ vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopT
     {
         uint kk = k + i / (SMEM_ROWS_A / VEC);
         uint m = tile.tile_m + (i % (SMEM_ROWS_A / VEC)) * VEC;
-        if (kk >= pcs.k_dim) return v;
-        uint base = tile.batch_offset_a + kk * pcs.strides_a.col;
-        if (A_VEC_ALIGNED == 1 && (M_ALIGNED == 1 || m + VEC <= pcs.m_dim)) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_a + (base + m) / VEC);
-        [unroll] for (uint e = 0; e < VEC; ++e) v[e] = tensor_a[base + min(m + e, pcs.m_dim - 1) * pcs.strides_a.row];
+        uint base = tile.batch_offset_a + min(kk, pcs.k_dim - 1) * pcs.strides_a.col;
+        if (full && A_VEC_ALIGNED == 1 && (M_ALIGNED == 1 || tile.tile_m + SMEM_ROWS_A <= pcs.m_dim)) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_a + (base + m) / VEC);
+        [unroll] for (uint e = 0; e < VEC; ++e)
+        {
+            T loaded = tensor_a[base + min(m + e, pcs.m_dim - 1) * pcs.strides_a.row];
+            if (kk < pcs.k_dim) v[e] = loaded;
+        }
         return v;
     }
 
@@ -78,15 +81,16 @@ vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopT
     uint kk = k + (i % (BK / VEC)) * VEC;
     if (M_ALIGNED == 0) m = min(m, pcs.m_dim - 1);
     uint base = tile.batch_offset_a + m * pcs.strides_a.row;
-    if (A_VEC_ALIGNED == 1 && kk + VEC <= pcs.k_dim) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_a + (base + kk) / VEC);
+    if (full && A_VEC_ALIGNED == 1) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_a + (base + kk) / VEC);
     [unroll] for (uint e = 0; e < VEC; ++e)
     {
-        if (kk + e < pcs.k_dim) v[e] = tensor_a[base + (kk + e) * pcs.strides_a.col];
+        T loaded = tensor_a[base + min(kk + e, pcs.k_dim - 1) * pcs.strides_a.col];
+        if (kk + e < pcs.k_dim) v[e] = loaded;
     }
     return v;
 }
 
-vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k)
+vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k, bool full)
 {
     T* tensor_b = (T*)pcs.tensor_b;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -96,35 +100,40 @@ vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopT
         uint kk = k + (i % (BK / VEC)) * VEC;
         if (N_ALIGNED == 0) n = min(n, pcs.n_dim - 1);
         uint base = tile.batch_offset_b + n * pcs.strides_b.col;
-        if (B_VEC_ALIGNED == 1 && kk + VEC <= pcs.k_dim) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_b + (base + kk) / VEC);
+        if (full && B_VEC_ALIGNED == 1) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_b + (base + kk) / VEC);
         [unroll] for (uint e = 0; e < VEC; ++e)
         {
-            if (kk + e < pcs.k_dim) v[e] = tensor_b[base + (kk + e) * pcs.strides_b.row];
+            T loaded = tensor_b[base + min(kk + e, pcs.k_dim - 1) * pcs.strides_b.row];
+            if (kk + e < pcs.k_dim) v[e] = loaded;
         }
         return v;
     }
 
     uint kk = k + i / (SMEM_COLS_B / VEC);
     uint n = tile.tile_n + (i % (SMEM_COLS_B / VEC)) * VEC;
-    if (kk >= pcs.k_dim) return v;
-    uint base = tile.batch_offset_b + kk * pcs.strides_b.row;
-    if (B_VEC_ALIGNED == 1 && (N_ALIGNED == 1 || n + VEC <= pcs.n_dim)) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_b + (base + n) / VEC);
-    [unroll] for (uint e = 0; e < VEC; ++e) v[e] = tensor_b[base + min(n + e, pcs.n_dim - 1) * pcs.strides_b.col];
+    uint base = tile.batch_offset_b + min(kk, pcs.k_dim - 1) * pcs.strides_b.row;
+    if (full && B_VEC_ALIGNED == 1 && (N_ALIGNED == 1 || tile.tile_n + SMEM_COLS_B <= pcs.n_dim)) return loadAligned<VEC * sizeof(T)>((vector<T, VEC>*)tensor_b + (base + n) / VEC);
+    [unroll] for (uint e = 0; e < VEC; ++e)
+    {
+        T loaded = tensor_b[base + min(n + e, pcs.n_dim - 1) * pcs.strides_b.col];
+        if (kk < pcs.k_dim) v[e] = loaded;
+    }
     return v;
 }
 
 void loadTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
     uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B])
 {
+    bool full = k + BK <= pcs.k_dim;
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
         uint i = ti + j * WORKGROUP_SIZE;
-        if (i < SMEM_ROWS_A * BK / VEC) regA[j] = loadVectorA<T, VEC>(tile, pcs, i, k);
+        if (i < SMEM_ROWS_A * BK / VEC) regA[j] = loadVectorA<T, VEC>(tile, pcs, i, k, full);
     }
     [unroll] for (uint j = 0; j < LOADS_B; ++j)
     {
         uint i = ti + j * WORKGROUP_SIZE;
-        if (i < BK * SMEM_COLS_B / VEC) regB[j] = loadVectorB<T, VEC>(tile, pcs, i, k);
+        if (i < BK * SMEM_COLS_B / VEC) regB[j] = loadVectorB<T, VEC>(tile, pcs, i, k, full);
     }
 }
 
@@ -309,12 +318,9 @@ void accumulateDirect<T : ITorchVulkan & ICoopElement>(
         uint r = i / BK;
         uint c = i % BK;
         uint a_row = (M_ALIGNED == 1 ? (tile.tile_m + r) : min(tile.tile_m + r, pcs.m_dim - 1));
+        T loaded = tensor_a[tile.batch_offset_a + a_row * pcs.strides_a.row + min(k + c, pcs.k_dim - 1) * pcs.strides_a.col];
         T val = T.ext_zero();
-        if ((k + c) < pcs.k_dim)
-        {
-            uint global_idx = tile.batch_offset_a + a_row * pcs.strides_a.row + (k + c) * pcs.strides_a.col;
-            val = tensor_a[global_idx];
-        }
+        if (k + c < pcs.k_dim) val = loaded;
         Shared<T>.smemA[r * BK + c] = val;
     }
 
@@ -323,12 +329,9 @@ void accumulateDirect<T : ITorchVulkan & ICoopElement>(
         uint r = i / smem_b_cols;
         uint c = i % smem_b_cols;
         uint b_col = (N_ALIGNED == 1 ? (tile.tile_n + c) : min(tile.tile_n + c, pcs.n_dim - 1));
+        T loaded = tensor_b[tile.batch_offset_b + min(k + r, pcs.k_dim - 1) * pcs.strides_b.row + b_col * pcs.strides_b.col];
         T val = T.ext_zero();
-        if ((k + r) < pcs.k_dim)
-        {
-            uint global_idx = tile.batch_offset_b + (k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
-            val = tensor_b[global_idx];
-        }
+        if (k + r < pcs.k_dim) val = loaded;
         Shared<T>.smemB[r * smem_b_cols + c] = val;
     }
 
