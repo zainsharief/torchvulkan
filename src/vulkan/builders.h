@@ -115,20 +115,23 @@ public:
         return *this;
     }
 
+    // 8- and 16-bit scalars are pushed widened to 32 bits, matching T.PushScalar in core/dtype.slang:
+    // storagePushConstant8/16 are optional and AMD's Windows driver for RDNA2 supports neither.
+    // Half and bfloat16 are rounded to their own type first, so the shader sees the same value.
     // floating dtypes cast as the CPU's TensorIterator casts a wrapped double: out of range is inf, not an error
     PushConstantBuilder& push_scalar(const at::Scalar& value, at::ScalarType dtype)
     {
         bool real_float = value.isFloatingPoint() || value.isIntegral(/*includeBool=*/false);
         switch (dtype) {
-            case at::kByte: push(value.to<uint8_t>()); break;
-            case at::kChar: push(value.to<int8_t>()); break;
-            case at::kShort: push(value.to<int16_t>()); break;
+            case at::kByte: push(static_cast<uint32_t>(value.to<uint8_t>())); break;
+            case at::kChar: push(static_cast<int32_t>(value.to<int8_t>())); break;
+            case at::kShort: push(static_cast<int32_t>(value.to<int16_t>())); break;
             case at::kInt: push(value.to<int32_t>()); break;
             case at::kLong: push(value.to<int64_t>()); break;
-            case at::kBool: push(value.to<bool>()); break;
-            case at::kHalf: push(real_float ? c10::Half(static_cast<float>(value.toDouble())) : value.to<c10::Half>()); break;
-            case at::kBFloat16: push(real_float ? c10::BFloat16(static_cast<float>(value.toDouble())) : value.to<c10::BFloat16>()); break;
-            case at::ScalarType::UInt16: push(value.to<uint16_t>()); break;
+            case at::kBool: push(static_cast<uint32_t>(value.to<bool>())); break;
+            case at::kHalf: push(static_cast<float>(real_float ? c10::Half(static_cast<float>(value.toDouble())) : value.to<c10::Half>())); break;
+            case at::kBFloat16: push(static_cast<float>(real_float ? c10::BFloat16(static_cast<float>(value.toDouble())) : value.to<c10::BFloat16>())); break;
+            case at::ScalarType::UInt16: push(static_cast<uint32_t>(value.to<uint16_t>())); break;
             case at::ScalarType::UInt32: push(value.to<uint32_t>()); break;
             case at::ScalarType::UInt64: push(value.to<uint64_t>()); break;
             case at::kDouble: push(value.to<double>()); break;
@@ -140,16 +143,17 @@ public:
     }
 
     // a scalar operand (a wrapped Python number) converts as a tensor element does: an integer wraps, as static_cast does
+    // (8- and 16-bit results widened to 32 bits, as in push_scalar)
     PushConstantBuilder& push_operand_scalar(const at::Scalar& value, at::ScalarType dtype)
     {
         if (!at::isIntegralType(dtype, /*includeBool=*/false) || !value.isIntegral(/*includeBool=*/false)) return push_scalar(value, dtype);
         int64_t v = value.type() == at::ScalarType::UInt64 ? static_cast<int64_t>(value.to<uint64_t>()) : value.toLong();
         switch (dtype) {
-            case at::kByte: push(static_cast<uint8_t>(v)); break;
-            case at::kChar: push(static_cast<int8_t>(v)); break;
-            case at::kShort: push(static_cast<int16_t>(v)); break;
+            case at::kByte: push(static_cast<uint32_t>(static_cast<uint8_t>(v))); break;
+            case at::kChar: push(static_cast<int32_t>(static_cast<int8_t>(v))); break;
+            case at::kShort: push(static_cast<int32_t>(static_cast<int16_t>(v))); break;
             case at::kInt: push(static_cast<int32_t>(v)); break;
-            case at::ScalarType::UInt16: push(static_cast<uint16_t>(v)); break;
+            case at::ScalarType::UInt16: push(static_cast<uint32_t>(static_cast<uint16_t>(v))); break;
             case at::ScalarType::UInt32: push(static_cast<uint32_t>(v)); break;
             case at::ScalarType::UInt64: push(static_cast<uint64_t>(v)); break;
             default: push(v); break;

@@ -17,14 +17,14 @@ public struct Metadata
     public uint64_t strides_out;
 }
 
-public struct ComparePushConstants<T>
+public struct ComparePushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor_a;
     public uint64_t tensor_b;
     public uint64_t tensor_out;
     public uint64_t metadata;
     public uint64_t numel;
-    public T scalar_value;
+    public T.PushScalar scalar_value;
 }
 
 public interface ICompareOp<T>
@@ -122,17 +122,18 @@ public void baseCompareKernel<T : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE
 
 public void dispatchCompare<T : ITorchVulkan, let VEC_SIZE : int>(uint3 gi, ComparePushConstants<T> pcs)
 {
+    T scalar_value = T.fromPushScalar(pcs.scalar_value);
     switch (OP_TYPE)
     {
-    case 0: baseCompareKernel<T, EqOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 1: baseCompareKernel<T, NeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 2: baseCompareKernel<T, LtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 3: baseCompareKernel<T, LeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 4: baseCompareKernel<T, GtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 5: baseCompareKernel<T, GeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 6: baseCompareKernel<T, LogicalAndOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 7: baseCompareKernel<T, LogicalOrOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
-    case 8: baseCompareKernel<T, LogicalXorOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.scalar_value); break;
+    case 0: baseCompareKernel<T, EqOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 1: baseCompareKernel<T, NeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 2: baseCompareKernel<T, LtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 3: baseCompareKernel<T, LeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 4: baseCompareKernel<T, GtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 5: baseCompareKernel<T, GeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 6: baseCompareKernel<T, LogicalAndOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 7: baseCompareKernel<T, LogicalOrOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 8: baseCompareKernel<T, LogicalXorOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
     default: break;
     }
 }

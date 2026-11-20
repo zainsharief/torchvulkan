@@ -1,6 +1,7 @@
 module integer_binary;
 
 import core.indexing;
+import core.dtype;
 
 [[vk::constant_id(0)]] public const uint OP_TYPE = 0;
 [[vk::constant_id(1)]] public const uint IS_CONTIG = 0;
@@ -16,14 +17,14 @@ public struct Metadata
     public uint64_t strides_out;
 }
 
-public struct IntegerBinaryPushConstants<T>
+public struct IntegerBinaryPushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor_a;
     public uint64_t tensor_b;
     public uint64_t tensor_out;
     public uint64_t metadata;
     public uint64_t numel;
-    public T scalar_value;
+    public T.PushScalar scalar_value;
 }
 
 bool isSigned<T : __BuiltinIntegerType>() { return T(-1) < T(0); }
@@ -83,7 +84,7 @@ T evalIntegerBinary<T : __BuiltinIntegerType>(T a, T b)
     }
 }
 
-public void integerBinaryKernel<T : __BuiltinIntegerType>(uint3 gi, IntegerBinaryPushConstants<T> pcs)
+public void integerBinaryKernel<T : __BuiltinIntegerType & ITorchVulkan>(uint3 gi, IntegerBinaryPushConstants<T> pcs)
 {
     uint idx = flat_thread(gi, WG_x);
     if (idx >= pcs.numel) return;
@@ -117,14 +118,14 @@ public void integerBinaryKernel<T : __BuiltinIntegerType>(uint3 gi, IntegerBinar
         }
     }
 
-    T b = pcs.scalar_value;
+    T b = T.fromPushScalar(pcs.scalar_value);
     if (USE_SCALAR == 0) b = tensor_b[idx_b];
     tensor_out[idx_out] = evalIntegerBinary<T>(tensor_a[idx_a], b);
 }
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void integer_binary_main<T : __BuiltinIntegerType>(
+void integer_binary_main<T : __BuiltinIntegerType & ITorchVulkan>(
     uint3 gi : SV_DispatchThreadID,
     uniform IntegerBinaryPushConstants<T> pcs)
 {

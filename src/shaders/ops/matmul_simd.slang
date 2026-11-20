@@ -2,7 +2,7 @@ module matmul_simd;
 
 import helpers.gemm_simd;
 
-struct MatmulPushConstants<T>
+struct MatmulPushConstants<T : ITorchVulkan>
 {
     uint64_t tensor_a;
     uint64_t tensor_b;
@@ -16,8 +16,8 @@ struct MatmulPushConstants<T>
     uint N;
     uint K;
     uint padding;
-    T alpha;
-    T beta;
+    T.PushScalar alpha;
+    T.PushScalar beta;
 }
 
 [shader("compute")]
@@ -37,7 +37,7 @@ void matmul_simd_main<T : ITorchVulkan, let VEC : int>(
     AccumMatrix<T> b = AccumMatrix<T>(pcs.tensor_b, pcs.strides_B);
     AccumMatrix<T> bias = AccumMatrix<T>(pcs.tensor_bias, pcs.strides_bias);
     AccumMatrix<T> out = AccumMatrix<T>(pcs.tensor_out, pcs.strides_C);
-    Epilogue epilogue = Epilogue(pcs.alpha, pcs.beta, bias);
+    Epilogue epilogue = Epilogue(Acc.fromPushScalar(pcs.alpha), Acc.fromPushScalar(pcs.beta), bias);
 
     matmulTile<Acc, VEC, AccumMatrix<T>, AccumMatrix<T>, Epilogue, AccumMatrix<T>>(
         li, wg, wg.z, smemA, smemB, a, b, epilogue, out, pcs.M, pcs.N, pcs.K);
