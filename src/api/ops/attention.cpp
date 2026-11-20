@@ -422,6 +422,30 @@ double merge_ns(const Attention& a, int64_t splits)
     return cache.emplace(key, ns).first->second;
 }
 
+// The SIMD kernels stage whole query and key/value rows in shared memory, so past a 128-wide head their tiles shrink
+// until they reread keys and values far more often than the matmul-based path: on an RX 6800 XT (RADV, 64 KiB) the
+// fused forward is 2x slower at D=256 and 3x at 320-496, and the backward 20x at D=512. PyTorch likewise stops
+// flash attention at 256 and runs larger heads on its math path. So use chunked_forward/chunked_backward for those
+// heads unless a cooperative-matrix tile of at least 16 rows fits.
+constexpr int64_t SIMD_MAX_FUSED_HEAD = 128;
+
+bool prefer_chunked(const Attention& a, DeviceContext* device, AttentionMode mode)
+{
+    if (std::max(a.D, a.Dv) <= SIMD_MAX_FUSED_HEAD) return false;
+    std::vector<uint32_t> blocks = coop_block_sizes(device, a.dtype, a.accumulate);
+    if (mode != AttentionMode::FORWARD) return blocks.empty();
+    const auto& limits = device->properties.limits;
+    size_t t_bytes = c10::elementSize(a.dtype);
+    size_t a_bytes = c10::elementSize(a.accumulate);
+    for (uint32_t b : blocks) {
+        uint64_t br = std::max<uint64_t>(16, b);
+        uint64_t Dp = round_up(a.D, b);
+        uint64_t Dvp = round_up(a.Dv, b);
+        if (t_bytes * coop_shared_t(br, br, Dp, Dvp) + a_bytes * coop_shared_a(br, br, Dvp, 64) <= limits.maxComputeSharedMemorySize) return false;
+    }
+    return true;
+}
+
 std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
 {
     DeviceContext* device = get_device_context(a.q);
@@ -432,6 +456,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     if (a.k.stride(3) != 1) a.k = a.k.contiguous();
     if (a.v.stride(3) != 1) a.v = a.v.contiguous();
     if (!fused_shapes_fit(a, device)) return std::nullopt;
+    if (prefer_chunked(a, device, AttentionMode::FORWARD)) return std::nullopt;
 
     at::Tensor out = attention_output(a);
     at::Tensor lse = at::empty({a.B, a.Hq, a.L}, a.q.options().dtype(a.accumulate));
@@ -683,6 +708,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> fused_backward(
     a.k = a.k.contiguous();
     a.v = a.v.contiguous();
     if (!fused_shapes_fit(a, device)) return std::nullopt;
+    if (prefer_chunked(a, device, AttentionMode::BACKWARD_KV)) return std::nullopt;
 
     at::Tensor dout = grad_out.to(a.dtype).contiguous();
     at::Tensor stats = lse.to(a.accumulate).contiguous();
