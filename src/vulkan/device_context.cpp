@@ -34,11 +34,19 @@ bool DeviceContext::releaseCachedBuffers(size_t size, MemoryUsage usage)
     size_t budget = memoryBudget();
     size_t driver = driverBudget();
 
-    // on unified memory staging buffers share the heap, so once the requested pool is empty free the other one too
-    MemoryUsage other = usage == MemoryUsage::DEVICE_ONLY ? MemoryUsage::HOST_TO_DEVICE : MemoryUsage::DEVICE_ONLY;
+    // on unified memory staging buffers share the heap, so once the requested pool is empty free the other ones too
+    // (uploads and downloads have separate pools)
+    const MemoryUsage pools[] = {MemoryUsage::DEVICE_ONLY, MemoryUsage::HOST_TO_DEVICE, MemoryUsage::DEVICE_TO_HOST};
+    auto releaseOne = [&]() {
+        if (cache.releaseOldestBuffer(usage)) return true;
+        for (MemoryUsage pool : pools) {
+            if (pool != usage && cache.releaseOldestBuffer(pool)) return true;
+        }
+        return false;
+    };
     bool freed = false;
     while (size > budget || memoryUsage() > budget - size) {
-        if (!cache.releaseOldestBuffer(usage) && !cache.releaseOldestBuffer(other)) break; // cache empty
+        if (!releaseOne()) break; // cache empty
         freed = true;
     }
 
