@@ -4,6 +4,8 @@
 #include <volk.h>
 
 #include <atomic>
+#include <mutex>
+#include <unordered_set>
 
 #include "vk_mem_alloc.h"
 #include "cache.h"
@@ -70,8 +72,13 @@ struct DeviceContext {
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();
+    // every VulkanBuffer created on this device and not yet destroyed, so teardown can destroy the ones still alive
+    void trackBuffer(VulkanBuffer* buffer);
+    void untrackBuffer(VulkanBuffer* buffer);
 
 private:
     std::atomic<size_t> held_budget{0};
+    std::mutex live_mutex;
+    std::unordered_set<VulkanBuffer*> live_buffers;
     size_t driverBudget();
 };
