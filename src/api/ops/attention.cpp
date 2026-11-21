@@ -426,18 +426,46 @@ double merge_ns(const Attention& a, int64_t splits)
 // until they reread keys and values far more often than the matmul-based path: on an RX 6800 XT (RADV, 64 KiB) the
 // fused forward is 2x slower at D=256 and 3x at 320-496, and the backward 20x at D=512. PyTorch likewise stops
 // flash attention at 256 and runs larger heads on its math path. So use chunked_forward/chunked_backward for those
-// heads unless a cooperative-matrix tile of at least 16 rows fits.
+// heads unless a cooperative-matrix tile of at least 16 rows fits (for the backward pass, in both of its passes, with
+// the gradient blocks in registers as run_backward requires).
 constexpr int64_t SIMD_MAX_FUSED_HEAD = 128;
+
+bool coop_backward_tile_fits(const Attention& a, DeviceContext* device, uint32_t block)
+{
+    const auto& limits = device->properties.limits;
+    uint64_t max_threads = std::min(limits.maxComputeWorkGroupInvocations, limits.maxComputeWorkGroupSize[0]);
+    size_t t_bytes = c10::elementSize(a.dtype);
+    size_t a_bytes = c10::elementSize(a.accumulate);
+    uint64_t tile = std::max<uint64_t>(16, block);
+    uint64_t Dp = round_up(a.D, block);
+    uint64_t Dvp = round_up(a.Dv, block);
+    for (uint32_t subgroup : subgroup_size_options(device)) {
+        for (uint64_t wg : {64, 128, 256}) {
+            if (wg > max_threads || wg % subgroup != 0 || tile > wg || !fits_workgroup_size(device, wg, subgroup)) continue;
+            uint64_t subgroups = wg / subgroup;
+            if (t_bytes * coop_backward_shared_t(tile, tile, Dp, Dvp) + a_bytes * coop_backward_shared_a(tile, tile, block, subgroups) > limits.maxComputeSharedMemorySize) continue;
+            bool fits = true;
+            for (AttentionMode mode : {AttentionMode::BACKWARD_KV, AttentionMode::BACKWARD_Q}) {
+                if (coop_backward_frags(mode, tile, tile, Dp, Dvp, block, subgroups) * block * block > 128 * subgroup) fits = false;
+            }
+            if (fits) return true;
+        }
+    }
+    return false;
+}
 
 bool prefer_chunked(const Attention& a, DeviceContext* device, AttentionMode mode)
 {
     if (std::max(a.D, a.Dv) <= SIMD_MAX_FUSED_HEAD) return false;
     std::vector<uint32_t> blocks = coop_block_sizes(device, a.dtype, a.accumulate);
-    if (mode != AttentionMode::FORWARD) return blocks.empty();
     const auto& limits = device->properties.limits;
     size_t t_bytes = c10::elementSize(a.dtype);
     size_t a_bytes = c10::elementSize(a.accumulate);
     for (uint32_t b : blocks) {
+        if (mode != AttentionMode::FORWARD) {
+            if (coop_backward_tile_fits(a, device, b)) return false;
+            continue;
+        }
         uint64_t br = std::max<uint64_t>(16, b);
         uint64_t Dp = round_up(a.D, b);
         uint64_t Dvp = round_up(a.Dv, b);
