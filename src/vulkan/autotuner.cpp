@@ -18,35 +18,31 @@
 
 namespace {
 
-// spaces up to this size are timed in full
+// spaces up to this size try every config; larger ones descend from a spread of samples
 constexpr size_t EXHAUSTIVE_LIMIT = 32;
 constexpr size_t SEARCH_SAMPLES = 16;
 
-// a config's time is the median of several spans, so a burst of other GPU work can't make a slow config look fast
-constexpr size_t TIMING_SPANS = 5;
-// GPU time one config's full timing aims for
-constexpr double TIMING_TARGET_NS = 250e6;
+// a full timing is the median of up to MAX_TIMING_SPANS spans, sized to about FULL_TIMING_TARGET_NS of GPU time
+constexpr size_t MAX_TIMING_SPANS = 5;
+constexpr double FULL_TIMING_TARGET_NS = 250e6;
 
-// a config this much slower than the best so far gets one dispatch, not the full timing
-constexpr double SLOW_FACTOR = 4.0;
-// a kernel whose first this many configs are all that slow is dropped (a cooperative-matrix kernel the
-// driver emulates, say)
-constexpr size_t HOPELESS_CONFIGS = 4;
-// a kernel whose probe is this much slower than the best of another kernel isn't searched at all
-constexpr double DROP_FACTOR = 20.0;
-// probes dispatch at most this many workgroups and scale the time up: enough to fill a large GPU, few
-// enough that a kernel the device only emulates can't run for seconds (or trip a driver watchdog)
-constexpr uint64_t PROBE_GROUPS = 512;
+// only configs probing within this factor of the best full timing are timed in full
+constexpr double FULL_TIMING_FACTOR = 4.0;
+// a kernel still over FULL_TIMING_FACTOR after this many configs is abandoned; also the compile batch size
+constexpr size_t HOPELESS_AFTER = 4;
+// a kernel whose first config probes this far over the best is skipped
+constexpr double KERNEL_DROP_FACTOR = 20.0;
+// enough workgroups to fill a large GPU, few enough that an emulated kernel can't run for seconds
+constexpr uint64_t PROBE_MAX_WORKGROUPS = 512;
 
-// cuts the grid to about PROBE_GROUPS workgroups (keeping z, then y, whole where it can); returns the share kept.
-// Tuned kernels' workgroups don't wait on each other, so a partial grid runs like the full one.
+// cuts the grid to at most PROBE_MAX_WORKGROUPS (keeping z, then y, whole) and returns the fraction kept;
 double shrink_to_probe(TuneDispatch& d)
 {
     const uint64_t full = uint64_t(d.groupX) * d.groupY * d.groupZ;
-    if (full <= PROBE_GROUPS) return 1.0;
-    d.groupZ = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupZ, PROBE_GROUPS)));
-    d.groupY = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupY, PROBE_GROUPS / d.groupZ)));
-    d.groupX = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupX, PROBE_GROUPS / (uint64_t(d.groupY) * d.groupZ))));
+    if (full <= PROBE_MAX_WORKGROUPS) return 1.0;
+    d.groupZ = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupZ, PROBE_MAX_WORKGROUPS)));
+    d.groupY = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupY, PROBE_MAX_WORKGROUPS / d.groupZ)));
+    d.groupX = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(d.groupX, PROBE_MAX_WORKGROUPS / (uint64_t(d.groupY) * d.groupZ))));
     return static_cast<double>(uint64_t(d.groupX) * d.groupY * d.groupZ) / full;
 }
 
@@ -59,14 +55,14 @@ double env_number(const char* name, double fallback)
     return end != value ? parsed : fallback;
 }
 
-// seconds one search may take before it settles for the best config so far; 0 for no limit
+// seconds a search may take before settling for its best so far; 0 for no limit
 double tune_budget_seconds()
 {
     static const double budget = env_number("TORCHVULKAN_TUNE_BUDGET_S", 20.0);
     return budget;
 }
 
-// threads compiling candidate pipelines; the GPU timing itself stays serial
+// threads compiling pipelines; GPU timing stays serial
 size_t tune_threads()
 {
     static const size_t threads = static_cast<size_t>(std::max(1.0,
@@ -196,12 +192,10 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
 {
     if (configs.size() <= 1 || tune_threads() <= 1) return; // compiled on first use
 
-    // only the pipeline is needed: keep each dispatch's key and constants, not the dispatch (it can hold
-    // large temporaries)
     struct Pipeline { ShaderKey key; uint32_t subgroup; SpecializationBuilder spd; };
     std::vector<Pipeline> pipelines;
-    // configs that differ only outside the pipeline (push constants, grid) share one: build it once
     std::set<std::tuple<uint32_t, uint32_t, std::string>> seen;
+
     for (const TuneConfig& c : configs)
     {
         try {
@@ -209,7 +203,7 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
             if (!seen.emplace(device->shader_manager->resolveBinary(d.key), d.subgroupSize, std::string(d.spd.build().key)).second) continue;
             pipelines.push_back({d.key, d.subgroupSize, d.spd});
         } catch (const c10::Error&) {
-            // timing reports it
+            // reported when timed
         }
     }
 
@@ -219,7 +213,7 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
             try {
                 device->shader_manager->prepare(pipelines[i].key, pipelines[i].subgroup, pipelines[i].spd.build());
             } catch (...) {
-                // a config the driver cannot build fails again when timed, and is skipped there
+                // fails again when timed, and is skipped there
             }
         }
     };
@@ -239,44 +233,40 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
     auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
     const double budget = tune_budget_seconds();
 
-    // every config timed so far, as a probe or in full, and the best full timing over all kernels
+    // every config timed so far (probe or full), and the best full timing over all kernels
     struct Timing { double time; bool full; };
     std::map<std::vector<uint32_t>, Timing> timed;
     double best_time = std::numeric_limits<double>::infinity();
     auto over_budget = [&]() { return budget > 0 && !std::isinf(best_time) && elapsed() > budget; };
 
     std::exception_ptr first_error;
+
     auto span_of = [&](const TuneDispatch& d, uint32_t runs) {
         return device->shader_manager->getTimestamp(
             d.key, d.subgroupSize, d.spd.build(), d.pcs.build(), d.read, d.write, d.groupX, d.groupY, d.groupZ, runs
         );
     };
-    // a config is timed in full only while it could still win
+
     auto time_of = [&](const TuneConfig& c, bool probe) {
         double time = std::numeric_limits<double>::infinity();
         auto known = timed.find(c.values);
-        if (known != timed.end() && (known->second.full || known->second.time > SLOW_FACTOR * best_time)) return known->second.time;
+        if (known != timed.end() && (known->second.full || known->second.time > FULL_TIMING_FACTOR * best_time)) return known->second.time;
         try {
             TuneDispatch d = build(c);
             if (known != timed.end()) {
                 time = known->second.time;
             } else {
-                // a first look on part of the grid, scaled up
                 TuneDispatch part = d;
                 double share = shrink_to_probe(part);
-                // a warm-up dispatch absorbs any compile the driver defers to first use; then two, because
-                // AMD's timestamps around a single emulated cooperative-matrix dispatch can read microseconds
-                // for milliseconds of work
                 span_of(part, 1);
                 time = span_of(part, 2) / share + d.extra_ns;
                 timed[c.values] = {time, false};
             }
-            if (!probe && time <= SLOW_FACTOR * best_time) {
-                // short kernels get several spans of several runs, against noise; a long one is measured
-                // well enough by a dispatch or two, and timing it fifteen times only slows the search
-                const double estimate = std::clamp(time - d.extra_ns, 1.0, TIMING_TARGET_NS); // ns, from the probe
-                const uint32_t runs = estimate * 3 * TIMING_SPANS <= TIMING_TARGET_NS ? 3 : 1;
-                const size_t span_count = std::clamp<size_t>(static_cast<size_t>(TIMING_TARGET_NS / (estimate * runs)), 1, TIMING_SPANS);
+            if (!probe && time <= FULL_TIMING_FACTOR * best_time) {
+                // short kernels get 3 runs per span against noise; long ones fewer spans
+                const double estimate = std::clamp(time - d.extra_ns, 1.0, FULL_TIMING_TARGET_NS);
+                const uint32_t runs = estimate * 3 * MAX_TIMING_SPANS <= FULL_TIMING_TARGET_NS ? 3 : 1;
+                const size_t span_count = std::clamp<size_t>(static_cast<size_t>(FULL_TIMING_TARGET_NS / (estimate * runs)), 1, MAX_TIMING_SPANS);
                 std::vector<double> spans(span_count);
                 for (double& span : spans) span = span_of(d, runs);
                 std::nth_element(spans.begin(), spans.begin() + spans.size() / 2, spans.end());
@@ -292,6 +282,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         if (tune_log()) std::cerr << "torchvulkan tune: " << describe(space, c) << (probe ? " probe " : " ") << time / 1e6 << " ms\n";
         return time;
     };
+
     auto compile_new = [&](const std::vector<TuneConfig>& batch) {
         std::vector<TuneConfig> todo;
         for (const TuneConfig& c : batch) if (!timed.count(c.values)) todo.push_back(c);
@@ -301,14 +292,13 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         if (tune_log()) std::cerr << "torchvulkan tune: compiled " << todo.size() << " pipelines in " << elapsed() - t0 << " s\n";
     };
 
-    // searches one kernel: a spread of samples (all of a small kernel), then coordinate descent from the best
     auto search = [&](const TuneSpace& part) {
         const std::vector<TuneConfig> own = part.configs();
         TuneConfig best;
         double best_own = std::numeric_limits<double>::infinity();
         std::set<std::vector<uint32_t>> considered;
 
-        // times a config once; returns whether it is the fastest so far
+        // times a config once; returns whether it is this kernel's fastest so far
         auto consider = [&](const TuneConfig& c)
         {
             if (!considered.insert(c.values).second) return false;
@@ -318,25 +308,23 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
             best = c;
             return true;
         };
-        // a kernel whose first configs are all far slower than the best so far can't win
-        auto hopeless = [&]() { return considered.size() >= HOPELESS_CONFIGS && best_own > SLOW_FACTOR * best_time; };
+        auto hopeless = [&]() { return considered.size() >= HOPELESS_AFTER && best_own > FULL_TIMING_FACTOR * best_time; };
 
         std::vector<TuneConfig> samples;
         if (own.size() <= EXHAUSTIVE_LIMIT) samples = own;
         else for (size_t i = 0; i < SEARCH_SAMPLES; i++) samples.push_back(own[i * own.size() / SEARCH_SAMPLES]);
 
-        // compiled a few at a time, so a hopeless kernel stops before compiling all of them
-        for (size_t i = 0; i < samples.size(); i += HOPELESS_CONFIGS)
+        // in batches, so a hopeless kernel stops before compiling everything
+        for (size_t i = 0; i < samples.size(); i += HOPELESS_AFTER)
         {
-            std::vector<TuneConfig> batch(samples.begin() + i, samples.begin() + std::min(i + HOPELESS_CONFIGS, samples.size()));
+            std::vector<TuneConfig> batch(samples.begin() + i, samples.begin() + std::min(i + HOPELESS_AFTER, samples.size()));
             compile_new(batch);
             for (const TuneConfig& c : batch) consider(c);
             if (hopeless() || over_budget()) return std::pair{best, best_own};
         }
         if (own.size() <= EXHAUSTIVE_LIMIT) return std::pair{best, best_own};
 
-        // coordinate descent from the best of a spread of samples: try every option of one param at a time
-        // and keep the fastest, until a whole pass finds nothing faster
+        // coordinate descent: try every option of one param at a time, keep the fastest, until a pass finds nothing faster
         bool improved = !best.empty();
         while (improved && !over_budget())
         {
@@ -357,7 +345,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         return std::pair{best, best_own};
     };
 
-    // the kernels' params don't connect, so one descent could never leave the kernel it starts in
+    // kernels' params don't connect, so a descent can't cross kernels: search each separately
     struct Part { TuneSpace space; uint32_t kernel; double probe; };
     std::vector<Part> parts;
     if (!space.kernel_param) parts.push_back({space, 0, 0.0});
@@ -369,8 +357,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         }
     }
 
-    // a probe of each kernel, so the fastest kernel is searched first and sets the bar the others are
-    // measured against
+    // probe each kernel's first config and search the fastest kernel first, so it sets the bar for the rest
     if (parts.size() > 1) {
         std::vector<TuneConfig> probes;
         for (const Part& p : parts) probes.push_back(p.space.configs().front());
@@ -383,8 +370,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
     double best_overall = std::numeric_limits<double>::infinity();
     for (const Part& part : parts)
     {
-        // a kernel the device only emulates is dropped on its probe instead of being searched
-        if (&part != &parts.front() && part.probe > DROP_FACTOR * best_time) {
+        if (&part != &parts.front() && part.probe > KERNEL_DROP_FACTOR * best_time) {
             if (tune_log()) std::cerr << "torchvulkan tune: dropping kernel " << part.kernel << " (probe " << part.probe / best_time << "x the best)\n";
             continue;
         }
