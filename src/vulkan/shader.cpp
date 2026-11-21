@@ -361,49 +361,28 @@ uint32_t VulkanShaderManager::resolveBinary(ShaderKey key) const
 
 ShaderSubmitInfo VulkanShaderManager::allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)
 {
-    std::unique_lock<std::mutex> lock(cache_mutex_);
-    auto& shaderMap = shaderCache[binary][subgroupSize];
-    const std::tuple<uint32_t, uint32_t, std::string> pending_key{binary, subgroupSize, std::string(spec.key)};
-
-    // another thread compiling the same pipeline: wait for it rather than compile it twice
-    for (;;) {
-        auto it = shaderMap.find(spec.key);
-        if (it != shaderMap.end()) return it->second;
-        if (!compiling_.count(pending_key)) break;
-        compiled_.wait(lock);
-    }
-
-    // the driver compiles outside the lock, so pipelines can be built on several threads at once
-    VkShaderModule shaderModule = allocateShaderModule(binary);
-    compiling_.insert(pending_key);
-    lock.unlock();
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    try {
-        pipeline = createPipeline(binary, shaderModule, subgroupSize, spec);
-    } catch (...) {
-        lock.lock();
-        compiling_.erase(pending_key);
-        compiled_.notify_all();
-        throw;
-    }
-    lock.lock();
-    compiling_.erase(pending_key);
-    ShaderSubmitInfo info{pipeline, pipelineLayout};
-    shaderMap.emplace(std::string(spec.key), info);
-    compiled_.notify_all();
-    return info;
-}
-
-bool VulkanShaderManager::prepare(ShaderKey key, uint32_t subgroupSize, const SpecializationArgs& specConstants)
-{
-    const uint32_t binary = resolveBinary(key);
+    VkShaderModule shaderModule;
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         auto& shaderMap = shaderCache[binary][subgroupSize];
-        if (shaderMap.find(specConstants.key) != shaderMap.end()) return false;
+        auto it = shaderMap.find(spec.key);
+        if (it != shaderMap.end()) return it->second;
+        shaderModule = allocateShaderModule(binary);
     }
-    allocateShader(binary, subgroupSize, specConstants);
-    return true;
+
+    // the driver compiles outside the lock, so pipelines can be built on several threads at once
+    VkPipeline pipeline = createPipeline(binary, shaderModule, subgroupSize, spec);
+
+    std::lock_guard<std::mutex> lock(cache_mutex_);
+    auto [it, inserted] = shaderCache[binary][subgroupSize].try_emplace(std::string(spec.key), ShaderSubmitInfo{pipeline, pipelineLayout});
+    // another thread built the same pipeline meanwhile: keep theirs
+    if (!inserted) device->device_table.vkDestroyPipeline(device->device, pipeline, nullptr);
+    return it->second;
+}
+
+void VulkanShaderManager::prepare(ShaderKey key, uint32_t subgroupSize, const SpecializationArgs& specConstants)
+{
+    allocateShader(resolveBinary(key), subgroupSize, specConstants);
 }
 
 VkShaderModule VulkanShaderManager::allocateShaderModule(uint32_t binary)

@@ -1,6 +1,5 @@
 #pragma once
 #include <ATen/ATen.h>
-#include <atomic>
 #include <functional>
 #include <limits>
 #include <map>
@@ -81,8 +80,6 @@ private:
 
     void load();
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
-
-    std::atomic<double> compile_ns_{-1.0}; // per pipeline when slow enough to compile on threads, 0 when not, -1 unmeasured
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
     std::pair<TuneConfig, double> search(const TuneSpace& space, TuneSearch& s);

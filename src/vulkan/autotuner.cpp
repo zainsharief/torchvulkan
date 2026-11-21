@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <tuple>
 
 namespace {
 
@@ -64,9 +65,6 @@ double tune_budget_seconds()
     static const double budget = env_number("TORCHVULKAN_TUNE_BUDGET_S", 20.0);
     return budget;
 }
-
-// a driver taking at least this long per pipeline gets its candidate pipelines compiled on threads
-constexpr double SLOW_COMPILE_NS = 10e6;
 
 // threads compiling candidate pipelines; the GPU timing itself stays serial
 size_t tune_threads()
@@ -196,62 +194,37 @@ void Autotuner::save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config)
 
 void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::function<TuneDispatch(const TuneConfig&)>& build)
 {
-    if (configs.size() <= 1 || tune_threads() <= 1 || compile_ns_ == 0) return; // compiled on first use
+    if (configs.size() <= 1 || tune_threads() <= 1) return; // compiled on first use
 
     // only the pipeline is needed: keep each dispatch's key and constants, not the dispatch (it can hold
     // large temporaries)
     struct Pipeline { ShaderKey key; uint32_t subgroup; SpecializationBuilder spd; };
     std::vector<Pipeline> pipelines;
+    // configs that differ only outside the pipeline (push constants, grid) share one: build it once
+    std::set<std::tuple<uint32_t, uint32_t, std::string>> seen;
     for (const TuneConfig& c : configs)
     {
         try {
             TuneDispatch d = build(c);
+            if (!seen.emplace(device->shader_manager->resolveBinary(d.key), d.subgroupSize, std::string(d.spd.build().key)).second) continue;
             pipelines.push_back({d.key, d.subgroupSize, d.spd});
         } catch (const c10::Error&) {
             // timing reports it
         }
     }
-    auto prepare = [&](const Pipeline& p) {
-        try {
-            return device->shader_manager->prepare(p.key, p.subgroup, p.spd.build());
-        } catch (...) {
-            // a config the driver cannot build fails again when timed, and is skipped there
-            return false;
-        }
-    };
-
-    // threads only pay where the driver really compiles at pipeline creation: time the first two
-    // pipelines it builds one at a time, and stay serial on a device that takes milliseconds for them
-    size_t first = 0;
-    if (compile_ns_ < 0) {
-        double total = 0.0;
-        size_t built = 0;
-        for (; first < pipelines.size() && built < 2; first++) {
-            const auto t0 = std::chrono::steady_clock::now();
-            if (!prepare(pipelines[first])) continue;
-            total += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count();
-            built++;
-        }
-        if (built < 2) return; // nothing to judge by yet
-        const double each = total / built;
-        compile_ns_ = each >= SLOW_COMPILE_NS ? each : 0.0;
-        if (tune_log()) std::cerr << "torchvulkan tune: " << each / 1e6 << " ms per pipeline, " << (compile_ns_ > 0 ? "compiling on threads\n" : "compiling on first use\n");
-        if (compile_ns_ == 0) return;
-    }
-    pipelines.erase(pipelines.begin(), pipelines.begin() + first);
-
-    size_t threads = std::min(pipelines.size(), tune_threads());
-    if (threads <= 1) {
-        for (const Pipeline& p : pipelines) prepare(p);
-        return;
-    }
 
     std::atomic<size_t> next{0};
     auto work = [&]() {
-        for (size_t i; (i = next++) < pipelines.size();) prepare(pipelines[i]);
+        for (size_t i; (i = next++) < pipelines.size();) {
+            try {
+                device->shader_manager->prepare(pipelines[i].key, pipelines[i].subgroup, pipelines[i].spd.build());
+            } catch (...) {
+                // a config the driver cannot build fails again when timed, and is skipped there
+            }
+        }
     };
     std::vector<std::thread> pool;
-    for (size_t t = 1; t < threads; t++) pool.emplace_back(work);
+    for (size_t t = 1; t < std::min(pipelines.size(), tune_threads()); t++) pool.emplace_back(work);
     work();
     for (std::thread& t : pool) t.join();
 }
