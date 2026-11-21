@@ -21,6 +21,7 @@ namespace {
 // spaces up to this size try every config; larger ones descend from a spread of samples
 constexpr size_t EXHAUSTIVE_LIMIT = 32;
 constexpr size_t SEARCH_SAMPLES = 16;
+static_assert((SEARCH_SAMPLES & (SEARCH_SAMPLES - 1)) == 0, "samples are taken in bit-reversed order");
 
 // a full timing is the median of up to MAX_TIMING_SPANS spans, sized to about FULL_TIMING_TARGET_NS of GPU time
 constexpr size_t MAX_TIMING_SPANS = 5;
@@ -296,9 +297,16 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         };
         auto hopeless = [&]() { return considered.size() >= HOPELESS_AFTER && best_own > FULL_TIMING_FACTOR * best_time; };
 
+        // samples in bit-reversed order, so each batch spreads over the whole space rather than covering one stretch of
+        // it (configs() varies the last param fastest, so a stretch mostly differs in the last params)
         std::vector<TuneConfig> samples;
         if (own.size() <= EXHAUSTIVE_LIMIT) samples = own;
-        else for (size_t i = 0; i < SEARCH_SAMPLES; i++) samples.push_back(own[i * own.size() / SEARCH_SAMPLES]);
+        else for (size_t k = 0; k < SEARCH_SAMPLES; k++)
+        {
+            size_t reversed = 0;
+            for (size_t b = 1; b < SEARCH_SAMPLES; b <<= 1) reversed = (reversed << 1) | ((k & b) ? 1 : 0);
+            samples.push_back(own[reversed * own.size() / SEARCH_SAMPLES]);
+        }
 
         // in batches, so a hopeless kernel stops before compiling everything
         for (size_t i = 0; i < samples.size(); i += HOPELESS_AFTER)
