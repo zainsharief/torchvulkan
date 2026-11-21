@@ -1,11 +1,7 @@
 #pragma once
 #include <ATen/ATen.h>
-#include <functional>
-#include <limits>
 #include <map>
-#include <mutex>
 #include <optional>
-#include <set>
 
 #include "builders.h"
 #include "shader.h"
@@ -43,19 +39,7 @@ struct TuneDispatch
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;
-    double extra_ns = 0; // work the config adds outside this dispatch (an attention split's merge), added to its time
-};
-
-// the state of one select(): what has been timed, and the best full timing over all kernels
-struct TuneSearch
-{
-    struct Timing { double time; bool full; };
-
-    std::map<std::vector<uint32_t>, Timing> timed;
-    double best_time = std::numeric_limits<double>::infinity();
-    std::function<double(const TuneConfig&, bool)> time_of; // (config, probe only)
-    std::function<void(const std::vector<TuneConfig>&)> compile;
-    std::function<bool()> over_budget;
+    double extra_ns = 0; // work the config adds outside this dispatch, added to its time
 };
 
 class Autotuner
@@ -82,6 +66,5 @@ private:
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
-    std::pair<TuneConfig, double> search(const TuneSpace& space, TuneSearch& s);
     void compile(const std::vector<TuneConfig>& configs, const std::function<TuneDispatch(const TuneConfig&)>& build);
 };
