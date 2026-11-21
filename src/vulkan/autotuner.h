@@ -45,7 +45,7 @@ struct TuneDispatch
 class Autotuner
 {
 public:
-    explicit Autotuner(DeviceContext* device) : device(device) {}
+    explicit Autotuner(DeviceContext* device);
 
     const TuneConfig& select(
         ShaderKey shader,
@@ -61,6 +61,10 @@ private:
     std::map<std::pair<uint64_t, uint64_t>, TuneConfig> stored_;  // (binary hash, tuned_id)
     std::string path_;
     bool loaded_ = false;
+
+    double budget_seconds_; // a search settles for its best so far after this long; 0 for no limit
+    bool log_;
+    size_t threads_;        // compiling pipelines; GPU timing stays serial
 
     void load();
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);

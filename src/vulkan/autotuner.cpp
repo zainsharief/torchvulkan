@@ -55,27 +55,6 @@ double env_number(const char* name, double fallback)
     return end != value ? parsed : fallback;
 }
 
-// seconds a search may take before settling for its best so far; 0 for no limit
-double tune_budget_seconds()
-{
-    static const double budget = env_number("TORCHVULKAN_TUNE_BUDGET_S", 20.0);
-    return budget;
-}
-
-// threads compiling pipelines; GPU timing stays serial
-size_t tune_threads()
-{
-    static const size_t threads = static_cast<size_t>(std::max(1.0,
-        env_number("TORCHVULKAN_TUNE_THREADS", std::clamp<unsigned>(std::thread::hardware_concurrency() / 2, 1u, 8u))));
-    return threads;
-}
-
-bool tune_log()
-{
-    static const bool enabled = env_number("TORCHVULKAN_TUNE_LOG", 0) != 0;
-    return enabled;
-}
-
 std::string describe(const TuneSpace& space, const TuneConfig& config)
 {
     std::ostringstream text;
@@ -95,6 +74,14 @@ bool in_space(const TuneSpace& space, const TuneConfig& config)
     return !space.valid || space.valid(config);
 }
 
+}
+
+Autotuner::Autotuner(DeviceContext* device)
+    : device(device),
+      budget_seconds_(env_number("TORCHVULKAN_TUNE_BUDGET_S", 20.0)),
+      log_(env_number("TORCHVULKAN_TUNE_LOG", 0) != 0),
+      threads_(std::clamp<unsigned>(std::thread::hardware_concurrency() / 2, 1u, 8u))
+{
 }
 
 std::vector<TuneConfig> TuneSpace::configs() const
@@ -190,7 +177,7 @@ void Autotuner::save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config)
 
 void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::function<TuneDispatch(const TuneConfig&)>& build)
 {
-    if (configs.size() <= 1 || tune_threads() <= 1) return; // compiled on first use
+    if (configs.size() <= 1 || threads_ <= 1) return; // compiled on first use
 
     struct Pipeline { ShaderKey key; uint32_t subgroup; SpecializationBuilder spd; };
     std::vector<Pipeline> pipelines;
@@ -218,7 +205,7 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
         }
     };
     std::vector<std::thread> pool;
-    for (size_t t = 1; t < std::min(pipelines.size(), tune_threads()); t++) pool.emplace_back(work);
+    for (size_t t = 1; t < std::min(pipelines.size(), threads_); t++) pool.emplace_back(work);
     work();
     for (std::thread& t : pool) t.join();
 }
@@ -231,13 +218,12 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
 
     const auto start = std::chrono::steady_clock::now();
     auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(); };
-    const double budget = tune_budget_seconds();
 
     // every config timed so far (probe or full), and the best full timing over all kernels
     struct Timing { double time; bool full; };
     std::map<std::vector<uint32_t>, Timing> timed;
     double best_time = std::numeric_limits<double>::infinity();
-    auto over_budget = [&]() { return budget > 0 && !std::isinf(best_time) && elapsed() > budget; };
+    auto over_budget = [&]() { return budget_seconds_ > 0 && !std::isinf(best_time) && elapsed() > budget_seconds_; };
 
     std::exception_ptr first_error;
 
@@ -279,7 +265,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
             if (!first_error) first_error = std::current_exception();
             timed[c.values] = {time, true};
         }
-        if (tune_log()) std::cerr << "torchvulkan tune: " << describe(space, c) << (probe ? " probe " : " ") << time / 1e6 << " ms\n";
+        if (log_) std::cerr << "torchvulkan tune: " << describe(space, c) << (probe ? " probe " : " ") << time / 1e6 << " ms\n";
         return time;
     };
 
@@ -289,7 +275,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         if (todo.empty()) return;
         const double t0 = elapsed();
         compile(todo, build);
-        if (tune_log()) std::cerr << "torchvulkan tune: compiled " << todo.size() << " pipelines in " << elapsed() - t0 << " s\n";
+        if (log_) std::cerr << "torchvulkan tune: compiled " << todo.size() << " pipelines in " << elapsed() - t0 << " s\n";
     };
 
     auto search = [&](const TuneSpace& part) {
@@ -371,7 +357,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
     for (const Part& part : parts)
     {
         if (&part != &parts.front() && part.probe > KERNEL_DROP_FACTOR * best_time) {
-            if (tune_log()) std::cerr << "torchvulkan tune: dropping kernel " << part.kernel << " (probe " << part.probe / best_time << "x the best)\n";
+            if (log_) std::cerr << "torchvulkan tune: dropping kernel " << part.kernel << " (probe " << part.probe / best_time << "x the best)\n";
             continue;
         }
         auto [config, time] = search(part.space);
@@ -381,7 +367,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         }
     }
 
-    if (tune_log()) std::cerr << "torchvulkan tune: chose " << describe(space, best) << " " << best_overall / 1e6 << " ms after " << elapsed() << " s, "
+    if (log_) std::cerr << "torchvulkan tune: chose " << describe(space, best) << " " << best_overall / 1e6 << " ms after " << elapsed() << " s, "
                               << timed.size() << " configs\n";
     if (best.empty() && first_error) std::rethrow_exception(first_error);
     return best;
