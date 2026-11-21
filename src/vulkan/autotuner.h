@@ -39,12 +39,13 @@ struct TuneDispatch
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;
+    double extra_ns = 0; // work the config adds outside this dispatch, added to its time
 };
 
 class Autotuner
 {
 public:
-    explicit Autotuner(DeviceContext* device) : device(device) {}
+    explicit Autotuner(DeviceContext* device);
 
     const TuneConfig& select(
         ShaderKey shader,
@@ -61,9 +62,13 @@ private:
     std::string path_;
     bool loaded_ = false;
 
+    double budget_seconds_; // a search settles for its best so far after this long; 0 for no limit
+    bool log_;
+    size_t threads_;        // compiling pipelines; GPU timing stays serial
+
     void load();
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
-    std::pair<TuneConfig, double> search(const TuneSpace& space, const std::function<double(const TuneConfig&)>& time_of);
+    void compile(const std::vector<TuneConfig>& configs, const std::function<TuneDispatch(const TuneConfig&)>& build);
 };

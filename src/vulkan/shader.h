@@ -98,8 +98,12 @@ public:
         const PushConstants& pushConstants,
         at::TensorList readTensors,
         at::TensorList writeTensors,
-        uint32_t groupX, uint32_t groupY, uint32_t groupZ
+        uint32_t groupX, uint32_t groupY, uint32_t groupZ,
+        uint32_t runs
     );
+
+    // builds the pipeline without recording anything (thread-safe)
+    void prepare(ShaderKey key, uint32_t subgroupSize, const SpecializationArgs& specConstants);
 
     bool supportsTimestamps() const { return timestampValidBits > 0; }
     uint32_t resolveBinary(ShaderKey key) const;
@@ -125,7 +129,6 @@ private:
     std::unordered_set<uint64_t> pending_buffers;
     size_t pending_bytes = 0;
 
-    static constexpr uint32_t TIMESTAMP_RUNS = 3;
     VkQueryPool timestampPool = VK_NULL_HANDLE;
     uint32_t timestampValidBits = 0;
 
@@ -152,7 +155,7 @@ private:
     ShaderSubmitInfo allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
     VkShaderModule allocateShaderModule(uint32_t binary);
     
-    VkPipeline createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec);
+    VkPipeline createPipeline(uint32_t binary, VkShaderModule shaderModule, uint32_t subgroupSize, const SpecializationArgs& spec);
     void displayPipelineStatistics(VkPipeline pipeline);
     void clearCache();
 };

@@ -3,8 +3,11 @@
 #include <ATen/SDPBackend.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/native/transformers/attention.h>
+#include <chrono>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -392,6 +395,33 @@ void merge_splits(
     lse.copy_(at::where(at::eq(total, neg_inf()), at::scalar_tensor(pos_inf(), total.options()), total));
 }
 
+// wall time of merging `splits` partial outputs for this shape, timed once on scratch tensors: the tuner
+// adds it to a split config's kernel time, which alone would make splitting look free
+double merge_ns(const Attention& a, int64_t splits)
+{
+    static std::mutex mutex;
+    static std::map<std::vector<int64_t>, double> cache;
+    DeviceContext* device = get_device_context(a.q);
+    const std::vector<int64_t> key{reinterpret_cast<int64_t>(device), static_cast<int64_t>(a.accumulate), a.B, a.Hq, a.L, a.Dv, splits};
+    std::lock_guard<std::mutex> lock(mutex);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    at::TensorOptions options = a.q.options().dtype(a.accumulate);
+    at::Tensor partial_out = at::zeros({a.B * splits, a.Hq, a.L, a.Dv}, options);
+    at::Tensor partial_lse = at::zeros({a.B * splits, a.Hq, a.L}, options);
+    at::Tensor out = attention_output(a);
+    at::Tensor lse = at::empty({a.B, a.Hq, a.L}, options);
+    merge_splits(a, splits, partial_out, partial_lse, out, lse);
+    device->flush();
+    const int runs = 3;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < runs; i++) merge_splits(a, splits, partial_out, partial_lse, out, lse);
+    device->flush();
+    const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / runs;
+    return cache.emplace(key, ns).first->second;
+}
+
 std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
 {
     DeviceContext* device = get_device_context(a.q);
@@ -462,7 +492,9 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
         [&](const TuneConfig& c) {
             AttentionTiling t = attention_tiling(c);
             auto [o, l] = targets(t);
-            return attention_forward_dispatch(a, c, o, l, 0, std::min<int64_t>(a.B, limits.maxComputeWorkGroupCount[2] / t.splits));
+            TuneDispatch d = attention_forward_dispatch(a, c, o, l, 0, std::min<int64_t>(a.B, limits.maxComputeWorkGroupCount[2] / t.splits));
+            if (t.splits > 1) d.extra_ns = merge_ns(a, t.splits);
+            return d;
         }
     );
     if (config.empty()) return std::nullopt;
