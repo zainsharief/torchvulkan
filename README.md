@@ -184,6 +184,8 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | `TORCHVULKAN_PROFILE=1` | Print each compute pipeline's driver statistics (such as register use) when it's compiled, on drivers that support `VK_KHR_pipeline_executable_properties`. |
 | `TORCHVULKAN_PIPELINE_CACHE=0` | Don't cache compiled pipelines between runs. By default they're cached in `%LOCALAPPDATA%\torchvulkan` on Windows and `$XDG_CACHE_HOME/torchvulkan` (or `~/.cache/torchvulkan`) elsewhere. |
 | `TORCHVULKAN_CACHE_DIR` | Directory for the pipeline cache. |
+| `TORCHVULKAN_TUNE_BUDGET_S` | Seconds the autotuner may spend searching for one operation's fastest kernel configuration before it settles for the best found so far (default `20`; `0` for no limit). |
+| `TORCHVULKAN_TUNE_LOG=1` | Print each configuration the autotuner times and the one it chooses. |
 
 ## Limitations
 
