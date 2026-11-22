@@ -100,18 +100,14 @@ static int deviceTypeRank(VkPhysicalDeviceType type)
 // a forked child shares the parent's driver state, which is not valid in the child
 static void markForkedChild() { inBadFork = contextInitialized.load(); }
 
-// Destroys the devices and the instance at process exit, from C's atexit: after Python has
-// finalised (tensors are freed by then) and before the shared libraries are unloaded. Without it the
-// VkDevice outlives the process: NVIDIA's Linux driver keeps worker threads running while a device
-// exists ("[vkps] Update"), and they crash once exit unloads the driver underneath them. A forked
-// child leaves the parent's driver state alone.
+// destroys the devices and the instance at process exit
 void VulkanContext::ShutdownAtExit()
 {
     if (inBadFork) return;
     VulkanContext* context = contextInstance.exchange(nullptr);
     if (context == nullptr) return;
     contextShutDown = true;
-    delete context;
+    context->destroy();
 }
 #endif
 
@@ -648,12 +644,7 @@ bool VulkanContext::IsInitialized()
     return contextInitialized;
 }
 
-// Called from Python's atexit, while the interpreter is finalising: registers ShutdownAtExit with C's
-// atexit again, now that every layer has built its state. C runs exit handlers newest first, so the
-// teardown then runs before anything a layer registered for its own cleanup, and still after Python
-// has freed the tensors. The registration made when the context was created runs too late on its
-// own: the validation layer builds its device state after it, so exit destroyed that state first and
-// vkDeviceWaitIdle crashed inside the layer. It stays as a fallback and then finds nothing to do.
+// re-registers so teardown runs before layers' own exit handlers
 void VulkanContext::Shutdown()
 {
 #ifndef _WIN32
@@ -669,9 +660,17 @@ void VulkanContext::createGenerators()
     for (size_t i = 0; i < devices.size(); i++) devices[i]->generator = std::move(generators[i]);
 }
 
-VulkanContext::~VulkanContext() 
+void VulkanContext::destroy()
 {
-    for (const DeviceContext* device : devices) delete device;
+    for (DeviceContext* device : devices) device->destroy();
     if (debugMessenger != VK_NULL_HANDLE) vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    debugMessenger = VK_NULL_HANDLE;
     if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
+    instance = VK_NULL_HANDLE;
+}
+
+VulkanContext::~VulkanContext()
+{
+    destroy();
+    for (const DeviceContext* device : devices) delete device;
 }

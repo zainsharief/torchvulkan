@@ -60,11 +60,21 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     return result;
 }
 
-void VulkanBuffer::invalidate() { vmaInvalidateAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }
-void VulkanBuffer::flush() { vmaFlushAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }
+void VulkanBuffer::release()
+{
+    if (buffer_ == VK_NULL_HANDLE) return;
+    vmaDestroyBuffer(owner_->allocator, buffer_, allocation_);
+    buffer_ = VK_NULL_HANDLE;
+    allocation_ = VK_NULL_HANDLE;
+    mappedData_ = nullptr;
+}
+
 VulkanBuffer::~VulkanBuffer()
 {
     if (buffer_ == VK_NULL_HANDLE) return;
     owner_->untrackBuffer(this);
-    vmaDestroyBuffer(owner_->allocator, buffer_, allocation_);
+    release();
 }
+
+void VulkanBuffer::invalidate() { vmaInvalidateAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }
+void VulkanBuffer::flush() { vmaFlushAllocation(owner_->allocator, allocation_, 0, VK_WHOLE_SIZE); }

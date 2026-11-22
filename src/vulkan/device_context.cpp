@@ -92,16 +92,21 @@ void DeviceContext::recordFree(size_t bytes)
 void DeviceContext::trackBuffer(VulkanBuffer* buffer)
 {
     std::lock_guard<std::mutex> lock(live_mutex);
-    live_buffers.insert(buffer);
+    buffer->live_next_ = live_head;
+    if (live_head != nullptr) live_head->live_prev_ = buffer;
+    live_head = buffer;
 }
 
 void DeviceContext::untrackBuffer(VulkanBuffer* buffer)
 {
     std::lock_guard<std::mutex> lock(live_mutex);
-    live_buffers.erase(buffer);
+    if (buffer->live_prev_ != nullptr) buffer->live_prev_->live_next_ = buffer->live_next_;
+    else live_head = buffer->live_next_;
+    if (buffer->live_next_ != nullptr) buffer->live_next_->live_prev_ = buffer->live_prev_;
+    buffer->live_prev_ = buffer->live_next_ = nullptr;
 }
 
-DeviceContext::~DeviceContext()
+void DeviceContext::destroy()
 {
     // finish in-flight work before freeing anything it may still use
     if (device != VK_NULL_HANDLE) device_table.vkDeviceWaitIdle(device);
@@ -113,18 +118,28 @@ DeviceContext::~DeviceContext()
 
     cache.clear();
 
-    // Buffers still alive here belong to tensors Python never freed: interpreter shutdown doesn't free every object,
-    // and a daemon thread (ComfyUI's prompt worker) keeps its frame's tensors until the process ends. Vulkan requires
-    // a device's child objects to be destroyed before the device (VUID-vkDestroyDevice-device-05137) and VMA every
-    // allocation before the allocator, so destroy them; their deleters return early once the context is shut down.
-    std::unordered_set<VulkanBuffer*> leftover;
+    // buffers still alive here belong to tensors Python never freed
     {
         std::lock_guard<std::mutex> lock(live_mutex);
-        leftover.swap(live_buffers);
+        for (VulkanBuffer* buffer = live_head; buffer != nullptr;) 
+        {
+            VulkanBuffer* next = buffer->live_next_;
+            buffer->live_prev_ = buffer->live_next_ = nullptr;
+            buffer->release();
+            buffer = next;
+        }
+        live_head = nullptr;
     }
-    for (VulkanBuffer* buffer : leftover) delete buffer;
 
     if (commandPool != VK_NULL_HANDLE) device_table.vkDestroyCommandPool(device, commandPool, nullptr);
+    commandPool = VK_NULL_HANDLE;
     if (allocator != VK_NULL_HANDLE) vmaDestroyAllocator(allocator);
+    allocator = VK_NULL_HANDLE;
     if (device != VK_NULL_HANDLE) device_table.vkDestroyDevice(device, nullptr);
+    device = VK_NULL_HANDLE;
+}
+
+DeviceContext::~DeviceContext()
+{
+    destroy();
 }
