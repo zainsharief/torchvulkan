@@ -84,6 +84,16 @@ public struct ThresholdBackwardOp<T : ITorchVulkan> : IBinaryOp<T>
     public static T eval(T a, T b, T alpha) { return T.ext_threshold_backward(a, b, alpha); }
 }
 
+public struct GeluBackwardOp<T : ITorchVulkan> : IBinaryOp<T>
+{
+    public static T eval(T a, T b, T alpha) { return T.fromAccum(T.Accum.ext_gelu_backward(a.toAccum(), b.toAccum())); }
+}
+
+public struct GeluTanhBackwardOp<T : ITorchVulkan> : IBinaryOp<T>
+{
+    public static T eval(T a, T b, T alpha) { return T.fromAccum(T.Accum.ext_gelu_tanh_backward(a.toAccum(), b.toAccum())); }
+}
+
 public struct FmaxOp<T : ITorchVulkan> : IBinaryOp<T>
 {
     public static T eval(T a, T b, T alpha) { return T.ext_fmax(a, b); }
@@ -234,6 +244,8 @@ public void dispatchBinary<T : ITorchVulkan, let VEC_SIZE : int>(
     case 17: baseBinaryKernel<T, LogaddexpOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
     case 18: baseBinaryKernel<T, Logaddexp2Op<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
     case 19: baseBinaryKernel<T, FloorDivideOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
+    case 20: baseBinaryKernel<T, GeluBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
+    case 21: baseBinaryKernel<T, GeluTanhBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
     default: break;
     }
 }

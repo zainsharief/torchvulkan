@@ -9,6 +9,7 @@
 #include <vector>
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
 
@@ -51,6 +52,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_forward(
     double eps)
 {
     TORCH_CHECK(input.dim() >= 2, "batch_norm: expected input to have at least 2 dimensions, got ", input.dim());
+    if (auto fused = torchvulkan::batch_norm_shader(input, weight, bias, running_mean, running_var, training, momentum, eps)) return *fused;
     at::ScalarType dtype = input.scalar_type();
     at::Tensor x = is_low_prec(dtype) ? input.to(at::kFloat) : input;
     std::vector<int64_t> dims = batch_norm_dims(input);
@@ -79,7 +81,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_forward(
         at::Tensor updated = at::add(at::mul(running_var, 1.0 - momentum), at::mul(at::mul(var, unbias).to(running_var.scalar_type()), momentum));
         running_var.copy_(updated);
     }
-    return std::make_tuple(y.to(dtype), mean.to(dtype), invstd.to(dtype));
+    return std::make_tuple(y.to(dtype), mean, invstd);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> native_batch_norm_vulkan(
@@ -224,6 +226,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_norm_backward_impl(
     double eps,
     std::array<bool, 3> output_mask)
 {
+    if (auto fused = torchvulkan::batch_norm_backward_shader(grad_out, input, weight, running_mean, running_var, save_mean, save_invstd, train, eps, output_mask)) {
+        return *fused;
+    }
     at::ScalarType dtype = input.scalar_type();
     at::ScalarType compute = is_low_prec(dtype) ? at::kFloat : dtype;
     at::Tensor x = input.to(compute);
@@ -368,7 +373,11 @@ at::Tensor cdist_forward_vulkan(const at::Tensor& x1, const at::Tensor& x2, doub
 
 at::Tensor cdist_backward_vulkan(const at::Tensor& grad, const at::Tensor& x1, const at::Tensor& x2, double p, const at::Tensor& cdist)
 {
-    if (p == 0.0 || grad.numel() == 0 || x1.numel() == 0) return at::zeros_like(x1);
+    std::vector<int64_t> shape = at::infer_size(x1.sizes().slice(0, x1.dim() - 2), x2.sizes().slice(0, x2.dim() - 2));
+    shape.push_back(x1.size(-2));
+    shape.push_back(x1.size(-1));
+    if (x1.numel() == 0 || x2.size(-2) == 0 || c10::multiply_integers(shape) == 0) return at::zeros_like(x1);
+    if (p == 0.0 || grad.numel() == 0) return at::zeros(shape, x1.options());
     at::Tensor diff = at::sub(x1.unsqueeze(-2), x2.unsqueeze(-3));
     at::Tensor dist = cdist.unsqueeze(-1);
     at::Tensor deriv;
@@ -384,7 +393,7 @@ at::Tensor cdist_backward_vulkan(const at::Tensor& grad, const at::Tensor& x1, c
     } else {
         deriv = at::where(at::eq(dist, 0), at::zeros_like(diff), at::div(at::mul(diff, at::pow(at::abs(diff), p - 2)), at::pow(dist, p - 1)));
     }
-    return at::sum_to(at::sum(at::mul(deriv, grad.unsqueeze(-1)), -2), x1.sizes());
+    return at::sum_to(at::sum(at::mul(deriv, grad.unsqueeze(-1)), -2), shape);
 }
 
 at::Tensor pdist_forward_vulkan(const at::Tensor& self, double p)
@@ -480,11 +489,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> multi_margin_terms(
     const at::Scalar& margin,
     const c10::optional<at::Tensor>& weight)
 {
+    // torch's checks, in its order
+    TORCH_CHECK_VALUE(p.toLong() == 1 || p.toLong() == 2, "only p == 1 and p == 2 supported");
+    TORCH_CHECK((self.dim() == 2 && self.size(1) != 0) || (self.dim() == 1 && self.size(0) != 0) || self.dim() == 0,
+        "Expected non-empty vector or matrix with optional 0-dim batch size, but got: ", self.sizes());
     at::Tensor x = self.dim() <= 1 ? self.reshape({1, -1}) : self;
-    at::Tensor y = target.reshape({-1, 1}).to(at::kLong);
     int64_t c = x.size(1);
-    TORCH_CHECK(p.toLong() == 1 || p.toLong() == 2, "only p == 1 and p == 2 supported");
-    TORCH_CHECK(x.size(0) == y.size(0), "inconsistent target size, expected ", x.size(0), " but got ", target.sizes());
+    TORCH_CHECK(target.dim() <= 1 && target.numel() == x.size(0), "multi_margin_loss: target tensor should be 1-D with size equal to the number of input ",
+        "samples (batch size). Expected target size [", x.size(0), "], but got ", target.sizes(), ". Input has shape ", self.sizes(), ".");
+    if (weight.has_value() && weight->defined()) {
+        TORCH_CHECK(weight->dim() <= 1 && weight->numel() == c, "inconsistent weight size, expected ", c, " but got ", weight->sizes());
+    }
+    TORCH_CHECK(target.scalar_type() == at::kLong, "expected scalar type Long but found ", target.scalar_type());
+    at::Tensor y = target.reshape({-1, 1});
     if (y.numel() > 0) {
         bool invalid = at::logical_or(at::lt(y, 0), at::ge(y, c)).any().item<bool>();
         TORCH_CHECK(!invalid, "target out of range");
@@ -511,7 +528,8 @@ at::Tensor multi_margin_loss_vulkan(
     at::Tensor h = p.toLong() == 1 ? z : at::mul(z, z);
     h = at::where(active, at::mul(h, scale), at::zeros_like(h));
     at::Tensor loss = at::div(at::sum(h, 1), static_cast<double>(c));
-    if (self.dim() <= 1 && reduction == 0) loss = loss.reshape({});
+    // as the CPU: reduction 'none' keeps a 1-D target's batch dim, even for a 1-D input
+    if (reduction == 0 && target.dim() == 0) loss = loss.reshape({});
     return reduce_loss(loss, reduction);
 }
 
@@ -561,6 +579,8 @@ at::Tensor& multi_margin_loss_backward_out_vulkan(
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> multilabel_terms(const at::Tensor& self, const at::Tensor& target)
 {
+    TORCH_CHECK((self.dim() <= 1 && self.numel() != 0) || (self.dim() == 2 && self.size(1) != 0),
+        "Expected non-empty vector or matrix with optional 0-dim batch size, but got: ", self.sizes());
     at::Tensor x = self.dim() <= 1 ? self.reshape({1, -1}) : self;
     at::Tensor t = target.dim() <= 1 ? target.reshape({1, -1}) : target;
     int64_t c = x.size(1);
@@ -678,14 +698,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> embedding_bag_impl(
         at::Tensor first = at::full({bags + 1, dim}, std::numeric_limits<int64_t>::max(), idx.options()).scatter_reduce(0, expanded_bags, candidate, "amin");
         first = first.narrow(0, 0, bags);
         at::Tensor empty_bag = at::eq(first, std::numeric_limits<int64_t>::max());
-        max_indices = at::where(empty_bag, at::zeros_like(first), at::index_select(idx, 0, at::where(empty_bag, at::zeros_like(first), first).reshape({-1})).view(first.sizes()));
+        max_indices = count == 0 ? at::zeros_like(first)  // every bag is empty
+            : at::where(empty_bag, at::zeros_like(first), at::index_select(idx, 0, at::where(empty_bag, at::zeros_like(first), first).reshape({-1})).view(first.sizes()));
         output = output.narrow(0, 0, bags);
     } else {
         output = at::zeros({bags + 1, dim}, weight.options()).index_add_(0, target_bag, rows).narrow(0, 0, bags);
         if (mode == 1) output = at::div(output, at::clamp_min(bag_size, 1).unsqueeze(1).to(weight.scalar_type()));
-        max_indices = at::zeros({bags}, idx.options());
+        max_indices = at::empty({0}, idx.options());  // only max fills it, as the meta kernel and CUDA
     }
-    return std::make_tuple(output.contiguous(), bag, bag_size, max_indices);
+    auto fresh = [](const at::Tensor& t) { return t.is_view() ? t.clone(at::MemoryFormat::Contiguous) : t.contiguous(); };
+    if (include_last_offset) bag_size = at::cat({bag_size, at::zeros({offsets.size(0) - bags}, bag_size.options())});
+    return std::make_tuple(fresh(output), fresh(bag), fresh(bag_size), fresh(max_indices));
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> embedding_bag_vulkan(
@@ -721,7 +744,7 @@ at::Tensor embedding_bag_dense_backward_vulkan(
     if (idx.numel() == 0) return grad_weight;
 
     if (mode == 2) {
-        at::Tensor bags_with_rows = at::gt(bag_size, 0).unsqueeze(1).expand(maximum_indices.sizes());
+        at::Tensor bags_with_rows = at::gt(bag_size.narrow(0, 0, maximum_indices.size(0)), 0).unsqueeze(1).expand(maximum_indices.sizes());
         at::Tensor target = at::where(bags_with_rows, maximum_indices, at::full_like(maximum_indices, num_weights));
         at::Tensor extended = at::zeros({num_weights + 1, dim}, grad.options());
         return extended.scatter_add_(0, target, grad).narrow(0, 0, num_weights).contiguous();
@@ -742,7 +765,7 @@ at::Tensor embedding_bag_dense_backward_vulkan(
 at::Tensor embedding_bag_backward_vulkan(
     const at::Tensor& grad,
     const at::Tensor& indices,
-    const at::Tensor& /* offsets */,
+    const at::Tensor& offsets,
     const at::Tensor& offset2bag,
     const at::Tensor& bag_size,
     const at::Tensor& maximum_indices,
@@ -753,7 +776,10 @@ at::Tensor embedding_bag_backward_vulkan(
     const c10::optional<at::Tensor>& per_sample_weights,
     int64_t padding_idx)
 {
-    TORCH_CHECK(!sparse, "torchvulkan [NOT IMPLEMENTED]: sparse embedding_bag gradients are not supported.");
+    if (sparse) {
+        return at::_embedding_bag_sparse_backward_symint(grad, indices, offsets, offset2bag, bag_size, num_weights, scale_grad_by_freq, mode,
+            per_sample_weights, padding_idx);
+    }
     return embedding_bag_dense_backward_vulkan(grad, indices, offset2bag, bag_size, maximum_indices, num_weights, scale_grad_by_freq, mode,
         per_sample_weights, padding_idx);
 }
@@ -839,8 +865,8 @@ at::Tensor segment_reduce_vulkan(
     std::string mode;
     if (reduce == "sum") { mode = "sum"; identity = 0.0; }
     else if (reduce == "mean") { mode = "mean"; identity = std::numeric_limits<double>::quiet_NaN(); }
-    else if (reduce == "max") { mode = "amax"; identity = -std::numeric_limits<double>::infinity(); }
-    else if (reduce == "min") { mode = "amin"; identity = std::numeric_limits<double>::infinity(); }
+    else if (reduce == "max" || reduce == "amax") { mode = "amax"; identity = -std::numeric_limits<double>::infinity(); }
+    else if (reduce == "min" || reduce == "amin") { mode = "amin"; identity = std::numeric_limits<double>::infinity(); }
     else if (reduce == "prod") { mode = "prod"; identity = 1.0; }
     else TORCH_CHECK(false, "segment_reduce(): unsupported reduce ", reduce);
 
@@ -858,7 +884,7 @@ at::Tensor segment_reduce_vulkan(
     } else {
         out = at::full(grid, identity, data.options()).scatter_reduce(1, s.ids, values, mode, /*include_self=*/false);
     }
-    return out.narrow(1, 0, s.segments).reshape(s.out_shape);
+    return unview(out.narrow(1, 0, s.segments).contiguous().view(s.out_shape));
 }
 
 at::Tensor segment_reduce_backward_vulkan(
@@ -869,7 +895,7 @@ at::Tensor segment_reduce_backward_vulkan(
     const c10::optional<at::Tensor>& lengths_opt,
     const c10::optional<at::Tensor>& offsets,
     int64_t axis,
-    const c10::optional<at::Scalar>& /* initial */)
+    const c10::optional<at::Scalar>& initial)
 {
     axis = c10::maybe_wrap_dim(axis, data.dim());
     SegmentLayout s = segment_layout(data, lengths_from(lengths_opt, offsets), axis, /*unsafe=*/true);
@@ -884,20 +910,28 @@ at::Tensor segment_reduce_backward_vulkan(
         result = g;
     } else if (reduce == "mean") {
         result = at::div(g, at::gather(s.lengths.expand(grid).to(data.scalar_type()), 1, s.ids));
-    } else if (reduce == "max" || reduce == "min") {
-        // tied extremes split the gradient evenly
-        at::Tensor hit = at::eq(x, o);
+    } else if (reduce == "max" || reduce == "min" || reduce == "amax" || reduce == "amin") {
+        // tied extremes split the gradient evenly; a NaN extreme is hit by the NaNs that made it
+        at::Tensor hit = at::logical_or(at::eq(x, o), at::logical_and(at::isnan(x), at::isnan(o)));
         at::Tensor ties = at::zeros(grid, data.options()).scatter_add(1, s.ids, hit.to(data.scalar_type()));
         result = at::where(hit, at::div(g, at::gather(ties, 1, s.ids)), at::zeros_like(g));
     } else {
-        // with zeros, only a lone zero gets the product of the others
+        // as the CPU: a zero or NaN gets the initial value times the product of the segment's other elements,
+        // the rest get output / x
         at::Tensor zero = at::eq(x, 0);
-        at::Tensor zeros_in_segment = at::gather(at::zeros(grid, data.options()).scatter_add(1, s.ids, zero.to(data.scalar_type())), 1, s.ids);
-        at::Tensor safe = at::where(zero, at::ones_like(x), x);
-        at::Tensor others = at::gather(at::ones(grid, data.options()).scatter_reduce(1, s.ids, safe, "prod"), 1, s.ids);
-        at::Tensor nonzero_grad = at::div(at::mul(g, o), safe);
-        at::Tensor zero_grad = at::where(at::eq(zeros_in_segment, 1), at::mul(g, others), at::zeros_like(g));
-        result = at::where(zero, zero_grad, nonzero_grad);
+        at::Tensor nan = at::isnan(x);
+        at::Tensor special = at::logical_or(zero, nan);
+        auto count_in_segment = [&](const at::Tensor& mask) {
+            return at::gather(at::zeros(grid, data.options()).scatter_add(1, s.ids, mask.to(data.scalar_type())), 1, s.ids);
+        };
+        at::Tensor other_zeros = at::sub(count_in_segment(zero), zero.to(data.scalar_type()));
+        at::Tensor other_nans = at::sub(count_in_segment(nan), nan.to(data.scalar_type()));
+        at::Tensor safe = at::where(special, at::ones_like(x), x);
+        double initial_prod = initial.has_value() ? initial->toDouble() : 1.0;
+        at::Tensor others = at::mul(at::gather(at::ones(grid, data.options()).scatter_reduce(1, s.ids, safe, "prod"), 1, s.ids), initial_prod);
+        others = at::where(at::gt(other_zeros, 0), at::mul(others, 0), others);
+        others = at::where(at::gt(other_nans, 0), at::full_like(others, std::numeric_limits<double>::quiet_NaN()), others);
+        result = at::where(special, at::mul(g, others), at::div(at::mul(g, o), safe));
     }
     return result.reshape(data.sizes()).contiguous();
 }
@@ -943,6 +977,89 @@ at::Tensor& rrelu_with_noise_vulkan_(
     return copy_inplace_result(self, rrelu_with_noise_vulkan(self, noise, lower, upper, training, generator));
 }
 
+// the fused RNN cells, as CUDA computes them: the workspace keeps the activated gates for the backward
+at::Tensor biased_gates(const at::Tensor& input_gates, const at::Tensor& hidden_gates, const c10::optional<at::Tensor>& input_bias,
+                        const c10::optional<at::Tensor>& hidden_bias)
+{
+    at::Tensor gates = at::add(input_gates, hidden_gates);
+    if (input_bias.has_value() && input_bias->defined()) gates = at::add(gates, *input_bias);
+    if (hidden_bias.has_value() && hidden_bias->defined()) gates = at::add(gates, *hidden_bias);
+    return gates;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> thnn_fused_lstm_cell_vulkan(
+    const at::Tensor& input_gates,
+    const at::Tensor& hidden_gates,
+    const at::Tensor& cx,
+    const c10::optional<at::Tensor>& input_bias,
+    const c10::optional<at::Tensor>& hidden_bias)
+{
+    std::vector<at::Tensor> g = biased_gates(input_gates, hidden_gates, input_bias, hidden_bias).chunk(4, 1);
+    at::Tensor ig = at::sigmoid(g[0]), fg = at::sigmoid(g[1]), cg = at::tanh(g[2]), og = at::sigmoid(g[3]);
+    at::Tensor cy = at::add(at::mul(fg, cx), at::mul(ig, cg));
+    at::Tensor hy = at::mul(og, at::tanh(cy));
+    return std::make_tuple(hy, cy, at::cat({ig, fg, cg, og}, 1));
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> thnn_fused_lstm_cell_backward_impl_vulkan(
+    const c10::optional<at::Tensor>& grad_hy_opt,
+    const c10::optional<at::Tensor>& grad_cy_opt,
+    const at::Tensor& cx,
+    const at::Tensor& cy,
+    const at::Tensor& workspace,
+    bool has_bias)
+{
+    std::vector<at::Tensor> g = workspace.chunk(4, 1);
+    const at::Tensor &ig = g[0], &fg = g[1], &cg = g[2], &og = g[3];
+    at::Tensor grad_hy = grad_hy_opt.has_value() && grad_hy_opt->defined() ? *grad_hy_opt : at::zeros_like(cy);
+    at::Tensor grad_cy = grad_cy_opt.has_value() && grad_cy_opt->defined() ? *grad_cy_opt : at::zeros_like(cy);
+    at::Tensor tanh_cy = at::tanh(cy);
+    at::Tensor grad_og = at::mul(at::mul(grad_hy, tanh_cy), at::mul(og, at::rsub(og, 1)));
+    at::Tensor grad_c = at::add(at::mul(at::mul(grad_hy, og), at::rsub(at::mul(tanh_cy, tanh_cy), 1)), grad_cy);
+    at::Tensor grad_ig = at::mul(at::mul(grad_c, cg), at::mul(ig, at::rsub(ig, 1)));
+    at::Tensor grad_fg = at::mul(at::mul(grad_c, cx), at::mul(fg, at::rsub(fg, 1)));
+    at::Tensor grad_cg = at::mul(at::mul(grad_c, ig), at::rsub(at::mul(cg, cg), 1));
+    at::Tensor grad_gates = at::cat({grad_ig, grad_fg, grad_cg, grad_og}, 1);
+    at::Tensor grad_bias = has_bias ? at::sum(grad_gates, 0) : at::Tensor();
+    return std::make_tuple(grad_gates, at::mul(grad_c, fg), grad_bias);
+}
+
+std::tuple<at::Tensor, at::Tensor> thnn_fused_gru_cell_vulkan(
+    const at::Tensor& input_gates,
+    const at::Tensor& hidden_gates,
+    const at::Tensor& hx,
+    const c10::optional<at::Tensor>& input_bias,
+    const c10::optional<at::Tensor>& hidden_bias)
+{
+    at::Tensor ig_all = input_bias.has_value() && input_bias->defined() ? at::add(input_gates, *input_bias) : input_gates;
+    at::Tensor hg_all = hidden_bias.has_value() && hidden_bias->defined() ? at::add(hidden_gates, *hidden_bias) : hidden_gates;
+    std::vector<at::Tensor> i = ig_all.chunk(3, 1), h = hg_all.chunk(3, 1);
+    at::Tensor rg = at::sigmoid(at::add(i[0], h[0]));
+    at::Tensor zg = at::sigmoid(at::add(i[1], h[1]));
+    at::Tensor ng = at::tanh(at::add(i[2], at::mul(rg, h[2])));
+    at::Tensor hy = at::add(ng, at::mul(zg, at::sub(hx, ng)));
+    return std::make_tuple(hy, at::cat({rg, zg, ng, hx, h[2]}, 1));
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> thnn_fused_gru_cell_backward_vulkan(
+    const at::Tensor& grad_hy,
+    const at::Tensor& workspace,
+    bool has_bias)
+{
+    std::vector<at::Tensor> w = workspace.chunk(5, 1);
+    const at::Tensor &rg = w[0], &zg = w[1], &ng = w[2], &hx = w[3], &hn = w[4];
+    at::Tensor grad_zg = at::mul(at::mul(grad_hy, at::sub(hx, ng)), at::mul(zg, at::rsub(zg, 1)));
+    at::Tensor grad_hx = at::mul(grad_hy, zg);
+    at::Tensor grad_in = at::mul(at::mul(grad_hy, at::rsub(zg, 1)), at::rsub(at::mul(ng, ng), 1));
+    at::Tensor grad_hn = at::mul(grad_in, rg);
+    at::Tensor grad_rg = at::mul(at::mul(grad_in, hn), at::mul(rg, at::rsub(rg, 1)));
+    at::Tensor grad_input_gates = at::cat({grad_rg, grad_zg, grad_in}, 1);
+    at::Tensor grad_hidden_gates = at::cat({grad_rg, grad_zg, grad_hn}, 1);
+    at::Tensor grad_input_bias = has_bias ? at::sum(grad_input_gates, 0) : at::Tensor();
+    at::Tensor grad_hidden_bias = has_bias ? at::sum(grad_hidden_gates, 0) : at::Tensor();
+    return std::make_tuple(grad_input_gates, grad_hidden_gates, grad_hx, grad_input_bias, grad_hidden_bias);
+}
+
 at::Tensor efficientzerotensor_vulkan(
     c10::SymIntArrayRef size,
     c10::optional<at::ScalarType> dtype,
@@ -955,6 +1072,103 @@ at::Tensor efficientzerotensor_vulkan(
     at::TensorOptions options = at::TensorOptions().dtype(dtype.value_or(c10::typeMetaToScalarType(at::get_default_dtype())))
         .layout(layout.value_or(at::kStrided)).device(device.value_or(at::Device(at::DeviceType::PrivateUse1, VulkanContext::CurrentDevice())));
     return at::zeros(shape, options);
+}
+
+// SyncBatchNorm's pieces, composed as CUDA computes them (float32 statistics for half and bfloat16)
+std::vector<int64_t> sync_bn_reduce_dims(const at::Tensor& input)
+{
+    std::vector<int64_t> dims = {0};
+    for (int64_t d = 2; d < input.dim(); d++) dims.push_back(d);
+    return dims;
+}
+
+std::vector<int64_t> sync_bn_channel_shape(const at::Tensor& input)
+{
+    std::vector<int64_t> shape(input.dim(), 1);
+    shape[1] = input.size(1);
+    return shape;
+}
+
+std::tuple<at::Tensor, at::Tensor> batch_norm_stats_vulkan(const at::Tensor& input, double eps)
+{
+    at::Tensor x = is_low_prec(input.scalar_type()) ? input.to(at::kFloat) : input;
+    std::vector<int64_t> dims = sync_bn_reduce_dims(x);
+    at::Tensor mean = at::mean(x, dims);
+    at::Tensor var = at::mean(at::square(at::sub(x, mean.view(sync_bn_channel_shape(x)))), dims);
+    return std::make_tuple(mean, at::rsqrt(at::add(var, eps)));
+}
+
+at::Tensor batch_norm_elemt_vulkan(const at::Tensor& input, const c10::optional<at::Tensor>& weight, const c10::optional<at::Tensor>& bias,
+                                   const at::Tensor& mean, const at::Tensor& invstd, double /* eps */)
+{
+    std::vector<int64_t> shape = sync_bn_channel_shape(input);
+    at::Tensor x = is_low_prec(input.scalar_type()) ? input.to(at::kFloat) : input;
+    at::Tensor y = at::mul(at::sub(x, mean.view(shape)), invstd.view(shape));
+    if (weight.has_value() && weight->defined()) y = at::mul(y, weight->to(y.scalar_type()).view(shape));
+    if (bias.has_value() && bias->defined()) y = at::add(y, bias->to(y.scalar_type()).view(shape));
+    return y.to(input.scalar_type());
+}
+
+at::Tensor& batch_norm_elemt_out_vulkan(const at::Tensor& input, const c10::optional<at::Tensor>& weight, const c10::optional<at::Tensor>& bias,
+                                        const at::Tensor& mean, const at::Tensor& invstd, double eps, at::Tensor& out)
+{
+    return fill_out(out, batch_norm_elemt_vulkan(input, weight, bias, mean, invstd, eps));
+}
+
+std::tuple<at::Tensor, at::Tensor> batch_norm_gather_stats_with_counts_vulkan(const at::Tensor& /* input */, const at::Tensor& mean, const at::Tensor& invstd,
+    const c10::optional<at::Tensor>& running_mean, const c10::optional<at::Tensor>& running_var, double momentum, double eps, const at::Tensor& counts)
+{
+    // each replica's (mean, var, count) merged into the global biased variance
+    at::Tensor c = counts.to(mean.scalar_type()).view({-1, 1});
+    at::Tensor total = at::sum(c, 0);
+    at::Tensor global_mean = at::div(at::sum(at::mul(mean, c), 0), total);
+    at::Tensor var = at::sub(at::reciprocal(at::square(invstd)), eps);
+    at::Tensor global_var = at::div(at::sum(at::mul(c, at::add(var, at::square(at::sub(mean, global_mean)))), 0), total);
+    if (running_mean.has_value() && running_mean->defined()) {
+        running_mean->copy_(at::add(at::mul(*running_mean, 1.0 - momentum), at::mul(global_mean, momentum)));
+    }
+    if (running_var.has_value() && running_var->defined()) {
+        at::Tensor unbiased = at::div(at::mul(global_var, total), at::sub(total, 1));
+        running_var->copy_(at::add(at::mul(*running_var, 1.0 - momentum), at::mul(unbiased, momentum)));
+    }
+    return std::make_tuple(global_mean, at::rsqrt(at::add(global_var, eps)));
+}
+
+std::tuple<at::Tensor, at::Tensor> batch_norm_gather_stats_vulkan(const at::Tensor& input, const at::Tensor& mean, const at::Tensor& invstd,
+    const c10::optional<at::Tensor>& running_mean, const c10::optional<at::Tensor>& running_var, double momentum, double eps, int64_t count)
+{
+    at::Tensor counts = at::full({mean.size(0)}, static_cast<double>(count), mean.options());
+    return batch_norm_gather_stats_with_counts_vulkan(input, mean, invstd, running_mean, running_var, momentum, eps, counts);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> batch_norm_backward_reduce_vulkan(const at::Tensor& grad_out, const at::Tensor& input,
+    const at::Tensor& mean, const at::Tensor& invstd, const c10::optional<at::Tensor>& weight, bool input_g, bool weight_g, bool bias_g)
+{
+    std::vector<int64_t> dims = sync_bn_reduce_dims(input), shape = sync_bn_channel_shape(input);
+    at::ScalarType acc = is_low_prec(input.scalar_type()) ? at::kFloat : input.scalar_type();
+    at::Tensor dy = grad_out.to(acc), x = input.to(acc);
+    at::Tensor sum_dy = at::sum(dy, dims);
+    at::Tensor sum_dy_xmu = at::sum(at::mul(dy, at::sub(x, mean.view(shape))), dims);
+    at::ScalarType wdt = weight.has_value() && weight->defined() ? weight->scalar_type() : input.scalar_type();
+    at::Tensor grad_weight = weight_g ? at::mul(sum_dy_xmu, invstd).to(wdt) : at::Tensor();
+    at::Tensor grad_bias = bias_g ? sum_dy.to(wdt) : at::Tensor();
+    if (!input_g) { sum_dy = at::Tensor(); sum_dy_xmu = at::Tensor(); }
+    return std::make_tuple(sum_dy, sum_dy_xmu, grad_weight, grad_bias);
+}
+
+at::Tensor batch_norm_backward_elemt_vulkan(const at::Tensor& grad_out, const at::Tensor& input, const at::Tensor& mean, const at::Tensor& invstd,
+    const c10::optional<at::Tensor>& weight, const at::Tensor& sum_dy, const at::Tensor& sum_dy_xmu, const at::Tensor& count)
+{
+    std::vector<int64_t> shape = sync_bn_channel_shape(input);
+    at::ScalarType acc = is_low_prec(input.scalar_type()) ? at::kFloat : input.scalar_type();
+    at::Tensor n = at::sum(count.to(acc));
+    at::Tensor istd = invstd.to(acc).view(shape);
+    at::Tensor dy = grad_out.to(acc), xmu = at::sub(input.to(acc), mean.to(acc).view(shape));
+    at::Tensor mean_dy = at::div(sum_dy.to(acc), n).view(shape);
+    at::Tensor mean_dy_xmu = at::div(sum_dy_xmu.to(acc), n).view(shape);
+    at::Tensor g = at::mul(at::sub(at::sub(dy, mean_dy), at::mul(at::mul(xmu, at::square(istd)), mean_dy_xmu)), istd);
+    if (weight.has_value() && weight->defined()) g = at::mul(g, weight->to(acc).view(shape));
+    return g.to(input.scalar_type());
 }
 
 } // namespace
@@ -970,6 +1184,13 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_batch_norm_with_update.out", &batch_norm_with_update_out_vulkan);
     m.impl("native_batch_norm_backward", &native_batch_norm_backward_vulkan);
     m.impl("batch_norm_backward", &batch_norm_backward_vulkan);
+    m.impl("batch_norm_stats", &batch_norm_stats_vulkan);
+    m.impl("batch_norm_elemt", &batch_norm_elemt_vulkan);
+    m.impl("batch_norm_elemt.out", &batch_norm_elemt_out_vulkan);
+    m.impl("batch_norm_gather_stats", &batch_norm_gather_stats_vulkan);
+    m.impl("batch_norm_gather_stats_with_counts", &batch_norm_gather_stats_with_counts_vulkan);
+    m.impl("batch_norm_backward_reduce", &batch_norm_backward_reduce_vulkan);
+    m.impl("batch_norm_backward_elemt", &batch_norm_backward_elemt_vulkan);
     m.impl("native_group_norm_backward", &native_group_norm_backward_vulkan);
     m.impl("_cdist_forward", &cdist_forward_vulkan);
     m.impl("_cdist_backward", &cdist_backward_vulkan);
@@ -993,6 +1214,10 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_embedding_bag_dense_backward", &embedding_bag_dense_backward_vulkan);
     m.impl("_embedding_bag_per_sample_weights_backward", &embedding_bag_per_sample_weights_backward_vulkan);
     m.impl("segment_reduce", &segment_reduce_vulkan);
+    m.impl("_thnn_fused_lstm_cell", &thnn_fused_lstm_cell_vulkan);
+    m.impl("_thnn_fused_lstm_cell_backward_impl", &thnn_fused_lstm_cell_backward_impl_vulkan);
+    m.impl("_thnn_fused_gru_cell", &thnn_fused_gru_cell_vulkan);
+    m.impl("_thnn_fused_gru_cell_backward", &thnn_fused_gru_cell_backward_vulkan);
     m.impl("_segment_reduce_backward", &segment_reduce_backward_vulkan);
     m.impl("rrelu_with_noise", &rrelu_with_noise_vulkan);
     m.impl("rrelu_with_noise.out", &rrelu_with_noise_out_vulkan);

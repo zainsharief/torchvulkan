@@ -1,9 +1,11 @@
 #pragma once
 #include <ATen/TensorIterator.h>
 #include <ATen/native/Resize.h>
+#include <ATen/MemoryOverlap.h>
 #include "vulkan/vulkan_context.h"
 #include "vulkan/builders.h"
 #include "vulkan/shader.h"
+#include "vulkan/autotuner.h"
 #include <c10/core/Device.h>
 #include <c10/core/impl/COW.h>
 #include <c10/core/DefaultDtype.h>
@@ -13,7 +15,9 @@
 #include <c10/util/BFloat16.h>
 #include <vector>
 #include <array>
+#include <bit>
 #include <cstdint>
+#include <functional>
 #include <algorithm>
 #include <cstring>
 #include <initializer_list>
@@ -38,6 +42,11 @@ inline uint64_t get_output_address(const at::Tensor& t)
 {
     materialize_cow(t);
     return get_tensor_address(t);
+}
+
+inline uint64_t get_batch_address(const at::Tensor& t, int64_t batch)
+{
+    return get_tensor_address(t) + batch * t.stride(0) * t.element_size();
 }
 
 // the device a vulkan tensor lives on: ops dispatch there, whatever the current device is
@@ -120,6 +129,41 @@ inline uint32_t get_group_count(uint64_t threads, uint32_t workgroupSize)
     uint64_t groups = (threads + workgroupSize - 1) / workgroupSize;
     TORCH_CHECK(groups <= std::numeric_limits<uint32_t>::max(), "torchvulkan [ERROR]: ", threads, " threads is too many for one dispatch.");
     return static_cast<uint32_t>(groups);
+}
+
+inline int64_t ceil_div(int64_t a, int64_t b)
+{
+    return (a + b - 1) / b;
+}
+
+inline int64_t round_up(int64_t a, int64_t b)
+{
+    return ceil_div(a, b) * b;
+}
+
+inline uint64_t log2_ceil(uint64_t x)
+{
+    return std::bit_width(std::max<uint64_t>(x, 1) - 1);
+}
+
+inline bool fits_workgroup_size(const DeviceContext* device, uint64_t threads, uint32_t subgroupSize)
+{
+    const auto& limits = device->properties.limits;
+    if (threads > limits.maxComputeWorkGroupInvocations || threads > limits.maxComputeWorkGroupSize[0]) return false;
+    return !device->support_subgroup_control || threads <= static_cast<uint64_t>(subgroupSize) * device->max_workgroup_subgroups;
+}
+
+inline void dispatch_tuned_shader(DeviceContext* device, const TuneDispatch& d)
+{
+    device->shader_manager->dispatchShader(
+        d.key,
+        d.subgroupSize,
+        d.spd.build(),
+        d.pcs.build(),
+        /* read = */ d.read,
+        /* write = */ d.write,
+        d.groupX, d.groupY, d.groupZ
+    );
 }
 
 // Kernels index in uint32 and IntDivider is exact below 2^31, so every element of every operand must be
@@ -323,6 +367,7 @@ inline at::Tensor& fill_out(at::Tensor& out, const at::Tensor& res)
     TORCH_CHECK(at::canCast(res.scalar_type(), out.scalar_type()),
         "result type ", res.scalar_type(), " can't be cast to the desired output type ", out.scalar_type()
     );
+    if (res.is_same(out)) return out;
     // warns, as torch does, when it resizes a non-empty out; a resized out takes a dense result's layout, as a
     // TensorIterator output does
     if (at::native::resize_output(out, res.sizes()) && res.is_non_overlapping_and_dense() && out.strides() != res.strides()) {
@@ -349,7 +394,72 @@ inline at::Tensor& copy_inplace_result(at::Tensor& self, const at::Tensor& resul
     TORCH_CHECK(result.sizes() == self.sizes(),
         "output with shape ", self.sizes(), " doesn't match the broadcast shape ", result.sizes()
     );
+    if (result.is_same(self)) return self;
     return self.copy_(result);
+}
+
+// offers `target` to the next binary or unary kernel as its output; only wrap ops whose first elementwise
+// kernel is the last one to read the original inputs
+class OutputTarget
+{
+public:
+    explicit OutputTarget(const at::Tensor& target) : previous_(slot()) { slot() = &target; }
+    ~OutputTarget() { slot() = previous_; }
+    OutputTarget(const OutputTarget&) = delete;
+    OutputTarget& operator=(const OutputTarget&) = delete;
+
+    static at::Tensor take(at::ScalarType dtype, at::IntArrayRef shape, std::initializer_list<at::Tensor> inputs)
+    {
+        const at::Tensor* target = slot();
+        slot() = nullptr;
+        if (target == nullptr || !target->defined()) return at::Tensor();
+        const at::Tensor& out = *target;
+        if (out.scalar_type() != dtype || out.sizes() != shape) return at::Tensor();
+        if (at::has_internal_overlap(out) != at::MemOverlap::No) return at::Tensor();
+        for (const at::Tensor& input : inputs)
+        {
+            if (!input.defined()) continue;
+            if (out.device() != input.device()) return at::Tensor();
+            at::MemOverlapStatus overlap = at::get_overlap_status(out, input);
+            if (overlap != at::MemOverlapStatus::Full && overlap != at::MemOverlapStatus::No) return at::Tensor();
+        }
+        materialize_cow(out);
+        return out;
+    }
+
+private:
+    const at::Tensor* previous_;
+    static const at::Tensor*& slot() { thread_local const at::Tensor* target = nullptr; return target; }
+};
+
+inline at::Tensor& fill_out(at::Tensor& out, const std::function<at::Tensor()>& compute)
+{
+    at::Tensor res;
+    {
+        OutputTarget target(out);
+        res = compute();
+    }
+    return fill_out(out, res);
+}
+
+inline at::Tensor& fill_exact_out(at::Tensor& out, const std::function<at::Tensor()>& compute)
+{
+    at::Tensor res;
+    {
+        OutputTarget target(out);
+        res = compute();
+    }
+    return fill_exact_out(out, res);
+}
+
+inline at::Tensor& copy_inplace_result(at::Tensor& self, const std::function<at::Tensor()>& compute)
+{
+    at::Tensor result;
+    {
+        OutputTarget target(self);
+        result = compute();
+    }
+    return copy_inplace_result(self, result);
 }
 
 // integer reductions accumulate in int64 to avoid overflow
@@ -421,6 +531,50 @@ inline at::Tensor normalize_bool(const at::Tensor& t)
 {
     if (t.scalar_type() != at::kBool || !t.is_privateuseone()) return t;
     return at::ne(t.view(at::kByte), 0);
+}
+
+// the subgroup sizes a kernel can be pinned to: a tuner axis
+inline std::vector<uint32_t> subgroup_size_options(const DeviceContext* device)
+{
+    std::vector<uint32_t> sizes;
+    for (uint32_t size = device->min_subgroup_size; size <= device->max_subgroup_size; size *= 2) sizes.push_back(size);
+    return sizes;
+}
+
+inline std::vector<uint32_t> coop_block_sizes(const DeviceContext* device, at::ScalarType dtype, at::ScalarType accumulate)
+{
+    std::vector<uint32_t> sizes;
+    if (!device->support_coopmat) return sizes;
+    for (const CoopMatShape& s : device->coopmat_shapes)
+    {
+        if (s.a != dtype || s.b != dtype || s.c != accumulate || s.result != accumulate) continue;
+        if (s.m != s.n || s.m != s.k) continue; // we do not support differing block_m and block_n sizes
+        sizes.push_back(s.m);
+    }
+    return sizes;
+}
+
+const uint32_t COOP_PAD = 8; // PAD in helpers/gemm_coop.slang
+
+// the tile of a kernel built on helpers/gemm_coop.slang
+struct CoopTiling {
+    uint32_t block;
+    uint32_t warps_m;
+    uint32_t warps_n;
+    uint32_t frags_m;
+    uint32_t frags_n;
+    uint32_t bk;
+    uint32_t subgroup;
+    uint32_t shared = 1;
+};
+
+inline uint32_t coop_tile_m(const CoopTiling& t) { return t.block * t.warps_m * t.frags_m; }
+inline uint32_t coop_tile_n(const CoopTiling& t) { return t.block * t.warps_n * t.frags_n; }
+inline uint32_t coop_threads(const CoopTiling& t) { return t.warps_m * t.warps_n * t.subgroup; }
+
+inline bool is_dtype_float(at::ScalarType dtype)
+{
+    return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kDouble;
 }
 
 inline bool is_low_prec(at::ScalarType dtype)

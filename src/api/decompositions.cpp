@@ -3,7 +3,6 @@
 #include <ATen/native/TypeProperties.h>
 #include <ATen/MemoryOverlap.h>
 #include <ATen/ops/addr_native.h>
-#include <ATen/SDPBackend.h>
 #include <ATen/WrapDimUtils.h>
 #include <ATen/ops/_native_multi_head_attention_native.h>
 #include <ATen/ops/_transformer_encoder_layer_fwd_native.h>
@@ -13,6 +12,7 @@
 #include <tuple>
 #include <vector>
 #include "api/ops/helpers.h"
+#include "api/ops/internal.h"
 
 namespace {
 
@@ -266,20 +266,6 @@ at::Tensor trace_vulkan(const at::Tensor& self)
 {
     TORCH_CHECK(self.dim() == 2, "trace: expected a matrix, but got tensor with dim ", self.dim());
     return at::sum(at::diagonal(self));
-}
-
-at::Tensor& gelu_out_vulkan(const at::Tensor& self, c10::string_view approximate, at::Tensor& out)
-{
-    TORCH_CHECK(approximate == "none" || approximate == "tanh", "approximate argument must be either none or tanh.");
-    at::Tensor r;
-    if (approximate == "tanh") {
-        at::Tensor x3 = at::mul(at::mul(self, self), self);
-        at::Tensor inner = at::mul(at::add(self, at::mul(x3, 0.044715)), 0.7978845608028654);
-        r = at::mul(at::mul(self, 0.5), at::add(at::tanh(inner), 1));
-    } else {
-        r = at::mul(at::mul(self, 0.5), at::add(at::erf(at::mul(self, 0.7071067811865476)), 1));
-    }
-    return fill_out(out, r);
 }
 
 // torch's masked_fill_ checks; an expanded self takes the result through its distinct elements, as the CPU's kernel
@@ -786,42 +772,6 @@ at::Tensor triu_indices_vulkan(
     return cpu.to(device.value_or(at::Device(at::DeviceType::PrivateUse1, VulkanContext::CurrentDevice())));
 }
 
-at::Tensor gelu_backward_vulkan(const at::Tensor& grad_output, const at::Tensor& self, c10::string_view approximate)
-{
-    at::Tensor dy;
-    if (approximate == "tanh") {
-        // y = 0.5x(1 + tanh(inner)), inner = c(x + a*x^3), c = sqrt(2/pi), a = 0.044715
-        // dy/dx = 0.5(1 + tanh(inner)) + 0.5x(1 - tanh(inner)^2) * c(1 + 3a*x^2)
-        at::Tensor x2 = at::mul(self, self);
-        at::Tensor inner = at::mul(at::add(self, at::mul(at::mul(x2, self), 0.044715)), 0.7978845608028654);
-        at::Tensor t = at::tanh(inner);
-        at::Tensor dinner = at::mul(at::add(at::mul(x2, 3 * 0.044715), 1), 0.7978845608028654);
-        at::Tensor term1 = at::mul(at::add(t, 1), 0.5);
-        at::Tensor term2 = at::mul(at::mul(at::mul(self, 0.5), at::rsub(at::mul(t, t), 1)), dinner);
-        dy = at::add(term1, term2);
-    } else {
-        // y = x * Phi(x), Phi = 0.5(1 + erf(x/sqrt2))
-        // dy/dx = Phi(x) + x * phi(x), phi = (1/sqrt(2*pi)) * exp(-x^2/2)
-        at::Tensor cdf = at::mul(at::add(at::erf(at::mul(self, 0.7071067811865476)), 1), 0.5);
-        at::Tensor pdf = at::mul(at::exp(at::mul(at::mul(self, self), -0.5)), 0.3989422804014327);
-        dy = at::add(cdf, at::mul(self, pdf));
-    }
-    return at::mul(grad_output, dy);
-}
-
-int64_t fused_sdp_choice_vulkan(
-    const at::Tensor& /* query */,
-    const at::Tensor& /* key */,
-    const at::Tensor& /* value */,
-    const c10::optional<at::Tensor>& /* attn_mask */,
-    double /* dropout_p */,
-    bool /* is_causal */,
-    c10::optional<double> /* scale */,
-    bool /* enable_gqa */)
-{
-    return static_cast<int64_t>(at::SDPBackend::math);
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_vulkan(
     const at::Tensor& input,
     c10::SymIntArrayRef normalized_shape,
@@ -842,6 +792,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_vulkan(
     TORCH_CHECK(ndim >= nnorm && input.sizes().slice(ndim - nnorm).equals(shape), "Given normalized_shape=", at::IntArrayRef(shape),
         ", expected input with shape [*", [&] { std::string r; for (int64_t v : shape) r += ", " + std::to_string(v); return r; }(),
         "], but got input of size", input.sizes());
+    if (auto fused = torchvulkan::layer_norm_shader(input, normalized_shape.size(), weight.value_or(at::Tensor()), bias.value_or(at::Tensor()), eps)) {
+        return *fused;
+    }
     std::vector<int64_t> reduce_dims;
     for (int64_t i = ndim - nnorm; i < ndim; i++) reduce_dims.push_back(i);
 
@@ -915,6 +868,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> native_layer_norm_backward_vulkan
 {
     int64_t ndim = input.dim();
     int64_t nnorm = static_cast<int64_t>(normalized_shape.size());
+    if (auto fused = torchvulkan::layer_norm_backward_shader(grad_out, input, normalized_shape.size(), mean, rstd,
+            weight.value_or(at::Tensor()), bias.value_or(at::Tensor()), output_mask)) {
+        return *fused;
+    }
     std::vector<int64_t> reduce_dims, batch_dims;
     for (int64_t i = 0; i < ndim; i++) {
         (i < ndim - nnorm ? batch_dims : reduce_dims).push_back(i);
@@ -1240,11 +1197,6 @@ at::Tensor& eye_out_vulkan(c10::SymInt n, at::Tensor& out)
     return eye_m_out_vulkan(n, n, out);
 }
 
-at::Tensor& gelu_backward_out_vulkan(const at::Tensor& grad_output, const at::Tensor& self, c10::string_view approximate, at::Tensor& grad_input)
-{
-    return fill_out(grad_input, gelu_backward_vulkan(grad_output, self, approximate));
-}
-
 at::Tensor& hardsigmoid_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     return fill_out(out, hardsigmoid_vulkan(self));
@@ -1561,8 +1513,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("tril_indices", &tril_indices_vulkan);
     m.impl("triu_indices", &triu_indices_vulkan);
     m.impl("logit", &logit_vulkan);
-    m.impl("gelu.out", &gelu_out_vulkan);
-    m.impl("gelu_backward", &gelu_backward_vulkan);
     m.impl("silu", &silu_vulkan);
     m.impl("hardtanh", &hardtanh_vulkan);
     m.impl("hardsigmoid", &hardsigmoid_vulkan);
@@ -1608,7 +1558,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("nan_to_num.out", &nan_to_num_out_vulkan);
     m.impl("heaviside.out", &heaviside_out_vulkan);
     m.impl("isnan", &isnan_vulkan);
-    m.impl("_fused_sdp_choice", &fused_sdp_choice_vulkan);
     m.impl("native_layer_norm", &native_layer_norm_vulkan);
     m.impl("native_layer_norm_backward", &native_layer_norm_backward_vulkan);
     m.impl("native_group_norm", &native_group_norm_vulkan);
@@ -1650,7 +1599,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("huber_loss.out", &huber_loss_out_vulkan);
     m.impl("elu.out", &elu_out_vulkan);
     m.impl("eye.out", &eye_out_vulkan);
-    m.impl("gelu_backward.grad_input", &gelu_backward_out_vulkan);
     m.impl("hardsigmoid.out", &hardsigmoid_out_vulkan);
     m.impl("hardswish.out", &hardswish_out_vulkan);
     m.impl("hardswish_", &hardswish_vulkan_);
