@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef __APPLE__
@@ -88,6 +89,8 @@ static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
 
 static std::atomic<bool> contextInitialized{false};
 static std::atomic<bool> inBadFork{false};
+static std::atomic<bool> contextShutDown{false};
+static std::atomic<VulkanContext*> contextInstance{nullptr};
 static std::atomic<uint64_t> validationErrors{0};
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
@@ -119,21 +122,38 @@ static int deviceTypeRank(VkPhysicalDeviceType type)
 #ifndef _WIN32
 // a forked child shares the parent's driver state, which is not valid in the child
 static void markForkedChild() { inBadFork = contextInitialized.load(); }
+
+// destroys the devices and the instance at process exit
+void VulkanContext::ShutdownAtExit()
+{
+    if (inBadFork) return;
+    VulkanContext* context = contextInstance.exchange(nullptr);
+    if (context == nullptr) return;
+    contextShutDown = true;
+    context->destroy();
+}
 #endif
 
-VulkanContext& VulkanContext::Instance() 
+VulkanContext& VulkanContext::Instance()
 {
-    TORCH_CHECK(!inBadFork, 
+    TORCH_CHECK(!inBadFork,
         "torchvulkan [ERROR]: Cannot use Vulkan in a forked subprocess after the parent process initialised it. "
         "Use the 'spawn' start method (e.g. multiprocessing_context='spawn' for a DataLoader)."
     );
+    TORCH_CHECK(!contextShutDown, "torchvulkan [ERROR]: Vulkan was used after the process began shutting down.");
 
     static VulkanContext* vulkanContextInstance = []() {
 #ifndef _WIN32
         pthread_atfork(nullptr, nullptr, markForkedChild);
 #endif
         VulkanContext* context = new VulkanContext();
+        contextInstance = context;
         contextInitialized = true;
+#ifndef _WIN32
+        // not on Windows: there atexit in a DLL runs during DLL unload, where calling into the
+        // driver is unsafe, and the driver does not crash at exit
+        std::atexit(ShutdownAtExit);
+#endif
         return context;
     }();
     return *vulkanContextInstance;
@@ -640,9 +660,24 @@ bool VulkanContext::IsInBadFork()
     return inBadFork;
 }
 
+bool VulkanContext::IsShutDown()
+{
+    return contextShutDown;
+}
+
 bool VulkanContext::IsInitialized()
 {
     return contextInitialized;
+}
+
+// re-registers so teardown runs before layers' own exit handlers
+void VulkanContext::Shutdown()
+{
+#ifndef _WIN32
+    static bool scheduled = false;
+    if (!scheduled) std::atexit(ShutdownAtExit);
+    scheduled = true;
+#endif
 }
 
 void VulkanContext::createGenerators()
@@ -651,9 +686,17 @@ void VulkanContext::createGenerators()
     for (size_t i = 0; i < devices.size(); i++) devices[i]->generator = std::move(generators[i]);
 }
 
-VulkanContext::~VulkanContext() 
+void VulkanContext::destroy()
 {
-    for (const DeviceContext* device : devices) delete device;
+    for (DeviceContext* device : devices) device->destroy();
     if (debugMessenger != VK_NULL_HANDLE) vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    debugMessenger = VK_NULL_HANDLE;
     if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
+    instance = VK_NULL_HANDLE;
+}
+
+VulkanContext::~VulkanContext()
+{
+    destroy();
+    for (const DeviceContext* device : devices) delete device;
 }

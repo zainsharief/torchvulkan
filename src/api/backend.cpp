@@ -53,6 +53,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         for (DeviceContext* device : VulkanContext::Instance().devices) device->releaseCachedBuffers(SIZE_MAX, MemoryUsage::DEVICE_ONLY);
     }, py::call_guard<py::gil_scoped_release>());
 
+    m.def("_shutdown", []() { VulkanContext::Shutdown(); });
+
     m.def("_save_pipeline_caches", []() {
         if (!VulkanContext::IsInitialized() || VulkanContext::IsInBadFork()) return;
         for (DeviceContext* device : VulkanContext::Instance().devices) device->cache.savePipelineCache();

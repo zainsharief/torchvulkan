@@ -70,7 +70,8 @@ c10::DataPtr VulkanAllocator::allocate(size_t nbytes)
 
 void VulkanAllocator::deleter(void* ptr)
 {
-    if (ptr == nullptr || VulkanContext::IsInBadFork()) return;
+    // after shutdown the owning device is gone; the process is exiting, so leave the memory to it
+    if (ptr == nullptr || VulkanContext::IsInBadFork() || VulkanContext::IsShutDown()) return;
     VulkanBuffer* buffer = static_cast<VulkanBuffer*>(ptr);
     DeviceContext* owner = buffer->owner();
     owner->recordFree(buffer->size());
