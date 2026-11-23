@@ -13,6 +13,12 @@
 #include <fstream>
 #include <iterator>
 
+VulkanCache::VulkanCache()
+{
+    const char* env = std::getenv("TORCHVULKAN_STAGING_CACHE_MB");
+    stagingCacheCap_ = (env && env[0] ? static_cast<size_t>(std::strtoull(env, nullptr, 10)) : size_t(256)) << 20;
+}
+
 VkCommandBuffer VulkanCache::allocateCommandBuffer()
 {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -88,12 +94,22 @@ size_t VulkanCache::roundBufferSize(size_t size)
 
 VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
 {
-    return usage == MemoryUsage::DEVICE_ONLY ? deviceBufferPool : stagingBufferPool;
+    switch (usage) {
+        case MemoryUsage::DEVICE_ONLY: return deviceBufferPool;
+        case MemoryUsage::HOST_TO_DEVICE: return uploadBufferPool;
+        default: return downloadBufferPool;
+    }
 }
 
 void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
 {
-    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) return;
+    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) 
+    {
+        BufferPool& pool = poolFor(buffer->usage());
+        if (added) pool.bytes += buffer->size();
+        else pool.bytes -= buffer->size();
+        return;
+    }
     if (added) cached_device_bytes.fetch_add(buffer->size());
     else cached_device_bytes.fetch_sub(buffer->size());
 }
@@ -125,12 +141,20 @@ void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
     pool.lru.push_back(buffer);
     pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
     countCached(buffer, true);
+
+    if (&pool != &deviceBufferPool) {
+        while (pool.bytes > stagingCacheCap_ && releaseOldestLocked(pool)) {}
+    }
 }
 
 bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    BufferPool& pool = poolFor(usage);
+    return releaseOldestLocked(poolFor(usage));
+}
+
+bool VulkanCache::releaseOldestLocked(BufferPool& pool)
+{
     if (pool.lru.empty()) return false;
 
     VulkanBuffer* buffer = pool.lru.front();
@@ -148,7 +172,7 @@ bool VulkanCache::releaseOldestBuffer(MemoryUsage usage)
 void VulkanCache::releaseBuffers()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    for (BufferPool* pool : {&deviceBufferPool, &stagingBufferPool}) {
+    for (BufferPool* pool : {&deviceBufferPool, &uploadBufferPool, &downloadBufferPool}) {
         for (VulkanBuffer* buffer : pool->lru) 
         {
             countCached(buffer, false);

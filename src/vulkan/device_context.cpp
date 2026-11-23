@@ -34,16 +34,14 @@ bool DeviceContext::releaseCachedBuffers(size_t size, MemoryUsage usage)
     size_t budget = memoryBudget();
     size_t driver = driverBudget();
 
-    // on unified memory staging buffers share the heap, so once the requested pool is empty free the other one too
-    MemoryUsage other = usage == MemoryUsage::DEVICE_ONLY ? MemoryUsage::HOST_TO_DEVICE : MemoryUsage::DEVICE_ONLY;
     bool freed = false;
     while (size > budget || memoryUsage() > budget - size) {
-        if (!cache.releaseOldestBuffer(usage) && !cache.releaseOldestBuffer(other)) break; // cache empty
+        if (!cache.releaseOldestBuffer(usage)) break; // pool empty
         freed = true;
     }
 
     if (freed) {
-        held_budget.store(driver);
+        held_budget.store(std::max(held_budget.load(), driver));
         vmaSetCurrentFrameIndex(allocator, 0);
     }
 
