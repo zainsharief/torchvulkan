@@ -1,6 +1,9 @@
 #pragma once
 #include <torch/extension.h>
 #include <c10/core/MemoryFormat.h>
+#include <array>
+#include <optional>
+#include <tuple>
 
 namespace torchvulkan {
 
@@ -39,6 +42,20 @@ ComplexParts complex_atanh(const ComplexParts& z);
 ComplexParts complex_expm1(const ComplexParts& z);
 ComplexParts complex_log1p(const ComplexParts& z);
 ComplexParts complex_logaddexp(const ComplexParts& x, const ComplexParts& y);
+
+// ops/norm.cpp
+std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> batch_norm_shader(
+    const at::Tensor& input, const at::Tensor& weight, const at::Tensor& bias, const at::Tensor& running_mean,
+    const at::Tensor& running_var, bool training, double momentum, double eps);
+std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> batch_norm_backward_shader(
+    const at::Tensor& grad_out, const at::Tensor& input, const at::Tensor& weight, const at::Tensor& running_mean,
+    const at::Tensor& running_var, const at::Tensor& save_mean, const at::Tensor& save_invstd, bool train, double eps,
+    std::array<bool, 3> output_mask);
+std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> layer_norm_shader(
+    const at::Tensor& input, size_t normalized_dims, const at::Tensor& weight, const at::Tensor& bias, double eps);
+std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> layer_norm_backward_shader(
+    const at::Tensor& grad_out, const at::Tensor& input, size_t normalized_dims, const at::Tensor& mean,
+    const at::Tensor& rstd, const at::Tensor& weight, const at::Tensor& bias, std::array<bool, 3> output_mask);
 
 // ops/reduce.cpp
 at::Tensor sum_vulkan(const at::Tensor& self, c10::optional<at::ScalarType> dtype);

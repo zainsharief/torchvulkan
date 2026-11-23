@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #ifdef __APPLE__
@@ -44,6 +45,8 @@ static bool isEnvSet(const char* name)
 static VkResult loadVulkan()
 {
 #ifdef __APPLE__
+    setenv("MVK_CONFIG_LOG_LEVEL", "2", 0);
+
     Dl_info info{};
     if (!isEnvSet("TORCHVULKAN_SYSTEM_VULKAN") && dladdr(reinterpret_cast<const void*>(&loadVulkan), &info) && info.dli_fname != nullptr) 
     {
@@ -63,8 +66,31 @@ static VkResult loadVulkan()
     return volkInitialize();
 }
 
+inline constexpr VkComponentTypeKHR COMPONENT_TYPE_BFLOAT16 = static_cast<VkComponentTypeKHR>(1000141000);
+
+static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
+{
+    switch (type) {
+        case VK_COMPONENT_TYPE_FLOAT16_KHR: return at::ScalarType::Half;
+        case VK_COMPONENT_TYPE_FLOAT32_KHR: return at::ScalarType::Float;
+        case VK_COMPONENT_TYPE_FLOAT64_KHR: return at::ScalarType::Double;
+        case COMPONENT_TYPE_BFLOAT16:       return at::ScalarType::BFloat16;
+        case VK_COMPONENT_TYPE_SINT8_KHR:   return at::ScalarType::Char;
+        case VK_COMPONENT_TYPE_SINT16_KHR:  return at::ScalarType::Short;
+        case VK_COMPONENT_TYPE_SINT32_KHR:  return at::ScalarType::Int;
+        case VK_COMPONENT_TYPE_SINT64_KHR:  return at::ScalarType::Long;
+        case VK_COMPONENT_TYPE_UINT8_KHR:   return at::ScalarType::Byte;
+        case VK_COMPONENT_TYPE_UINT16_KHR:  return at::ScalarType::UInt16;
+        case VK_COMPONENT_TYPE_UINT32_KHR:  return at::ScalarType::UInt32;
+        case VK_COMPONENT_TYPE_UINT64_KHR:  return at::ScalarType::UInt64;
+        default:                            return at::ScalarType::Undefined;
+    }
+}
+
 static std::atomic<bool> contextInitialized{false};
 static std::atomic<bool> inBadFork{false};
+static std::atomic<bool> contextShutDown{false};
+static std::atomic<VulkanContext*> contextInstance{nullptr};
 static std::atomic<uint64_t> validationErrors{0};
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
@@ -96,21 +122,38 @@ static int deviceTypeRank(VkPhysicalDeviceType type)
 #ifndef _WIN32
 // a forked child shares the parent's driver state, which is not valid in the child
 static void markForkedChild() { inBadFork = contextInitialized.load(); }
+
+// destroys the devices and the instance at process exit
+void VulkanContext::ShutdownAtExit()
+{
+    if (inBadFork) return;
+    VulkanContext* context = contextInstance.exchange(nullptr);
+    if (context == nullptr) return;
+    contextShutDown = true;
+    context->destroy();
+}
 #endif
 
-VulkanContext& VulkanContext::Instance() 
+VulkanContext& VulkanContext::Instance()
 {
-    TORCH_CHECK(!inBadFork, 
+    TORCH_CHECK(!inBadFork,
         "torchvulkan [ERROR]: Cannot use Vulkan in a forked subprocess after the parent process initialised it. "
         "Use the 'spawn' start method (e.g. multiprocessing_context='spawn' for a DataLoader)."
     );
+    TORCH_CHECK(!contextShutDown, "torchvulkan [ERROR]: Vulkan was used after the process began shutting down.");
 
     static VulkanContext* vulkanContextInstance = []() {
 #ifndef _WIN32
         pthread_atfork(nullptr, nullptr, markForkedChild);
 #endif
         VulkanContext* context = new VulkanContext();
+        contextInstance = context;
         contextInitialized = true;
+#ifndef _WIN32
+        // not on Windows: there atexit in a DLL runs during DLL unload, where calling into the
+        // driver is unsafe, and the driver does not crash at exit
+        std::atexit(ShutdownAtExit);
+#endif
         return context;
     }();
     return *vulkanContextInstance;
@@ -461,8 +504,11 @@ void VulkanContext::createDeviceWithExtensions()
                                      property.CType == COMPONENT_TYPE_BFLOAT16 || property.ResultType == COMPONENT_TYPE_BFLOAT16;
                 if (uses_bfloat16 && !device->support_bfloat16_coopmat) continue;
 
-                CoopMatConfig config{property.MSize, property.NSize, property.KSize};
-                device->cache.addCoopMatConfig(property.AType, property.BType, property.CType, property.ResultType, config);
+                device->coopmat_shapes.push_back({
+                    coop_component_to_scalar(property.AType), coop_component_to_scalar(property.BType),
+                    coop_component_to_scalar(property.CType), coop_component_to_scalar(property.ResultType),
+                    property.MSize, property.NSize, property.KSize
+                });
             }
         }
 
@@ -614,9 +660,24 @@ bool VulkanContext::IsInBadFork()
     return inBadFork;
 }
 
+bool VulkanContext::IsShutDown()
+{
+    return contextShutDown;
+}
+
 bool VulkanContext::IsInitialized()
 {
     return contextInitialized;
+}
+
+// re-registers so teardown runs before layers' own exit handlers
+void VulkanContext::Shutdown()
+{
+#ifndef _WIN32
+    static bool scheduled = false;
+    if (!scheduled) std::atexit(ShutdownAtExit);
+    scheduled = true;
+#endif
 }
 
 void VulkanContext::createGenerators()
@@ -625,9 +686,17 @@ void VulkanContext::createGenerators()
     for (size_t i = 0; i < devices.size(); i++) devices[i]->generator = std::move(generators[i]);
 }
 
-VulkanContext::~VulkanContext() 
+void VulkanContext::destroy()
 {
-    for (const DeviceContext* device : devices) delete device;
+    for (DeviceContext* device : devices) device->destroy();
     if (debugMessenger != VK_NULL_HANDLE) vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
+    debugMessenger = VK_NULL_HANDLE;
     if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
+    instance = VK_NULL_HANDLE;
+}
+
+VulkanContext::~VulkanContext()
+{
+    destroy();
+    for (const DeviceContext* device : devices) delete device;
 }

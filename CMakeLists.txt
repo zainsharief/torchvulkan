@@ -34,7 +34,27 @@ file(WRITE "${TORCHVULKAN_GENERATED_DIR}/_build_info.py" "torch_version = \"${To
 install(FILES "${TORCHVULKAN_GENERATED_DIR}/_build_info.py" DESTINATION torchvulkan)
 
 if(APPLE)
-    find_library(TORCHVULKAN_MOLTENVK NAMES libMoltenVK.dylib)
+    # a path an older configure's find_library cached is no choice; -DTORCHVULKAN_MOLTENVK=<path> still wins
+    get_property(TORCHVULKAN_MOLTENVK_HELP CACHE TORCHVULKAN_MOLTENVK PROPERTY HELPSTRING)
+    if(TORCHVULKAN_MOLTENVK_HELP STREQUAL "Path to a library.")
+        unset(TORCHVULKAN_MOLTENVK CACHE)
+    endif()
+
+    # the pinned MoltenVK release with cooperative matrices, the one CI bundles
+    set(TORCHVULKAN_MOLTENVK_FETCH "${CMAKE_SOURCE_DIR}/.github/scripts/fetch-moltenvk-macos.sh")
+    if(NOT TORCHVULKAN_MOLTENVK AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${TORCHVULKAN_MOLTENVK_FETCH}")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E env "MOLTENVK_OUT_DIR=${CMAKE_BINARY_DIR}/moltenvk" bash "${TORCHVULKAN_MOLTENVK_FETCH}"
+            RESULT_VARIABLE TORCHVULKAN_MOLTENVK_RESULT
+        )
+        if(NOT TORCHVULKAN_MOLTENVK_RESULT EQUAL 0)
+            message(FATAL_ERROR "Fetching MoltenVK failed; pass -DTORCHVULKAN_MOLTENVK=<path to libMoltenVK.dylib> to bundle another.")
+        endif()
+        set(TORCHVULKAN_MOLTENVK "${CMAKE_BINARY_DIR}/moltenvk/libMoltenVK.dylib")
+    else()
+        find_library(TORCHVULKAN_MOLTENVK NAMES libMoltenVK.dylib)
+    endif()
     if(TORCHVULKAN_MOLTENVK)
         get_filename_component(TORCHVULKAN_MOLTENVK_REAL "${TORCHVULKAN_MOLTENVK}" REALPATH)
         message(STATUS "Bundling MoltenVK: ${TORCHVULKAN_MOLTENVK_REAL}")

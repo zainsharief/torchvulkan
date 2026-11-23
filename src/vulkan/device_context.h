@@ -4,12 +4,23 @@
 #include <volk.h>
 
 #include <atomic>
+#include <mutex>
 
 #include "vk_mem_alloc.h"
 #include "cache.h"
 
 class VulkanShaderManager;
 class Autotuner;
+
+struct CoopMatShape {
+    c10::ScalarType a;
+    c10::ScalarType b;
+    c10::ScalarType c;
+    c10::ScalarType result;
+    uint32_t m;
+    uint32_t n;
+    uint32_t k;
+};
 
 struct DeviceContext {
     c10::DeviceIndex index = -1;
@@ -39,6 +50,7 @@ struct DeviceContext {
     bool support_int8 = false;
 
     bool support_coopmat = false;
+    std::vector<CoopMatShape> coopmat_shapes;
     bool support_bfloat16_coopmat = false;
     bool support_subgroup_control = false;
     bool support_subgroup_extended_types = false;
@@ -65,13 +77,20 @@ struct DeviceContext {
     size_t memoryUsage();
     size_t memoryTotal();
     size_t memoryFree();
+    
     bool releaseCachedBuffers(size_t size, MemoryUsage usage);
     size_t reservedBytes() { return allocated_bytes.load() + cache.cachedDeviceBytes(); }
     void recordAllocation(size_t bytes);
     void recordFree(size_t bytes);
     void flush();
 
+    void trackBuffer(VulkanBuffer* buffer);
+    void untrackBuffer(VulkanBuffer* buffer);
+    void destroy();
+
 private:
     std::atomic<size_t> held_budget{0};
+    std::mutex live_mutex;
+    VulkanBuffer* live_head = nullptr;
     size_t driverBudget();
 };
