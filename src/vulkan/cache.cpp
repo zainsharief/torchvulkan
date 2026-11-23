@@ -13,6 +13,12 @@
 #include <fstream>
 #include <iterator>
 
+VulkanCache::VulkanCache()
+{
+    const char* env = std::getenv("TORCHVULKAN_STAGING_CACHE_MB");
+    stagingCacheCap_ = (env && env[0] ? static_cast<size_t>(std::strtoull(env, nullptr, 10)) : size_t(256)) << 20;
+}
+
 VkCommandBuffer VulkanCache::allocateCommandBuffer()
 {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -89,15 +95,16 @@ size_t VulkanCache::roundBufferSize(size_t size)
 VulkanCache::BufferPool& VulkanCache::poolFor(MemoryUsage usage)
 {
     switch (usage) {
-    case MemoryUsage::DEVICE_ONLY: return deviceBufferPool;
-    case MemoryUsage::HOST_TO_DEVICE: return uploadBufferPool;
-    default: return downloadBufferPool;
+        case MemoryUsage::DEVICE_ONLY: return deviceBufferPool;
+        case MemoryUsage::HOST_TO_DEVICE: return uploadBufferPool;
+        default: return downloadBufferPool;
     }
 }
 
 void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
 {
-    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) {
+    if (buffer->usage() != MemoryUsage::DEVICE_ONLY) 
+    {
         BufferPool& pool = poolFor(buffer->usage());
         if (added) pool.bytes += buffer->size();
         else pool.bytes -= buffer->size();
@@ -105,19 +112,6 @@ void VulkanCache::countCached(const VulkanBuffer* buffer, bool added)
     }
     if (added) cached_device_bytes.fetch_add(buffer->size());
     else cached_device_bytes.fetch_sub(buffer->size());
-}
-
-// Staging buffers live in host memory, and nothing else trims their pool (the device pool is trimmed
-// under VRAM pressure). Without a cap, uploading a model leaves one cached staging buffer per weight
-// size in flight: moving an 8 GB text encoder to the GPU left ~7.5 GB of them, charged to the
-// process's commit, and later downloads crawled. TORCHVULKAN_STAGING_CACHE_MB sets the cap.
-static size_t stagingCacheCap()
-{
-    static const size_t cap = [] {
-        const char* env = std::getenv("TORCHVULKAN_STAGING_CACHE_MB");
-        return (env && env[0] ? static_cast<size_t>(std::strtoull(env, nullptr, 10)) : size_t(256)) << 20;
-    }();
-    return cap;
 }
 
 VulkanBuffer* VulkanCache::allocateBuffer(size_t size, MemoryUsage usage)
@@ -148,9 +142,8 @@ void VulkanCache::deleteBuffer(VulkanBuffer* buffer)
     pool.by_size[buffer->size()].push_back(std::prev(pool.lru.end()));
     countCached(buffer, true);
 
-    // keep each host pool under its cap, oldest buffers first (a buffer bigger than the cap goes too)
     if (&pool != &deviceBufferPool) {
-        while (pool.bytes > stagingCacheCap() && releaseOldestLocked(pool)) {}
+        while (pool.bytes > stagingCacheCap_ && releaseOldestLocked(pool)) {}
     }
 }
 
@@ -174,21 +167,6 @@ bool VulkanCache::releaseOldestLocked(BufferPool& pool)
     countCached(buffer, false);
     delete buffer;
     return true;
-}
-
-size_t VulkanCache::cachedStagingBytes()
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    return uploadBufferPool.bytes + downloadBufferPool.bytes;
-}
-
-void VulkanCache::releaseStagingBuffers()
-{
-    // buffers still in flight are not in the pools yet (they return after their copy's flush)
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (BufferPool* pool : {&uploadBufferPool, &downloadBufferPool}) {
-        while (releaseOldestLocked(*pool)) {}
-    }
 }
 
 void VulkanCache::releaseBuffers()
