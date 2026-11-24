@@ -472,3 +472,15 @@ void matmul_coop_main<T : ITorchVulkan & ICoopElement, let VEC : int>(
     if (USE_SHARED_MEMORY == 1) coopMatmulStaged<T, T.Accum, T, VEC>(wg, ti, pcs);
     else coopMatmulDirect<T, T.Accum, T>(wg, ti, pcs);
 }
+
+// torch._int_mm: int8 operands, int32 accumulation and output
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void int_mm_coop_main<T : ITorchVulkan & ICoopElement, let VEC : int>(
+    uint3 wg : SV_GroupID,
+    uint ti : SV_GroupIndex,
+    uniform CoopPushConstants<int32_t> pcs)
+{
+    if (USE_SHARED_MEMORY == 1) coopMatmulStaged<T, int32_t, int32_t, VEC>(wg, ti, pcs);
+    else coopMatmulDirect<T, int32_t, int32_t>(wg, ti, pcs);
+}
