@@ -222,6 +222,51 @@ void storeTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
     }
 }
 
+void multiplyStage<T : ITorchVulkan & ICoopElement>(CoopTile tile, uint stage, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+{
+    uint base_a = stage * stageA();
+    uint base_b = stage * stageB();
+    for (uint step = 0; step < BK; step += BLOCK_SIZE)
+    {
+        FragmentA<T> matA[WARP_FRAGS_M];
+        [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        {
+            uint row = tile.warp_row_base + mi * BLOCK_SIZE;
+            if (A_TRANSPOSED == 1)
+            {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemA, base_a + step * (SMEM_ROWS_A + PAD) + row, SMEM_ROWS_A + PAD);
+            }
+            else
+            {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemA, base_a + row * (BK + PAD) + step, BK + PAD);
+            }
+        }
+
+        FragmentB<T> matB[WARP_FRAGS_N];
+        [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+        {
+            uint col = tile.warp_col_base + nj * BLOCK_SIZE;
+            if (B_TRANSPOSED == 1)
+            {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemB, base_b + col * (BK + PAD) + step, BK + PAD);
+            }
+            else
+            {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemB, base_b + step * (SMEM_COLS_B + PAD) + col, SMEM_COLS_B + PAD);
+            }
+        }
+
+        [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        {
+            [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+            {
+                uint flat_idx = mi * WARP_FRAGS_N + nj;
+                acc[flat_idx] = linalg::coopMatMulAdd<T.Accum, false>(matA[mi], matB[nj], acc[flat_idx]);
+            }
+        }
+    }
+}
+
 void accumulateStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
     uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
 {
@@ -229,7 +274,6 @@ void accumulateStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
     vector<T, VEC> regB[LOADS_B];
 
     uint stage = 0;
-    bool in_bounds = tileInBounds(tile, pcs);
     if (pcs.k_dim > 0)
     {
         loadTile<T, VEC>(ti, tile, pcs, 0, regA, regB);
@@ -237,57 +281,25 @@ void accumulateStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
         GroupMemoryBarrierWithGroupSync();
     }
 
-    for (uint k = 0; k < pcs.k_dim; k += BK)
+    // while the next tile is in bounds, its prefetch has no checks and no other load path in the loop
+    uint k = 0;
+    if (tileInBounds(tile, pcs))
+    {
+        for (; k + 2 * BK <= pcs.k_dim; k += BK)
+        {
+            loadTileFast<T, VEC>(ti, tile, pcs, k + BK, regA, regB);
+            multiplyStage<T>(tile, stage, acc);
+            storeTile<T, VEC>(ti, stage ^ 1, regA, regB);
+            GroupMemoryBarrierWithGroupSync();
+            stage ^= 1;
+        }
+    }
+
+    for (; k < pcs.k_dim; k += BK)
     {
         bool has_next = k + BK < pcs.k_dim;
-        if (has_next)
-        {
-            if (in_bounds && k + 2 * BK <= pcs.k_dim) loadTileFast<T, VEC>(ti, tile, pcs, k + BK, regA, regB);
-            else loadTile<T, VEC>(ti, tile, pcs, k + BK, regA, regB);
-        }
-
-        uint base_a = stage * stageA();
-        uint base_b = stage * stageB();
-        for (uint step = 0; step < BK; step += BLOCK_SIZE)
-        {
-            FragmentA<T> matA[WARP_FRAGS_M];
-            [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
-            {
-                uint row = tile.warp_row_base + mi * BLOCK_SIZE;
-                if (A_TRANSPOSED == 1)
-                {
-                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemA, base_a + step * (SMEM_ROWS_A + PAD) + row, SMEM_ROWS_A + PAD);
-                }
-                else
-                {
-                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemA, base_a + row * (BK + PAD) + step, BK + PAD);
-                }
-            }
-
-            FragmentB<T> matB[WARP_FRAGS_N];
-            [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
-            {
-                uint col = tile.warp_col_base + nj * BLOCK_SIZE;
-                if (B_TRANSPOSED == 1)
-                {
-                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemB, base_b + col * (BK + PAD) + step, BK + PAD);
-                }
-                else
-                {
-                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemB, base_b + step * (SMEM_COLS_B + PAD) + col, SMEM_COLS_B + PAD);
-                }
-            }
-
-            [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
-            {
-                [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
-                {
-                    uint flat_idx = mi * WARP_FRAGS_N + nj;
-                    acc[flat_idx] = linalg::coopMatMulAdd<T.Accum, false>(matA[mi], matB[nj], acc[flat_idx]);
-                }
-            }
-        }
-
+        if (has_next) loadTile<T, VEC>(ti, tile, pcs, k + BK, regA, regB);
+        multiplyStage<T>(tile, stage, acc);
         if (has_next) storeTile<T, VEC>(ti, stage ^ 1, regA, regB);
         GroupMemoryBarrierWithGroupSync();
         stage ^= 1;
