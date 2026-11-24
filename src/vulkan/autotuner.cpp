@@ -211,6 +211,23 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
     for (std::thread& t : pool) t.join();
 }
 
+// wall time of work spanning several ops: a warm-up, then the median of runs sized to about FULL_TIMING_TARGET_NS
+double Autotuner::time_work(const std::function<void()>& work)
+{
+    auto once = [&]() {
+        const auto start = std::chrono::steady_clock::now();
+        work();
+        device->flush();
+        return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
+    };
+    device->flush();
+    const double estimate = std::max(once(), 1.0);
+    std::vector<double> times(std::clamp<size_t>(static_cast<size_t>(FULL_TIMING_TARGET_NS / estimate), 1, MAX_TIMING_SPANS));
+    for (double& time : times) time = once();
+    std::nth_element(times.begin(), times.begin() + times.size() / 2, times.end());
+    return times[times.size() / 2];
+}
+
 TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build)
 {
     const std::vector<TuneConfig> configs = space.configs();
@@ -227,6 +244,14 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
     auto over_budget = [&]() { return budget_seconds_ > 0 && !std::isinf(best_time) && elapsed() > budget_seconds_; };
 
     std::exception_ptr first_error;
+
+    std::map<uint64_t, double> extra_times;
+    auto extra_of = [&](const TuneDispatch& d) {
+        if (!d.extra) return 0.0;
+        auto known = extra_times.find(d.extra_key);
+        if (known != extra_times.end()) return known->second;
+        return extra_times.emplace(d.extra_key, time_work(d.extra)).first->second;
+    };
 
     auto span_of = [&](const TuneDispatch& d, uint32_t runs) {
         return device->shader_manager->getTimestamp(
@@ -246,18 +271,18 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
                 TuneDispatch part = d;
                 double share = shrink_to_probe(part);
                 span_of(part, 1);
-                time = span_of(part, 2) / share + d.extra_ns;
+                time = span_of(part, 2) / share + extra_of(d);
                 timed[c.values] = {time, false};
             }
             if (!probe && time <= FULL_TIMING_FACTOR * best_time) {
                 // short kernels get 3 runs per span against noise; long ones fewer spans
-                const double estimate = std::clamp(time - d.extra_ns, 1.0, FULL_TIMING_TARGET_NS);
+                const double estimate = std::clamp(time - extra_of(d), 1.0, FULL_TIMING_TARGET_NS);
                 const uint32_t runs = estimate * 3 * MAX_TIMING_SPANS <= FULL_TIMING_TARGET_NS ? 3 : 1;
                 const size_t span_count = std::clamp<size_t>(static_cast<size_t>(FULL_TIMING_TARGET_NS / (estimate * runs)), 1, MAX_TIMING_SPANS);
                 std::vector<double> spans(span_count);
                 for (double& span : spans) span = span_of(d, runs);
                 std::nth_element(spans.begin(), spans.begin() + spans.size() / 2, spans.end());
-                time = spans[spans.size() / 2] + d.extra_ns;
+                time = spans[spans.size() / 2] + extra_of(d);
                 timed[c.values] = {time, true};
                 best_time = std::min(best_time, time);
             }
