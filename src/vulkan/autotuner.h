@@ -42,6 +42,7 @@ struct TuneDispatch
     // work outside the dispatch, timed by the tuner and added; configs with the same extra_key share one timing
     std::function<void()> extra;
     uint64_t extra_key = 0;
+    bool dispatch = true; // false: the config is only its extra work
 };
 
 class Autotuner

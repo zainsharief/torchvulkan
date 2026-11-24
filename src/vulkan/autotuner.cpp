@@ -188,6 +188,7 @@ void Autotuner::compile(const std::vector<TuneConfig>& configs, const std::funct
     {
         try {
             TuneDispatch d = build(c);
+            if (!d.dispatch) continue;
             if (!seen.emplace(device->shader_manager->resolveBinary(d.key), d.subgroupSize, std::string(d.spd.build().key)).second) continue;
             pipelines.push_back({d.key, d.subgroupSize, d.spd});
         } catch (const c10::Error&) {
@@ -265,6 +266,13 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
         if (known != timed.end() && (known->second.full || known->second.time > FULL_TIMING_FACTOR * best_time)) return known->second.time;
         try {
             TuneDispatch d = build(c);
+            if (!d.dispatch) {
+                time = time_work(d.extra);
+                timed[c.values] = {time, true};
+                best_time = std::min(best_time, time);
+                if (log_) std::cerr << "torchvulkan tune: " << describe(space, c) << " " << time / 1e6 << " ms\n";
+                return time;
+            }
             if (known != timed.end()) {
                 time = known->second.time;
             } else {
