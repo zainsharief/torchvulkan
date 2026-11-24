@@ -83,7 +83,7 @@ class Kernel:
     name: str
     module: str # path relative to src/shaders
     entries: list
-    coop_dims: tuple = None # (spec constant id, placeholder) that scripts/splice_coop_dims.py swaps into CoopMat dimensions
+    coop_dims: tuple = None # (spec constant id, placeholder) pairs that scripts/splice_coop_dims.py swaps into CoopMat dimensions
 
 
 KERNELS = [
@@ -218,7 +218,7 @@ KERNELS = [
     ]),
     Kernel('matmul_coop', 'ops/matmul_coop.slang', [
         Entry('matmul_coop_main', DTYPES, ('vec',)),
-    ], coop_dims=(18, 1009)), # BLOCK_SIZE, COOP_DIM in helpers/gemm_coop.slang
+    ], coop_dims=(18, 1009, 22, 1013)), # BLOCK_SIZE, COOP_DIM in helpers/gemm_coop.slang; BLOCK_K, COOP_DIM_K in matmul_coop
     Kernel('conv_coop', 'ops/conv_coop.slang', [
         Entry('conv_coop_main', FLOATS, ('vec',)),
     ], coop_dims=(18, 1009)),

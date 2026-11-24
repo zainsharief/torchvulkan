@@ -467,7 +467,9 @@ at::Tensor dispatch_matmul_coop_shader(
              .push(b_vec_aligned)
              .push(t.block)
              .push(t.shared)
-             .push(static_cast<uint32_t>(ceil_div(t.bk * tile_n / vecSize, threads))); // LOADS_B
+             .push(static_cast<uint32_t>(ceil_div(t.bk * tile_n / vecSize, threads))) // LOADS_B
+             .push(COOP_PAD)
+             .push(t.block); // BLOCK_K
 
         d.pcs.push(get_batch_address(ops.self_b, b0))
              .push(get_batch_address(ops.other_b, b0))
