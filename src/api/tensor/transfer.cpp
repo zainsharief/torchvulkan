@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <c10/util/bit_cast.h>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <vector>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/MemoryFormat.h>
@@ -217,9 +219,63 @@ at::Tensor float_to_float8_codes(const at::Tensor& x, at::ScalarType dtype)
     return code.to(at::kByte).view(x.sizes());
 }
 
+// float8 -> float16, bfloat16 or float32 in one pass (float8_decode_main): every code looks up its destination bits in a
+// 256-entry table made by the CPU's own conversion, so the result is the CPU's bit for bit. Returns false for other dtypes.
+bool decode_float8_vulkan(const at::Tensor& src, const at::Tensor& dst)
+{
+    const at::ScalarType out = dst.scalar_type();
+    if (out != at::kHalf && out != at::kBFloat16 && out != at::kFloat) return false;
+    const at::ScalarType bits_type = out == at::kFloat ? at::kUInt32 : at::kUInt16;
+    DeviceContext* device = get_device_context(dst);
+    if (!is_dtype_supported(device, bits_type) || !is_dtype_supported(device, at::kByte)) return false;
+
+    at::Tensor table;
+    {
+        static std::mutex mutex;
+        static std::map<std::tuple<DeviceContext*, at::ScalarType, at::ScalarType>, at::Tensor> tables;
+        std::lock_guard<std::mutex> lock(mutex);
+        auto key = std::make_tuple(device, src.scalar_type(), out);
+        auto it = tables.find(key);
+        if (it == tables.end()) {
+            // the CPU's own conversion of every code, NaN payloads included
+            at::Tensor values = at::arange(256, at::TensorOptions().dtype(at::kByte)).view(src.scalar_type()).to(out);
+            at::Tensor bits = out == at::kFloat ? values.view(at::kInt)
+                                                : values.view(at::kShort).to(at::kInt).bitwise_and(0xffff);
+            it = tables.emplace(key, bits.to(dst.device())).first;
+        }
+        table = it->second;
+    }
+
+    at::Tensor codes = src.contiguous();
+    const bool direct = dst.is_contiguous();
+    at::Tensor result = direct ? dst : at::empty(dst.sizes(), dst.options());
+    const uint64_t numel = static_cast<uint64_t>(codes.numel());
+    if (numel == 0) return true;
+
+    const uint64_t src_address = get_tensor_address(codes);
+    const uint64_t dst_address = get_output_address(result);
+    const uint32_t workgroup = 256;
+    SpecializationBuilder spd{};
+    spd.push(workgroup).push(uint32_t(src_address % 16 == 0 && dst_address % 16 == 0));
+    PushConstantBuilder pcs{};
+    pcs.push(src_address).push(dst_address).push(get_tensor_address(table)).push(numel);
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::FLOAT8_DECODE, bits_type},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {codes, table},
+        /* write = */ {result},
+        get_group_count((numel + 15) / 16, workgroup), 1, 1
+    );
+    if (!direct) dst.copy_(result);
+    return true;
+}
+
 // a copy to, from or between float8 dtypes, through float32 (which holds every float8 value exactly)
 void copy_float8_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
 {
+    if (c10::isFloat8Type(src.scalar_type()) && !c10::isFloat8Type(dst.scalar_type()) && decode_float8_vulkan(src, dst)) return;
     at::Tensor value = c10::isFloat8Type(src.scalar_type()) ? float8_to_float(src) : src;
     if (c10::isFloat8Type(dst.scalar_type())) {
         dst.view(at::kByte).copy_(float_to_float8_codes(value, dst.scalar_type()));
