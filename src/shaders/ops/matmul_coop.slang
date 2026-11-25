@@ -12,7 +12,7 @@ typealias FragmentAK<T : ICoopElement> =
 typealias FragmentBK<T : ICoopElement> =
     linalg::CoopMat<T, MemoryScope.Subgroup, COOP_DIM_K, COOP_DIM, linalg::CoopMatMatrixUse.MatrixB>;
 
-struct CoopPushConstants<T>
+struct CoopPushConstants<T : ITorchVulkan>
 {
     uint64_t tensor_a;
     uint64_t tensor_b;
@@ -26,8 +26,8 @@ struct CoopPushConstants<T>
     uint n_dim;
     uint k_dim;
     uint padding;
-    T alpha;
-    T beta;
+    T.PushScalar alpha;
+    T.PushScalar beta;
 }
 
 struct CoopTile
@@ -42,7 +42,7 @@ struct CoopTile
     uint total_threads;
 }
 
-CoopTile makeTile<Acc>(uint3 wg, uint ti, CoopPushConstants<Acc> pcs)
+CoopTile makeTile<Acc : ITorchVulkan>(uint3 wg, uint ti, CoopPushConstants<Acc> pcs)
 {
     CoopTile tile;
     tile.batch_offset_a = wg.z * pcs.strides_a.batch;
@@ -475,7 +475,7 @@ void finishTile<TAcc : __BuiltinArithmeticType & ITorchVulkan, TOut : ITorchVulk
             uint row = tile.tile_m + tile.warp_row_base + mi * BLOCK_SIZE;
             uint col = tile.tile_n + tile.warp_col_base + nj * BLOCK_SIZE;
             Accumulator<A> value = acc[mi * WARP_FRAGS_N + nj];
-            if (HAS_ALPHA == 1) value = value * pcs.alpha;
+            if (HAS_ALPHA == 1) value = value * A.fromPushScalar(pcs.alpha);
 
             if (direct)
             {
@@ -496,7 +496,7 @@ void finishTile<TAcc : __BuiltinArithmeticType & ITorchVulkan, TOut : ITorchVulk
                         if (HAS_BIAS == 1)
                         {
                             uint bias_idx = wg.z * pcs.strides_bias.batch + r * pcs.strides_bias.row + c * pcs.strides_bias.col;
-                            v = v + pcs.beta * castValue<TOut, A>(tensor_bias[bias_idx]);
+                            v = v + A.fromPushScalar(pcs.beta) * castValue<TOut, A>(tensor_bias[bias_idx]);
                         }
                         if (ACTIVATION == 1) v = A.ext_max(v, A.ext_zero());
                         if (ACTIVATION == 2) v = A.ext_gelu(v);
