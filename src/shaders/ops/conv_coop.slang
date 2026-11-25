@@ -27,7 +27,7 @@ void gatherSlice<T : ITorchVulkan & ICoopElement, A : IMatmulLoader<T.Accum>, B 
         uint i = ti + j * WORKGROUP_SIZE;
         uint row = tile.row0 + i / BK;
         uint kk = k + i % BK;
-        T loaded = T.fromAccum(a.load(tile.batch, min(row, tile.M - 1), min(kk, tile.K - 1)));
+        T loaded = T.fromAccumExact(a.load(tile.batch, min(row, tile.M - 1), min(kk, tile.K - 1)));
         T v = T.ext_zero();
         if (row < tile.M && kk < tile.K) v = loaded;
         regA[j] = v;
