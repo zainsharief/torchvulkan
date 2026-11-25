@@ -538,13 +538,13 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     // 1/16 use the series x - x^3/3 + 2x^5/15, whose next term is under 4e-9 relative there.
     public static T ext_tanh(T a)
     {
+        if (sizeof(T) == 8) return T(float.ext_tanh(a.toFloat()));
         if (abs(a) > T(15)) return a > T(0) ? T(1) : T(-1);
         if (abs(a) < T(0.0625))
         {
             T a2 = a * a;
             return a + a * a2 * (T(-1.0 / 3.0) + a2 * T(2.0 / 15.0));
         }
-        if (sizeof(T) == 8) return T(tanh(a.toFloat()));
         return tanh(a);
     }
     public static T ext_exp2(T a) { if (sizeof(T) == 8) return T(exp2(a.toFloat())); return exp2(a); }
