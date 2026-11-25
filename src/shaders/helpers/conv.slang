@@ -154,11 +154,15 @@ public Phase loadPhase(uint index, Geometry g, uint ti)
                 for (uint kw = 0; kw < KERNEL_W; kw++)
                 {
                     int ew = p.phase.z + int(PAD_W) - int(kw * DILATION_W);
-                    // truncating division is exact on multiples, negative ones included
-                    if (ed % int(STRIDE_D) == 0 && eh % int(STRIDE_H) == 0 && ew % int(STRIDE_W) == 0 && count < MAX_PHASE_TAPS)
+                    int3 e = int3(ed, eh, ew);
+                    int3 shift = overStride(e);
+                    // truncating division is exact on multiples, negative ones included. Not %: Vulkan leaves OpSRem
+                    // undefined for negative operands (NVIDIA returns the unsigned remainder). And one vector compare,
+                    // not a chain of &&: NVIDIA miscompiled that chain in conv_coop (phase 0 found no taps)
+                    if (all(timesStride(shift) == e) && count < MAX_PHASE_TAPS)
                     {
                         phaseTap[count] = (kd * KERNEL_H + kh) * KERNEL_W + kw;
-                        phaseShift[count] = int3(ed / int(STRIDE_D), eh / int(STRIDE_H), ew / int(STRIDE_W));
+                        phaseShift[count] = shift;
                         count++;
                     }
                 }

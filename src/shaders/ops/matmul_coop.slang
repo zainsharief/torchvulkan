@@ -69,15 +69,16 @@ vector<T, VEC> zeroVector<T : ITorchVulkan, let VEC : int>()
     return v;
 }
 
-// some driver bugs have issues with loadAligned, so we load element by element
-vector<T, VEC> loadContiguous<T : ITorchVulkan, let VEC : int>(T* tensor, uint idx)
+// AMD's Windows compiler misreads loads through a T* bitcast to a wider pointer when T is 16-bit (#69), so the word
+// pointer comes straight from the address. idx must be a multiple of VEC.
+vector<T, VEC> loadWords<T : ITorchVulkan, let VEC : int>(uint64_t address, uint idx)
 {
-    vector<T, VEC> v;
-    [unroll] for (uint e = 0; e < VEC; ++e) v[e] = tensor[idx + e];
-    return v;
+    if (VEC * sizeof(T) == 16) return bit_cast<vector<T, VEC>>(((uint4*)address)[idx / VEC]);
+    if (VEC * sizeof(T) == 8) return bit_cast<vector<T, VEC>>(((uint2*)address)[idx / VEC]);
+    return bit_cast<vector<T, VEC>>(((uint*)address)[idx / VEC]);
 }
 
-vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(CoopTile tile, CoopPushConstants<TAcc> pcs, uint i, uint k, bool full)
+vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(CoopTile tile, CoopPushConstants<TAcc> pcs, uint i, uint k)
 {
     T* tensor_a = (T*)pcs.tensor_a;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -85,13 +86,10 @@ vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArit
     {
         uint kk = k + i / (SMEM_ROWS_A / VEC);
         uint m = tile.tile_m + (i % (SMEM_ROWS_A / VEC)) * VEC;
-        uint base = tile.batch_offset_a + min(kk, pcs.k_dim - 1) * pcs.strides_a.col;
-        if (full && A_VEC_ALIGNED == 1 && (M_ALIGNED == 1 || tile.tile_m + SMEM_ROWS_A <= pcs.m_dim)) return loadContiguous<T, VEC>(tensor_a, base + m);
-        [unroll] for (uint e = 0; e < VEC; ++e)
-        {
-            T loaded = tensor_a[base + min(m + e, pcs.m_dim - 1) * pcs.strides_a.row];
-            if (kk < pcs.k_dim) v[e] = loaded;
-        }
+        if (kk >= pcs.k_dim) return v;
+        uint base = tile.batch_offset_a + kk * pcs.strides_a.col;
+        if (A_VEC_ALIGNED == 1 && (M_ALIGNED == 1 || m + VEC <= pcs.m_dim)) return loadWords<T, VEC>(pcs.tensor_a, base + m);
+        [unroll] for (uint e = 0; e < VEC; ++e) v[e] = tensor_a[base + min(m + e, pcs.m_dim - 1) * pcs.strides_a.row];
         return v;
     }
 
@@ -99,16 +97,15 @@ vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArit
     uint kk = k + (i % (BK / VEC)) * VEC;
     if (M_ALIGNED == 0) m = min(m, pcs.m_dim - 1);
     uint base = tile.batch_offset_a + m * pcs.strides_a.row;
-    if (full && A_VEC_ALIGNED == 1) return loadContiguous<T, VEC>(tensor_a, base + kk);
+    if (A_VEC_ALIGNED == 1 && kk + VEC <= pcs.k_dim) return loadWords<T, VEC>(pcs.tensor_a, base + kk);
     [unroll] for (uint e = 0; e < VEC; ++e)
     {
-        T loaded = tensor_a[base + min(kk + e, pcs.k_dim - 1) * pcs.strides_a.col];
-        if (kk + e < pcs.k_dim) v[e] = loaded;
+        if (kk + e < pcs.k_dim) v[e] = tensor_a[base + (kk + e) * pcs.strides_a.col];
     }
     return v;
 }
 
-vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(CoopTile tile, CoopPushConstants<TAcc> pcs, uint i, uint k, bool full)
+vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(CoopTile tile, CoopPushConstants<TAcc> pcs, uint i, uint k)
 {
     T* tensor_b = (T*)pcs.tensor_b;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -118,40 +115,93 @@ vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArit
         uint kk = k + (i % (BK / VEC)) * VEC;
         if (N_ALIGNED == 0) n = min(n, pcs.n_dim - 1);
         uint base = tile.batch_offset_b + n * pcs.strides_b.col;
-        if (full && B_VEC_ALIGNED == 1) return loadContiguous<T, VEC>(tensor_b, base + kk);
+        if (B_VEC_ALIGNED == 1 && kk + VEC <= pcs.k_dim) return loadWords<T, VEC>(pcs.tensor_b, base + kk);
         [unroll] for (uint e = 0; e < VEC; ++e)
         {
-            T loaded = tensor_b[base + min(kk + e, pcs.k_dim - 1) * pcs.strides_b.row];
-            if (kk + e < pcs.k_dim) v[e] = loaded;
+            if (kk + e < pcs.k_dim) v[e] = tensor_b[base + (kk + e) * pcs.strides_b.row];
         }
         return v;
     }
 
     uint kk = k + i / (SMEM_COLS_B / VEC);
     uint n = tile.tile_n + (i % (SMEM_COLS_B / VEC)) * VEC;
-    uint base = tile.batch_offset_b + min(kk, pcs.k_dim - 1) * pcs.strides_b.row;
-    if (full && B_VEC_ALIGNED == 1 && (N_ALIGNED == 1 || tile.tile_n + SMEM_COLS_B <= pcs.n_dim)) return loadContiguous<T, VEC>(tensor_b, base + n);
-    [unroll] for (uint e = 0; e < VEC; ++e)
-    {
-        T loaded = tensor_b[base + min(n + e, pcs.n_dim - 1) * pcs.strides_b.col];
-        if (kk < pcs.k_dim) v[e] = loaded;
-    }
+    if (kk >= pcs.k_dim) return v;
+    uint base = tile.batch_offset_b + kk * pcs.strides_b.row;
+    if (B_VEC_ALIGNED == 1 && (N_ALIGNED == 1 || n + VEC <= pcs.n_dim)) return loadWords<T, VEC>(pcs.tensor_b, base + n);
+    [unroll] for (uint e = 0; e < VEC; ++e) v[e] = tensor_b[base + min(n + e, pcs.n_dim - 1) * pcs.strides_b.col];
     return v;
 }
 
 void loadTile<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(
     uint ti, CoopTile tile, CoopPushConstants<TAcc> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B])
 {
-    bool full = k + BK <= pcs.k_dim;
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
         uint i = ti + j * WORKGROUP_SIZE;
-        if (i < SMEM_ROWS_A * BK / VEC) regA[j] = loadVectorA<T, TAcc, VEC>(tile, pcs, i, k, full);
+        if (i < SMEM_ROWS_A * BK / VEC) regA[j] = loadVectorA<T, TAcc, VEC>(tile, pcs, i, k);
     }
     [unroll] for (uint j = 0; j < LOADS_B; ++j)
     {
         uint i = ti + j * WORKGROUP_SIZE;
-        if (i < BK * SMEM_COLS_B / VEC) regB[j] = loadVectorB<T, TAcc, VEC>(tile, pcs, i, k, full);
+        if (i < BK * SMEM_COLS_B / VEC) regB[j] = loadVectorB<T, TAcc, VEC>(tile, pcs, i, k);
+    }
+}
+
+// whether this workgroup's full K tiles can use loadTileFast
+bool tileInBounds<A : ITorchVulkan>(CoopTile tile, CoopPushConstants<A> pcs)
+{
+    return A_VEC_ALIGNED == 1 && B_VEC_ALIGNED == 1
+        && (A_TRANSPOSED == 0 || M_ALIGNED == 1 || tile.tile_m + SMEM_ROWS_A <= pcs.m_dim)
+        && (B_TRANSPOSED == 1 || N_ALIGNED == 1 || tile.tile_n + SMEM_COLS_B <= pcs.n_dim);
+}
+
+// no bounds checks, so the prefetch isn't waited on before the current tile's MMAs
+void loadTileFast<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(
+    uint ti, CoopTile tile, CoopPushConstants<TAcc> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B])
+{
+    [unroll] for (uint j = 0; j < LOADS_A; ++j)
+    {
+        uint i = ti + j * WORKGROUP_SIZE;
+        if (i < SMEM_ROWS_A * BK / VEC)
+        {
+            uint idx;
+            if (A_TRANSPOSED == 1)
+            {
+                uint kk = k + i / (SMEM_ROWS_A / VEC);
+                uint m = tile.tile_m + (i % (SMEM_ROWS_A / VEC)) * VEC;
+                idx = kk * pcs.strides_a.col + m;
+            }
+            else
+            {
+                uint m = tile.tile_m + i / (BK / VEC);
+                if (M_ALIGNED == 0) m = min(m, pcs.m_dim - 1);
+                uint kk = k + (i % (BK / VEC)) * VEC;
+                idx = m * pcs.strides_a.row + kk;
+            }
+            regA[j] = loadWords<T, VEC>(pcs.tensor_a, tile.batch_offset_a + idx);
+        }
+    }
+    [unroll] for (uint j = 0; j < LOADS_B; ++j)
+    {
+        uint i = ti + j * WORKGROUP_SIZE;
+        if (i < BK * SMEM_COLS_B / VEC)
+        {
+            uint idx;
+            if (B_TRANSPOSED == 1)
+            {
+                uint n = tile.tile_n + i / (BK / VEC);
+                if (N_ALIGNED == 0) n = min(n, pcs.n_dim - 1);
+                uint kk = k + (i % (BK / VEC)) * VEC;
+                idx = n * pcs.strides_b.col + kk;
+            }
+            else
+            {
+                uint kk = k + i / (SMEM_COLS_B / VEC);
+                uint n = tile.tile_n + (i % (SMEM_COLS_B / VEC)) * VEC;
+                idx = kk * pcs.strides_b.row + n;
+            }
+            regB[j] = loadWords<T, VEC>(pcs.tensor_b, tile.batch_offset_b + idx);
+        }
     }
 }
 
@@ -182,6 +232,52 @@ void storeTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
     }
 }
 
+void multiplyStage<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan>(
+    CoopTile tile, uint stage, inout Accumulator<TAcc> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+{
+    uint base_a = stage * stageA();
+    uint base_b = stage * stageB();
+    for (uint step = 0; step < BK; step += BLOCK_K)
+    {
+        FragmentAK<T> matA[WARP_FRAGS_M];
+        [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        {
+            uint row = tile.warp_row_base + mi * BLOCK_SIZE;
+            if (A_TRANSPOSED == 1)
+            {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemA, base_a + step * (SMEM_ROWS_A + PAD) + row, SMEM_ROWS_A + PAD);
+            }
+            else
+            {
+                matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemA, base_a + row * (BK + PAD) + step, BK + PAD);
+            }
+        }
+
+        FragmentBK<T> matB[WARP_FRAGS_N];
+        [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+        {
+            uint col = tile.warp_col_base + nj * BLOCK_SIZE;
+            if (B_TRANSPOSED == 1)
+            {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemB, base_b + col * (BK + PAD) + step, BK + PAD);
+            }
+            else
+            {
+                matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemB, base_b + step * (SMEM_COLS_B + PAD) + col, SMEM_COLS_B + PAD);
+            }
+        }
+
+        [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+        {
+            [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+            {
+                uint flat_idx = mi * WARP_FRAGS_N + nj;
+                acc[flat_idx] = linalg::coopMatMulAdd<TAcc, false>(matA[mi], matB[nj], acc[flat_idx]);
+            }
+        }
+    }
+}
+
 void accumulateStaged<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeticType & ITorchVulkan, let VEC : int>(
     uint ti, CoopTile tile, CoopPushConstants<TAcc> pcs, inout Accumulator<TAcc> acc[WARP_FRAGS_M * WARP_FRAGS_N])
 {
@@ -196,53 +292,25 @@ void accumulateStaged<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeti
         GroupMemoryBarrierWithGroupSync();
     }
 
-    for (uint k = 0; k < pcs.k_dim; k += BK)
+    // while the next tile is in bounds, its prefetch has no checks and no other load path in the loop
+    uint k = 0;
+    if (tileInBounds(tile, pcs))
+    {
+        for (; k + 2 * BK <= pcs.k_dim; k += BK)
+        {
+            loadTileFast<T, TAcc, VEC>(ti, tile, pcs, k + BK, regA, regB);
+            multiplyStage<T, TAcc>(tile, stage, acc);
+            storeTile<T, VEC>(ti, stage ^ 1, regA, regB);
+            GroupMemoryBarrierWithGroupSync();
+            stage ^= 1;
+        }
+    }
+
+    for (; k < pcs.k_dim; k += BK)
     {
         bool has_next = k + BK < pcs.k_dim;
         if (has_next) loadTile<T, TAcc, VEC>(ti, tile, pcs, k + BK, regA, regB);
-
-        uint base_a = stage * stageA();
-        uint base_b = stage * stageB();
-        for (uint step = 0; step < BK; step += BLOCK_K)
-        {
-            FragmentAK<T> matA[WARP_FRAGS_M];
-            [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
-            {
-                uint row = tile.warp_row_base + mi * BLOCK_SIZE;
-                if (A_TRANSPOSED == 1)
-                {
-                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemA, base_a + step * (SMEM_ROWS_A + PAD) + row, SMEM_ROWS_A + PAD);
-                }
-                else
-                {
-                    matA[mi] = matA[mi].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemA, base_a + row * (BK + PAD) + step, BK + PAD);
-                }
-            }
-
-            FragmentBK<T> matB[WARP_FRAGS_N];
-            [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
-            {
-                uint col = tile.warp_col_base + nj * BLOCK_SIZE;
-                if (B_TRANSPOSED == 1)
-                {
-                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.ColumnMajor>(Shared<T>.smemB, base_b + col * (BK + PAD) + step, BK + PAD);
-                }
-                else
-                {
-                    matB[nj] = matB[nj].Load<linalg::CoopMatMatrixLayout.RowMajor>(Shared<T>.smemB, base_b + step * (SMEM_COLS_B + PAD) + col, SMEM_COLS_B + PAD);
-                }
-            }
-
-            [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
-            {
-                [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
-                {
-                    uint flat_idx = mi * WARP_FRAGS_N + nj;
-                    acc[flat_idx] = linalg::coopMatMulAdd<TAcc, false>(matA[mi], matB[nj], acc[flat_idx]);
-                }
-            }
-        }
-
+        multiplyStage<T, TAcc>(tile, stage, acc);
         if (has_next) storeTile<T, VEC>(ti, stage ^ 1, regA, regB);
         GroupMemoryBarrierWithGroupSync();
         stage ^= 1;
@@ -336,9 +404,12 @@ void accumulateDirect<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeti
         uint r = i / BK;
         uint c = i % BK;
         uint a_row = (M_ALIGNED == 1 ? (tile.tile_m + r) : min(tile.tile_m + r, pcs.m_dim - 1));
-        T loaded = tensor_a[tile.batch_offset_a + a_row * pcs.strides_a.row + min(k + c, pcs.k_dim - 1) * pcs.strides_a.col];
         T val = T.ext_zero();
-        if (k + c < pcs.k_dim) val = loaded;
+        if ((k + c) < pcs.k_dim)
+        {
+            uint global_idx = tile.batch_offset_a + a_row * pcs.strides_a.row + (k + c) * pcs.strides_a.col;
+            val = tensor_a[global_idx];
+        }
         Shared<T>.smemA[r * BK + c] = val;
     }
 
@@ -347,9 +418,12 @@ void accumulateDirect<T : ITorchVulkan & ICoopElement, TAcc : __BuiltinArithmeti
         uint r = i / smem_b_cols;
         uint c = i % smem_b_cols;
         uint b_col = (N_ALIGNED == 1 ? (tile.tile_n + c) : min(tile.tile_n + c, pcs.n_dim - 1));
-        T loaded = tensor_b[tile.batch_offset_b + min(k + r, pcs.k_dim - 1) * pcs.strides_b.row + b_col * pcs.strides_b.col];
         T val = T.ext_zero();
-        if (k + r < pcs.k_dim) val = loaded;
+        if ((k + r) < pcs.k_dim)
+        {
+            uint global_idx = tile.batch_offset_b + (k + r) * pcs.strides_b.row + b_col * pcs.strides_b.col;
+            val = tensor_b[global_idx];
+        }
         Shared<T>.smemB[r * smem_b_cols + c] = val;
     }
 
