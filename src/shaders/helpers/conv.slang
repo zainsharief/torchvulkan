@@ -132,6 +132,8 @@ public struct Phase
 }
 
 // every thread must call this
+bool isMultiple(int v, int s) { return v == (v / s) * s; }
+
 public Phase loadPhase(uint index, Geometry g, uint ti)
 {
     Phase p;
@@ -154,8 +156,9 @@ public Phase loadPhase(uint index, Geometry g, uint ti)
                 for (uint kw = 0; kw < KERNEL_W; kw++)
                 {
                     int ew = p.phase.z + int(PAD_W) - int(kw * DILATION_W);
-                    // truncating division is exact on multiples, negative ones included
-                    if (ed % int(STRIDE_D) == 0 && eh % int(STRIDE_H) == 0 && ew % int(STRIDE_W) == 0 && count < MAX_PHASE_TAPS)
+                    // truncating division is exact on multiples, negative ones included; % isn't used because
+                    // Vulkan leaves OpSRem undefined for negative operands (NVIDIA returns the unsigned remainder)
+                    if (isMultiple(ed, int(STRIDE_D)) && isMultiple(eh, int(STRIDE_H)) && isMultiple(ew, int(STRIDE_W)) && count < MAX_PHASE_TAPS)
                     {
                         phaseTap[count] = (kd * KERNEL_H + kh) * KERNEL_W + kw;
                         phaseShift[count] = int3(ed / int(STRIDE_D), eh / int(STRIDE_H), ew / int(STRIDE_W));
