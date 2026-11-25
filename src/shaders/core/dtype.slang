@@ -293,10 +293,19 @@ public half halfFromFloat(float f)
     else if (ax >= 0x477ff000) h = 0x7c00;                         // rounds to inf
     else if (ax < 0x38800000)
     {
-        // a float16 subnormal or zero: adding 0.5 lines the float's last bit up with float16's
-        // smallest step, and the float add (which rounds to nearest even) does the rounding
-        float t = asfloat(ax) + 0.5f;
-        h = asuint(t) - asuint(0.5f);
+        // a float16 subnormal or zero, counted in steps of 2^-24 and rounded in integers (a float add
+        // would round however the driver does); rounding up out of the subnormals gives 0x400, 2^-14
+        uint e = ax >> 23;
+        if (e < 102) h = 0;  // below 2^-25
+        else
+        {
+            uint m = (ax & 0x7fffff) | 0x800000;
+            uint s = 126 - e;
+            h = m >> s;
+            uint rest = m & ((1u << s) - 1);
+            uint halfway = 1u << (s - 1);
+            if (rest > halfway || (rest == halfway && (h & 1) != 0)) h += 1;
+        }
     }
     else
     {
