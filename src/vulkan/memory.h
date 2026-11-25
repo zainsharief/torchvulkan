@@ -34,8 +34,13 @@ public:
 
     void invalidate();
     void flush();
+    void release();
 
 private:
+    friend struct DeviceContext;
+    VulkanBuffer* live_prev_ = nullptr;
+    VulkanBuffer* live_next_ = nullptr;
+
     DeviceContext* owner_ = nullptr;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     VmaAllocationInfo allocInfo_{};

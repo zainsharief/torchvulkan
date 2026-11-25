@@ -29,11 +29,15 @@ public:
     bool strictAllocationEnabled() { return strictAllocation_; }
     static uint64_t ValidationErrorCount();
     static bool IsInBadFork();
+    static bool IsShutDown();
     static bool IsInitialized();
+    static void Shutdown();
 
 private:
     VulkanContext();
     ~VulkanContext();
+    void destroy();
+    static void ShutdownAtExit();
 
     void initVulkan();
     void createDeviceContexts();

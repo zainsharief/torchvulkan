@@ -13,7 +13,9 @@ bool VulkanAllocator::initialized()
 
 void VulkanAllocator::emptyCache(c10::MempoolId_t /* mempool_id */)
 {
-    for (DeviceContext* device : VulkanContext::Instance().devices) device->releaseCachedBuffers(SIZE_MAX, MemoryUsage::DEVICE_ONLY);
+    for (DeviceContext* device : VulkanContext::Instance().devices) {
+        for (MemoryUsage usage : {MemoryUsage::DEVICE_ONLY, MemoryUsage::HOST_TO_DEVICE, MemoryUsage::DEVICE_TO_HOST}) device->releaseCachedBuffers(SIZE_MAX, usage);
+    }
 }
 
 void VulkanAllocator::recordStream(const c10::DataPtr& /* ptr */, c10::Stream /* stream */) {}
@@ -70,7 +72,8 @@ c10::DataPtr VulkanAllocator::allocate(size_t nbytes)
 
 void VulkanAllocator::deleter(void* ptr)
 {
-    if (ptr == nullptr || VulkanContext::IsInBadFork()) return;
+    // after shutdown the owning device is gone; the process is exiting, so leave the memory to it
+    if (ptr == nullptr || VulkanContext::IsInBadFork() || VulkanContext::IsShutDown()) return;
     VulkanBuffer* buffer = static_cast<VulkanBuffer*>(ptr);
     DeviceContext* owner = buffer->owner();
     owner->recordFree(buffer->size());
@@ -184,6 +187,16 @@ VulkanBuffer* VulkanAllocator::allocateBuffer(DeviceContext* device, size_t size
     if (device->releaseCachedBuffers(size, usage))
     {
         if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+    }
+
+    // on unified memory staging buffers share the heap, so freeing the other pools can make room too
+    // this is bad for discrete GPUs, but should only happen on an OOM so acceptable
+    for (const MemoryUsage& m : {MemoryUsage::DEVICE_ONLY, MemoryUsage::DEVICE_TO_HOST, MemoryUsage::HOST_TO_DEVICE})
+    {        
+        if (m != usage && device->releaseCachedBuffers(size, m))
+        {
+            if (VulkanBuffer* buffer = createBuffer(device, size, usage)) return buffer;
+        }
     }
 
     if (!VulkanContext::Instance().strictAllocationEnabled()) 

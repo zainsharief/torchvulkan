@@ -206,7 +206,8 @@ double VulkanShaderManager::getTimestamp(
     const PushConstants& pushConstants,
     at::TensorList readTensors,
     at::TensorList writeTensors,
-    uint32_t groupX, uint32_t groupY, uint32_t groupZ)
+    uint32_t groupX, uint32_t groupY, uint32_t groupZ,
+    uint32_t runs)
 {
     TORCH_CHECK(timestampValidBits > 0, "torchvulkan [ERROR]: the compute queue of '", device->properties.deviceName, "' does not support timestamps.");
 
@@ -259,7 +260,7 @@ double VulkanShaderManager::getTimestamp(
     betweenDep.pMemoryBarriers = &between;
 
     device->device_table.vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timestampPool, 0);
-    for (uint32_t run = 0; run < TIMESTAMP_RUNS; run++)
+    for (uint32_t run = 0; run < runs; run++)
     {
         if (run > 0) device->device_table.vkCmdPipelineBarrier2(cmd, &betweenDep);
         device->device_table.vkCmdDispatch(cmd, op.groupX, op.groupY, op.groupZ);
@@ -303,7 +304,7 @@ double VulkanShaderManager::getTimestamp(
 
     const uint64_t mask = timestampValidBits >= 64 ? ~uint64_t(0) : (uint64_t(1) << timestampValidBits) - 1;
     const uint64_t elapsed = (ticks[1] - ticks[0]) & mask;
-    return static_cast<double>(elapsed) / TIMESTAMP_RUNS * device->properties.limits.timestampPeriod;
+    return static_cast<double>(elapsed) / runs * device->properties.limits.timestampPeriod;
 }
 
 void VulkanShaderManager::trackPending(const MemoryRange& range)
@@ -360,15 +361,28 @@ uint32_t VulkanShaderManager::resolveBinary(ShaderKey key) const
 
 ShaderSubmitInfo VulkanShaderManager::allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)
 {
+    VkShaderModule shaderModule;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        auto& shaderMap = shaderCache[binary][subgroupSize];
+        auto it = shaderMap.find(spec.key);
+        if (it != shaderMap.end()) return it->second;
+        shaderModule = allocateShaderModule(binary);
+    }
+
+    // the driver compiles outside the lock, so pipelines can be built on several threads at once
+    VkPipeline pipeline = createPipeline(binary, shaderModule, subgroupSize, spec);
+
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto& shaderMap = shaderCache[binary][subgroupSize];
+    auto [it, inserted] = shaderCache[binary][subgroupSize].try_emplace(std::string(spec.key), ShaderSubmitInfo{pipeline, pipelineLayout});
+    // another thread built the same pipeline meanwhile: keep theirs
+    if (!inserted) device->device_table.vkDestroyPipeline(device->device, pipeline, nullptr);
+    return it->second;
+}
 
-    auto it = shaderMap.find(spec.key);
-    if (it != shaderMap.end()) return it->second;
-
-    ShaderSubmitInfo info{createPipeline(binary, subgroupSize, spec), pipelineLayout};
-    shaderMap.emplace(std::string(spec.key), info);
-    return info;
+void VulkanShaderManager::prepare(ShaderKey key, uint32_t subgroupSize, const SpecializationArgs& specConstants)
+{
+    allocateShader(resolveBinary(key), subgroupSize, specConstants);
 }
 
 VkShaderModule VulkanShaderManager::allocateShaderModule(uint32_t binary)
@@ -390,11 +404,8 @@ VkShaderModule VulkanShaderManager::allocateShaderModule(uint32_t binary)
     return shaderModule;
 }
 
-VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)
+VkPipeline VulkanShaderManager::createPipeline(uint32_t binary, VkShaderModule shaderModule, uint32_t subgroupSize, const SpecializationArgs& spec)
 {
-    // assume active mutex
-    VkShaderModule shaderModule = allocateShaderModule(binary);
-
     std::vector<VkSpecializationMapEntry> mapEntries(spec.numConstants);
     size_t totalSize = 0;
     for (size_t i = 0; i < spec.numConstants; i++)

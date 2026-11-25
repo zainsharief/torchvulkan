@@ -34,16 +34,14 @@ bool DeviceContext::releaseCachedBuffers(size_t size, MemoryUsage usage)
     size_t budget = memoryBudget();
     size_t driver = driverBudget();
 
-    // on unified memory staging buffers share the heap, so once the requested pool is empty free the other one too
-    MemoryUsage other = usage == MemoryUsage::DEVICE_ONLY ? MemoryUsage::HOST_TO_DEVICE : MemoryUsage::DEVICE_ONLY;
     bool freed = false;
     while (size > budget || memoryUsage() > budget - size) {
-        if (!cache.releaseOldestBuffer(usage) && !cache.releaseOldestBuffer(other)) break; // cache empty
+        if (!cache.releaseOldestBuffer(usage)) break; // pool empty
         freed = true;
     }
 
     if (freed) {
-        held_budget.store(driver);
+        held_budget.store(std::max(held_budget.load(), driver));
         vmaSetCurrentFrameIndex(allocator, 0);
     }
 
@@ -89,8 +87,28 @@ void DeviceContext::recordFree(size_t bytes)
     total_freed_bytes.fetch_add(bytes);
 }
 
-DeviceContext::~DeviceContext()
+void DeviceContext::trackBuffer(VulkanBuffer* buffer)
 {
+    std::lock_guard<std::mutex> lock(live_mutex);
+    buffer->live_next_ = live_head;
+    if (live_head != nullptr) live_head->live_prev_ = buffer;
+    live_head = buffer;
+}
+
+void DeviceContext::untrackBuffer(VulkanBuffer* buffer)
+{
+    std::lock_guard<std::mutex> lock(live_mutex);
+    if (buffer->live_prev_ != nullptr) buffer->live_prev_->live_next_ = buffer->live_next_;
+    else live_head = buffer->live_next_;
+    if (buffer->live_next_ != nullptr) buffer->live_next_->live_prev_ = buffer->live_prev_;
+    buffer->live_prev_ = buffer->live_next_ = nullptr;
+}
+
+void DeviceContext::destroy()
+{
+    // finish in-flight work before freeing anything it may still use
+    if (device != VK_NULL_HANDLE) device_table.vkDeviceWaitIdle(device);
+
     delete tuner;
     tuner = nullptr;
     delete shader_manager;
@@ -98,7 +116,28 @@ DeviceContext::~DeviceContext()
 
     cache.clear();
 
+    // buffers still alive here belong to tensors Python never freed
+    {
+        std::lock_guard<std::mutex> lock(live_mutex);
+        for (VulkanBuffer* buffer = live_head; buffer != nullptr;) 
+        {
+            VulkanBuffer* next = buffer->live_next_;
+            buffer->live_prev_ = buffer->live_next_ = nullptr;
+            buffer->release();
+            buffer = next;
+        }
+        live_head = nullptr;
+    }
+
     if (commandPool != VK_NULL_HANDLE) device_table.vkDestroyCommandPool(device, commandPool, nullptr);
+    commandPool = VK_NULL_HANDLE;
     if (allocator != VK_NULL_HANDLE) vmaDestroyAllocator(allocator);
+    allocator = VK_NULL_HANDLE;
     if (device != VK_NULL_HANDLE) device_table.vkDestroyDevice(device, nullptr);
+    device = VK_NULL_HANDLE;
+}
+
+DeviceContext::~DeviceContext()
+{
+    destroy();
 }

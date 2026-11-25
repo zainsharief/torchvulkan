@@ -22,6 +22,7 @@
 
 class VulkanCache {
 public:
+    VulkanCache();
     void setOwner(DeviceContext* owner) { owner_ = owner; }
 
     VkCommandBuffer allocateCommandBuffer();
@@ -59,10 +60,16 @@ private:
     {
         std::list<VulkanBuffer*> lru; // oldest first
         std::unordered_map<size_t, std::deque<std::list<VulkanBuffer*>::iterator>> by_size; // keyed by the rounded buffer size, oldest first
+        size_t bytes = 0;
     };
-    BufferPool deviceBufferPool;
-    BufferPool stagingBufferPool;
-    std::atomic<size_t> cached_device_bytes{0};
-    void countCached(const VulkanBuffer* buffer, bool added);
+
     BufferPool& poolFor(MemoryUsage usage);
+    BufferPool deviceBufferPool;
+    BufferPool uploadBufferPool;
+    BufferPool downloadBufferPool;
+    size_t stagingCacheCap_;
+
+    bool releaseOldestLocked(BufferPool& pool);
+    void countCached(const VulkanBuffer* buffer, bool added);
+    std::atomic<size_t> cached_device_bytes{0};    
 };

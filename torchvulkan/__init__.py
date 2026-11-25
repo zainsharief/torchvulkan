@@ -165,6 +165,8 @@ def is_bf16_supported() -> bool:
 def _is_in_bad_fork() -> bool:
     return _C._is_in_bad_fork()
 
+# schedules the device teardown for the end of the process (after Python has freed the tensors)
+atexit.register(_C._shutdown)
 atexit.register(_C._save_pipeline_caches)
 
 torch.utils.rename_privateuse1_backend('vulkan')
