@@ -405,13 +405,6 @@ at::Tensor dispatch_matmul_coop_shader(
         return finish_matmul_output(apply_matmul_activation(result, activation), shape);
     }
 
-    // the direct path clamps a block's first row/column to m_dim - BLOCK (n_dim - BLOCK), which wraps when
-    // the output is smaller than a block: its loads then run past the operands (NaN on an RDNA2 iGPU, a GPU
-    // fault and driver reset on an RX 6800 XT)
-    available_block_sizes.erase(std::remove_if(available_block_sizes.begin(), available_block_sizes.end(),
-        [&](uint32_t block) { return block > M || block > N; }), available_block_sizes.end());
-    if (available_block_sizes.empty()) return simd_fallback();
-
     auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
     if (!coop_loadable(ops.self_b) || !coop_loadable(ops.other_b) || !fits_matmul_indexing(ops, out)) return simd_fallback();
 
