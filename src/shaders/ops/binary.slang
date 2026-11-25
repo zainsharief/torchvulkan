@@ -18,15 +18,15 @@ public struct Metadata
     public uint64_t strides_out;
 }
 
-public struct BinaryPushConstants<T>
+public struct BinaryPushConstants<T : ITorchVulkan>
 {
     public uint64_t tensor_a;
     public uint64_t tensor_b;
     public uint64_t tensor_out;
     public uint64_t metadata;
     public uint64_t numel;
-    public T alpha;
-    public T scalar_value;
+    public T.PushScalar alpha;
+    public T.PushScalar scalar_value;
 }
 
 public interface IBinaryOp<T>
@@ -222,30 +222,32 @@ public void baseBinaryKernel<T : ITorchVulkan, Op : IBinaryOp<T>, let VEC_SIZE :
 public void dispatchBinary<T : ITorchVulkan, let VEC_SIZE : int>(
     uint3 gi, BinaryPushConstants<T> pcs)
 {
+    T alpha = T.fromPushScalar(pcs.alpha);
+    T scalar_value = T.fromPushScalar(pcs.scalar_value);
     switch (OP_TYPE)
     {
-    case 0:  baseBinaryKernel<T, AddOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 1:  baseBinaryKernel<T, SubOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 2:  baseBinaryKernel<T, RSubOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 3:  baseBinaryKernel<T, MulOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 4:  baseBinaryKernel<T, DivOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 5:  baseBinaryKernel<T, MaxOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 6:  baseBinaryKernel<T, MinOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 7:  baseBinaryKernel<T, PowOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 8:  baseBinaryKernel<T, RPowOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 9:  baseBinaryKernel<T, Atan2Op<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 10: baseBinaryKernel<T, ThresholdBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 11: baseBinaryKernel<T, FmaxOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 12: baseBinaryKernel<T, FminOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 13: baseBinaryKernel<T, FmodOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 14: baseBinaryKernel<T, RemainderOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 15: baseBinaryKernel<T, HypotOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 16: baseBinaryKernel<T, XlogyOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 17: baseBinaryKernel<T, LogaddexpOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 18: baseBinaryKernel<T, Logaddexp2Op<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 19: baseBinaryKernel<T, FloorDivideOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 20: baseBinaryKernel<T, GeluBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
-    case 21: baseBinaryKernel<T, GeluTanhBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, pcs.alpha, pcs.scalar_value); break;
+    case 0:  baseBinaryKernel<T, AddOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 1:  baseBinaryKernel<T, SubOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 2:  baseBinaryKernel<T, RSubOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 3:  baseBinaryKernel<T, MulOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 4:  baseBinaryKernel<T, DivOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 5:  baseBinaryKernel<T, MaxOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 6:  baseBinaryKernel<T, MinOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 7:  baseBinaryKernel<T, PowOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 8:  baseBinaryKernel<T, RPowOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 9:  baseBinaryKernel<T, Atan2Op<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 10: baseBinaryKernel<T, ThresholdBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 11: baseBinaryKernel<T, FmaxOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 12: baseBinaryKernel<T, FminOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 13: baseBinaryKernel<T, FmodOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 14: baseBinaryKernel<T, RemainderOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 15: baseBinaryKernel<T, HypotOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 16: baseBinaryKernel<T, XlogyOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 17: baseBinaryKernel<T, LogaddexpOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 18: baseBinaryKernel<T, Logaddexp2Op<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 19: baseBinaryKernel<T, FloorDivideOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 20: baseBinaryKernel<T, GeluBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
+    case 21: baseBinaryKernel<T, GeluTanhBackwardOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, alpha, scalar_value); break;
     default: break;
     }
 }

@@ -1,13 +1,14 @@
 module resample;
 
 import core.indexing;
+import core.dtype;
 
 [[vk::constant_id(0)]] public const uint MODE = 0;
 [[vk::constant_id(1)]] public const uint BACKWARD = 0;
 [[vk::constant_id(2)]] public const uint ALIGN_CORNERS = 0;
 [[vk::constant_id(3)]] public const uint WG_x = 0;
 
-public struct ResamplePushConstants<T>
+public struct ResamplePushConstants<T : ITorchVulkan>
 {
     public uint64_t input;
     public uint64_t output;
@@ -16,8 +17,8 @@ public struct ResamplePushConstants<T>
     public uint out_length;
     public uint inner;
     public uint padding;
-    public T scale;
-    public T support;
+    public T.PushScalar scale;
+    public T.PushScalar support;
 }
 
 // a whole-valued T is exact in float32 at index sizes, which bridges the generic conversion to int
@@ -163,10 +164,12 @@ Taps<T> computeTaps<T : __BuiltinFloatingPointType>(int o, int in_length, int ou
     return taps;
 }
 
-void resampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, ResamplePushConstants<T> pcs)
+void resampleKernel<T : __BuiltinFloatingPointType & ITorchVulkan>(uint3 gi, ResamplePushConstants<T> pcs)
 {
     uint64_t idx = uint64_t(flat_thread(gi, WG_x));
     if (idx >= pcs.count) return;
+    T scale = T.fromPushScalar(pcs.scale);
+    T support = T.fromPushScalar(pcs.support);
 
     T* input = (T*)pcs.input;
     T* output = (T*)pcs.output;
@@ -181,7 +184,7 @@ void resampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, ResamplePushConsta
         uint64_t k = idx % inner;
         uint64_t base = outer * uint64_t(in_length) * inner + k;
 
-        Taps<T> taps = computeTaps<T>(o, in_length, out_length, pcs.scale, pcs.support);
+        Taps<T> taps = computeTaps<T>(o, in_length, out_length, scale, support);
         T acc = T(0);
         if (taps.count > 0) acc = input[base + uint64_t(taps.index(0)) * inner] * taps.weight(0);
         for (int j = 1; j < taps.count; j++) acc += input[base + uint64_t(taps.index(j)) * inner] * taps.weight(j);
@@ -199,7 +202,7 @@ void resampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, ResamplePushConsta
     while (lo < hi)
     {
         int mid = (lo + hi) / 2;
-        if (computeTaps<T>(mid, in_length, out_length, pcs.scale, pcs.support).highest() < i) lo = mid + 1;
+        if (computeTaps<T>(mid, in_length, out_length, scale, support).highest() < i) lo = mid + 1;
         else hi = mid;
     }
     int first = lo;
@@ -207,14 +210,14 @@ void resampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, ResamplePushConsta
     while (lo < hi)
     {
         int mid = (lo + hi) / 2;
-        if (computeTaps<T>(mid, in_length, out_length, pcs.scale, pcs.support).lowest() <= i) lo = mid + 1;
+        if (computeTaps<T>(mid, in_length, out_length, scale, support).lowest() <= i) lo = mid + 1;
         else hi = mid;
     }
 
     T acc = T(0);
     for (int o = first; o < lo; o++)
     {
-        Taps<T> taps = computeTaps<T>(o, in_length, out_length, pcs.scale, pcs.support);
+        Taps<T> taps = computeTaps<T>(o, in_length, out_length, scale, support);
         T g = input[base + uint64_t(o) * inner];
         for (int j = 0; j < taps.count; j++)
         {
@@ -226,7 +229,7 @@ void resampleKernel<T : __BuiltinFloatingPointType>(uint3 gi, ResamplePushConsta
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void resample_main<T : __BuiltinFloatingPointType>(
+void resample_main<T : __BuiltinFloatingPointType & ITorchVulkan>(
     uint3 gi : SV_DispatchThreadID,
     uniform ResamplePushConstants<T> pcs)
 {
