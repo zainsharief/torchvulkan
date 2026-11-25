@@ -101,7 +101,8 @@ CONV_OPS = ("nn.functional.conv1d", "nn.functional.conv2d", "nn.functional.conv3
 # low-precision ops whose CPU reference computes in the input dtype and is less accurate than the float32 the
 # GPU computes in (matrix_exp's half and bfloat16 powers overflow to nan), so they are compared against a float32
 # reference instead
-FLOAT32_REFERENCE_OPS = ("grid_sampler_2d", "grid_sampler_3d", "nn.functional.grid_sample", "matrix_exp")
+FLOAT32_REFERENCE_OPS = ("grid_sampler_2d", "grid_sampler_3d", "nn.functional.grid_sample", "matrix_exp",
+                         "nn.functional.conv_transpose1d", "nn.functional.conv_transpose2d", "nn.functional.conv_transpose3d")
 
 # decompositions and solvers whose float32 results depend on the order of their eliminations
 LINALG_OPS = ("lu", "lu_solve", "lu_unpack", "ormqr", "cholesky_solve", "cholesky_inverse", "triangular_solve",
