@@ -228,6 +228,42 @@ void copy_float8_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
     }
 }
 
+// bfloat16 <-> float32 with integer ops, for devices without shaderBFloat16 (can_emulate_bfloat16). Widening shifts the
+// bits up; narrowing rounds to nearest even and turns every NaN into 0xFFFF, which is what the CPU's (vectorized)
+// float32 -> bfloat16 copy produces.
+at::Tensor bfloat16_to_float_emulated(const at::Tensor& src)
+{
+    at::Tensor bits = src.contiguous().view(at::kShort).to(at::kInt).bitwise_and(0xffff);
+    return bits.bitwise_left_shift(16).view(at::kFloat);
+}
+
+at::Tensor float_to_bfloat16_emulated(const at::Tensor& src)
+{
+    at::Tensor bits = src.to(at::kFloat).contiguous().view(at::kInt);
+    at::Tensor lsb = bits.bitwise_right_shift(16).bitwise_and(1);
+    at::Tensor rounded = bits.add(lsb.add(0x7fff)).bitwise_right_shift(16);   // arithmetic: in int16 range
+    at::Tensor nan = bits.bitwise_and(0x7fffffff).gt(0x7f800000);
+    rounded = at::where(nan, at::full_like(rounded, -1), rounded);   // 0xFFFF
+    return rounded.to(at::kShort).view(at::kBFloat16);
+}
+
+// a copy to or from bfloat16 on a device that can only emulate it; false if neither side is bfloat16 or the other side
+// can't run on the device either
+bool copy_bfloat16_emulated(const at::Tensor& src, const at::Tensor& dst)
+{
+    const at::ScalarType s = src.scalar_type(), d = dst.scalar_type();
+    if ((s != at::kBFloat16 && d != at::kBFloat16) || !can_emulate_bfloat16(src)) return false;
+    if (s == at::kBFloat16 && d == at::kBFloat16) return false;
+    if (s == at::kBFloat16) {
+        if (!is_dtype_supported(src, d)) return false;
+        dst.copy_(bfloat16_to_float_emulated(src));   // float32 -> d runs on the device
+        return true;
+    }
+    if (!is_dtype_supported(src, s)) return false;
+    dst.view(at::kShort).copy_(float_to_bfloat16_emulated(src).view(at::kShort));
+    return true;
+}
+
 void copy_complex_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
 {
     if (src.is_complex() && dst.is_complex()) {
@@ -257,6 +293,7 @@ void copy_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
 
     if (src.scalar_type() != dst.scalar_type())
     {
+        if (copy_bfloat16_emulated(src, dst)) return;
         if (!is_dtype_supported(src, src.scalar_type()) || !is_dtype_supported(src, dst.scalar_type())) {
             TORCHVULKAN_FALLBACK("A copy from ", src.scalar_type(), " to ", dst.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
             dst.copy_(src.cpu());

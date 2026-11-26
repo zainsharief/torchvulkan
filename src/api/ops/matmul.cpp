@@ -592,6 +592,14 @@ at::Tensor dispatch_matmul_shader(
 {
     DeviceContext* device = get_device_context(self);
 
+    // bfloat16 on a device without shaderBFloat16: float32 operands, float32 accumulation as before, rounded once at the
+    // end (the CPU's bfloat16 GEMM accumulates in float32 too), all on the GPU instead of the CPU fallback
+    if (at::result_type(self, other) == at::kBFloat16 && can_emulate_bfloat16(device)) {
+        at::Tensor self_f = self.to(at::kFloat), other_f = other.to(at::kFloat);
+        at::Tensor bias_f = bias.defined() ? bias.to(at::kFloat) : bias;
+        return dispatch_matmul_shader(self_f, other_f, bias_f, alpha, beta, activation, cpu_fallback).to(at::kBFloat16);
+    }
+
     if (device->support_coopmat) return dispatch_matmul_coop_shader(self, other, bias, alpha, beta, activation, cpu_fallback);
     return dispatch_matmul_simd_shader(self, other, bias, alpha, beta, activation, cpu_fallback);
 }
@@ -605,6 +613,20 @@ void check_matrix_product(const char* name, const at::Tensor& mat1, const at::Te
         mat2.size(0), "x", mat2.size(1), ")");
 }
 
+// the CPU side of a matmul fallback: half and bfloat16 operands go to the CPU as float32, as the CPU's own
+// reduced-precision GEMM is far slower without native support (4608x3072x9216 bfloat16: 249 s vs 0.28 s through float32
+// on a Ryzen 9 5900X, which has no AVX512-BF16); the result is rounded once, as the CPU's opmath does
+static at::Tensor cpu_operand(const at::Tensor& t)
+{
+    at::Tensor c = t.to(at::kCPU);
+    return is_low_prec(c.scalar_type()) ? c.to(at::kFloat) : c;
+}
+
+static at::Tensor from_cpu_result(const at::Tensor& r, const at::Tensor& like)
+{
+    return r.to(like.scalar_type()).to(like.device());
+}
+
 at::Tensor mm_vulkan(
     const at::Tensor& self,
     const at::Tensor& other)
@@ -612,7 +634,7 @@ at::Tensor mm_vulkan(
     check_matrix_product("mm", self, other);
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
-        [&]() { return at::mm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
+        [&]() { return from_cpu_result(at::mm(cpu_operand(self), cpu_operand(other)), self); }
     );
 }
 
@@ -630,7 +652,7 @@ at::Tensor bmm_vulkan(
         self.size(0), ", ", self.size(2), "] but got: [", other.size(0), ", ", other.size(1), "].");
     return dispatch_matmul_shader(
         self, other, {}, 1, 0, MatmulActivation::NONE,
-        [&]() { return at::bmm(self.to(at::kCPU), other.to(at::kCPU)).to(self.device()); }
+        [&]() { return from_cpu_result(at::bmm(cpu_operand(self), cpu_operand(other)), self); }
     );
 }
 
@@ -648,7 +670,7 @@ at::Tensor addmm_vulkan(
     check_matrix_product("addmm", mat1, mat2);
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
-        [&]() { return at::addmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
+        [&]() { return from_cpu_result(at::addmm(cpu_operand(input), cpu_operand(mat1), cpu_operand(mat2), beta, alpha), mat1); }
     );
 }
 
@@ -663,7 +685,7 @@ at::Tensor baddbmm_vulkan(
         input.dtype().name(), ", batch1: ", mat1.dtype().name(), ", batch2: ", mat2.dtype().name());
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, MatmulActivation::NONE,
-        [&]() { return at::baddbmm(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha).to(mat1.device()); }
+        [&]() { return from_cpu_result(at::baddbmm(cpu_operand(input), cpu_operand(mat1), cpu_operand(mat2), beta, alpha), mat1); }
     );
 }
 
@@ -678,7 +700,7 @@ at::Tensor addmm_activation_vulkan(
     MatmulActivation activation = use_gelu ? MatmulActivation::GELU : MatmulActivation::RELU;
     return dispatch_matmul_shader(
         mat1, mat2, input, alpha, beta, activation,
-        [&]() { return at::_addmm_activation(input.to(at::kCPU), mat1.to(at::kCPU), mat2.to(at::kCPU), beta, alpha, use_gelu).to(mat1.device()); }
+        [&]() { return from_cpu_result(at::_addmm_activation(cpu_operand(input), cpu_operand(mat1), cpu_operand(mat2), beta, alpha, use_gelu), mat1); }
     );
 }
 

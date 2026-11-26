@@ -86,6 +86,18 @@ inline bool is_dtype_supported(const at::Tensor& on, at::ScalarType dtype)
     return is_dtype_supported(get_device_context(on), dtype);
 }
 
+// bfloat16 is the top half of a float32, so a device without shaderBFloat16 (RADV on RDNA3, for one) can still convert it
+// with integer ops and compute in float32 on the GPU, instead of sending every bfloat16 op to the CPU
+inline bool can_emulate_bfloat16(const DeviceContext* device)
+{
+    return !device->support_bfloat16 && device->support_float32 && device->support_int32 && device->support_int16;
+}
+
+inline bool can_emulate_bfloat16(const at::Tensor& on)
+{
+    return can_emulate_bfloat16(get_device_context(on));
+}
+
 // the dtype whose byte-width variant moves `dtype`'s elements, for kernels that only copy (copy, index_gather)
 inline c10::ScalarType get_dtype_width_variant(c10::ScalarType dtype)
 {
