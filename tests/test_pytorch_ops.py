@@ -103,6 +103,10 @@ CONV_OPS = ("nn.functional.conv1d", "nn.functional.conv2d", "nn.functional.conv3
 # reference instead
 FLOAT32_REFERENCE_OPS = ("grid_sampler_2d", "grid_sampler_3d", "nn.functional.grid_sample", "matrix_exp")
 
+# the CPU's low-precision transposed convolutions are far less accurate too, but a device without the dtype falls
+# back to them, so only one that runs the dtype is compared against float32
+TRANSPOSED_CONV_OPS = ("nn.functional.conv_transpose1d", "nn.functional.conv_transpose2d", "nn.functional.conv_transpose3d")
+
 # decompositions and solvers whose float32 results depend on the order of their eliminations
 LINALG_OPS = ("lu", "lu_solve", "lu_unpack", "ormqr", "cholesky_solve", "cholesky_inverse", "triangular_solve",
               "matrix_exp", "logdet", "det", "inverse", "pinverse", "geqrf")
@@ -192,6 +196,8 @@ class TestVulkanOps(TestCase):
                 self.skipTest(f"Sample generation for '{op.name}' needs an unimplemented Vulkan op ({reason}).")
             raise
 
+        float32_reference = dtype in (torch.float16, torch.bfloat16) and (op.name in FLOAT32_REFERENCE_OPS
+            or (op.name in TRANSPOSED_CONV_OPS and dtype in torchvk.get_amp_supported_dtype()))
         compared = 0
         skipped_reason = None
 
@@ -226,7 +232,7 @@ class TestVulkanOps(TestCase):
             if getattr(options, "acc_policy", None) == "auto" and dtype in (torch.float16, torch.bfloat16):
                 cpu_kwargs = {**cpu_kwargs, "options": dataclasses.replace(options, acc_policy="compact")}
 
-            if op.name in FLOAT32_REFERENCE_OPS and dtype in (torch.float16, torch.bfloat16):
+            if float32_reference:
                 upcast = lambda x: x.float() if isinstance(x, torch.Tensor) and x.is_floating_point() else x
                 cpu_input, cpu_args = upcast(cpu_input), tuple(upcast(a) for a in cpu_args)
 
@@ -306,7 +312,7 @@ class TestVulkanOps(TestCase):
                 self.assertEqual(actual, expected, atol=1, rtol=0)
                 continue
 
-            elif op.name in FLOAT32_REFERENCE_OPS and dtype in (torch.float16, torch.bfloat16):
+            elif float32_reference:
                 rounded = tree_map(lambda x: x.to(dtype) if isinstance(x, torch.Tensor) and x.is_floating_point() else x, expected)
                 self.assertEqual(actual, rounded, atol=1e-2, rtol=1e-2)
                 continue
