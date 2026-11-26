@@ -339,6 +339,7 @@ void VulkanContext::createDeviceContexts()
 
         context->properties = props2.properties;
         context->driver_id = props12.driverID;
+        context->driver_info = props12.driverInfo;
 
         // pipelines are pinned to the largest subgroup size unless they require another (see createPipeline); without control, kernels get the driver's default.
         // a pinned size caps a workgroup at size * maxComputeWorkgroupSubgroups, so devices where that is below the workgroups

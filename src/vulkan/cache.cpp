@@ -220,8 +220,10 @@ std::string VulkanCache::cachePath(const char* kind, const char* extension) cons
     // the driver checks the cache header too; the name keeps one file per device and driver
     char uuid[2 * VK_UUID_SIZE + 1] = {0};
     for (int i = 0; i < VK_UUID_SIZE; i++) std::snprintf(uuid + 2 * i, 3, "%02x", owner_->properties.pipelineCacheUUID[i]);
+    uint32_t info_hash = 2166136261u;  // FNV-1a
+    for (unsigned char c : owner_->driver_info) info_hash = (info_hash ^ c) * 16777619u;
     char name[128];
-    std::snprintf(name, sizeof(name), "%s-%04x-%04x-%s.%s", kind, owner_->properties.vendorID, owner_->properties.deviceID, uuid, extension);
+    std::snprintf(name, sizeof(name), "%s-%04x-%04x-%s-%08x.%s", kind, owner_->properties.vendorID, owner_->properties.deviceID, uuid, info_hash, extension);
     return (dir / name).string();
 }
 
