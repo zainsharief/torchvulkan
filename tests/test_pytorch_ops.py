@@ -101,14 +101,17 @@ CONV_OPS = ("nn.functional.conv1d", "nn.functional.conv2d", "nn.functional.conv3
 # low-precision ops whose CPU reference computes in the input dtype and is less accurate than the float32 the
 # GPU computes in (matrix_exp's half and bfloat16 powers overflow to nan), so they are compared against a float32
 # reference instead
-FLOAT32_REFERENCE_OPS = ("grid_sampler_2d", "grid_sampler_3d", "nn.functional.grid_sample", "matrix_exp",
-                         # the CPU accumulates low-precision conv_transpose3d in the input dtype; the GPU in float32
-                         # (bfloat16: CPU 253, GPU 251, float32 251.475)
-                         "nn.functional.conv_transpose3d")
+FLOAT32_REFERENCE_OPS = ("grid_sampler_2d", "grid_sampler_3d", "nn.functional.grid_sample", "matrix_exp")
+
+# the CPU's low-precision transposed convolutions are far less accurate too, but a device without the dtype falls
+# back to them, so only one that runs the dtype is compared against float32. bfloat16 without shader support also
+# runs on the device, in float32 (can_emulate_bfloat16: float32, int32 and int16 are enough)
+TRANSPOSED_CONV_OPS = ("nn.functional.conv_transpose1d", "nn.functional.conv_transpose2d", "nn.functional.conv_transpose3d")
 
 
-def uses_float32_reference(op_name, dtype):
-    return op_name in FLOAT32_REFERENCE_OPS and dtype in (torch.float16, torch.bfloat16)
+def runs_on_device(dtype):
+    p = torchvk.get_device_properties()
+    return dtype in torchvk.get_amp_supported_dtype() or (dtype == torch.bfloat16 and not p.has_bf16 and p.has_int16)
 
 # decompositions and solvers whose float32 results depend on the order of their eliminations
 LINALG_OPS = ("lu", "lu_solve", "lu_unpack", "ormqr", "cholesky_solve", "cholesky_inverse", "triangular_solve",
@@ -199,6 +202,8 @@ class TestVulkanOps(TestCase):
                 self.skipTest(f"Sample generation for '{op.name}' needs an unimplemented Vulkan op ({reason}).")
             raise
 
+        float32_reference = dtype in (torch.float16, torch.bfloat16) and (op.name in FLOAT32_REFERENCE_OPS
+            or (op.name in TRANSPOSED_CONV_OPS and runs_on_device(dtype)))
         compared = 0
         skipped_reason = None
 
@@ -233,10 +238,9 @@ class TestVulkanOps(TestCase):
             if getattr(options, "acc_policy", None) == "auto" and dtype in (torch.float16, torch.bfloat16):
                 cpu_kwargs = {**cpu_kwargs, "options": dataclasses.replace(options, acc_policy="compact")}
 
-            if uses_float32_reference(op.name, dtype):
+            if float32_reference:
                 upcast = lambda x: x.float() if isinstance(x, torch.Tensor) and x.is_floating_point() else x
                 cpu_input, cpu_args = upcast(cpu_input), tuple(upcast(a) for a in cpu_args)
-                cpu_kwargs = {k: upcast(v) for k, v in cpu_kwargs.items()}   # e.g. nll_loss's weight
 
             detector = SeededOpDetector()
             cpu_error = None
@@ -314,7 +318,7 @@ class TestVulkanOps(TestCase):
                 self.assertEqual(actual, expected, atol=1, rtol=0)
                 continue
 
-            elif uses_float32_reference(op.name, dtype):
+            elif float32_reference:
                 rounded = tree_map(lambda x: x.to(dtype) if isinstance(x, torch.Tensor) and x.is_floating_point() else x, expected)
                 self.assertEqual(actual, rounded, atol=1e-2, rtol=1e-2)
                 continue
