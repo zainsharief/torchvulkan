@@ -1096,6 +1096,12 @@ at::Tensor convolution_vulkan(
     c10::SymIntArrayRef output_padding_,
     c10::SymInt groups_)
 {
+    if (weight.scalar_type() == at::kBFloat16 && !is_dtype_supported(weight, at::kBFloat16) && can_emulate_bfloat16(weight)) {
+        // bfloat16 through float32 on the GPU, rounded once (the CPU's bfloat16 convolution accumulates in float32 too)
+        c10::optional<at::Tensor> bias_f = bias.has_value() && bias->defined() ? c10::optional<at::Tensor>(bias->to(at::kFloat)) : bias;
+        return convolution_vulkan(input.to(at::kFloat), weight.to(at::kFloat), bias_f, stride_, padding_, dilation_, transposed,
+                                  output_padding_, groups_).to(at::kBFloat16);
+    }
     int64_t groups = groups_.guard_int(__FILE__, __LINE__);
     std::vector<int64_t> kernel = spatial_kernel(weight);
     int64_t dims = static_cast<int64_t>(kernel.size());
@@ -1128,6 +1134,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
     c10::SymInt groups_,
     std::array<bool, 3> output_mask)
 {
+    if (weight.scalar_type() == at::kBFloat16 && !is_dtype_supported(weight, at::kBFloat16) && can_emulate_bfloat16(weight)) {
+        auto [gi, gw, gb] = convolution_backward_vulkan(grad_output.to(at::kFloat), input.to(at::kFloat), weight.to(at::kFloat), stride_,
+                                                        padding_, dilation_, transposed, output_padding_, groups_, output_mask);
+        auto down = [](const at::Tensor& t, at::ScalarType dt) { return t.defined() ? t.to(dt) : t; };
+        return std::make_tuple(down(gi, input.scalar_type()), down(gw, weight.scalar_type()), down(gb, grad_output.scalar_type()));
+    }
     int64_t groups = groups_.guard_int(__FILE__, __LINE__);
     std::vector<int64_t> kernel = spatial_kernel(weight);
     int64_t dims = static_cast<int64_t>(kernel.size());

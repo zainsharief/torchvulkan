@@ -238,6 +238,11 @@ at::Tensor reduce_dims_vulkan(
         at::Tensor r = reduce_dims_vulkan(flat, at::IntArrayRef{1}, /*keepdim=*/false, operation, empty_value, has_subgroup);
         return unview(r.reshape(keepdim ? out_sizes : kept_sizes));
     }
+    if (self.scalar_type() == at::kBFloat16 && !is_dtype_supported(self, self.scalar_type()) && can_emulate_bfloat16(self)) {
+        // through float32 on the GPU (the CPU accumulates bfloat16 in float32 too), rounded once
+        at::Tensor r = reduce_dims_vulkan(self.to(at::kFloat), dims, keepdim, operation, empty_value, has_subgroup);
+        return r.scalar_type() == at::kFloat ? r.to(at::kBFloat16) : r;
+    }
     if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());
@@ -452,6 +457,10 @@ at::Tensor argreduce(
     if (is_dtype_supported(x, x.scalar_type()) && x.dim() <= MAX_DIMS && !fits_32bit_indexing({x})) {
         at::Tensor idx = argreduce_chunked(x, d, op);
         return keepdim ? idx : idx.squeeze(d);
+    }
+    if (x.scalar_type() == at::kBFloat16 && !is_dtype_supported(x, at::kBFloat16) && can_emulate_bfloat16(x)) {
+        at::Tensor wide = self.to(at::kFloat);   // exact: the same order, the same first index of ties
+        return op == ArgOp::ARGMAX ? at::argmax(wide, dim, keepdim) : at::argmin(wide, dim, keepdim);
     }
     if (!is_dtype_supported(x, x.scalar_type()) || x.dim() > MAX_DIMS) {
         TORCHVULKAN_FALLBACK("This ", op == ArgOp::ARGMAX ? "argmax" : "argmin", " on ", x.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");

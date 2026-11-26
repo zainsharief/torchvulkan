@@ -75,6 +75,11 @@ at::Tensor& fill_scalar_vulkan(
     if (numel == 0) return self;
     
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
+    if (iter.dtype() == at::kBFloat16 && !is_dtype_supported(self, iter.dtype()) && can_emulate_bfloat16(self)) {
+        // filled as float32 and rounded on the copy, as c10::BFloat16(value) rounds
+        self.copy_(at::empty(self.sizes(), self.options().dtype(at::kFloat)).fill_(value));
+        return self;
+    }
     if (!is_dtype_supported(self, iter.dtype()) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
         TORCHVULKAN_FALLBACK("Can't fill a ", iter.dtype(), " tensor of this shape on the Vulkan device. Falling back to CPU.");
         self.copy_(at::empty(self.sizes(), self.options().device(at::kCPU)).fill_(value));

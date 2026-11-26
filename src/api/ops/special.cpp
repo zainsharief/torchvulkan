@@ -134,6 +134,13 @@ at::Tensor& special_out(
     bool ran = scalar_other
         ? dispatch_special_shader(lhs, at::Tensor(), other.item().toDouble(), result, operation)
         : dispatch_special_shader(lhs, other, 0.0, result, operation);
+    if (!ran && dtype == at::kBFloat16 && can_emulate_bfloat16(lhs)) {   // bfloat16 through float32 on the GPU
+        auto up = [](const at::Tensor& t) { return t.defined() && t.scalar_type() == at::kBFloat16 ? t.to(at::kFloat) : t; };
+        at::Tensor wide = at::empty({0}, result.options().dtype(at::kFloat));
+        special_out(up(self), up(other), wide, operation, fallback);
+        result.copy_(wide);
+        ran = true;
+    }
     if (!ran) {
         TORCHVULKAN_FALLBACK("A special function on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
         result.copy_(fallback(self.cpu(), other.defined() ? other.cpu() : other));

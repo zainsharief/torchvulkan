@@ -94,6 +94,10 @@ at::Tensor unary_op_vulkan(
     if (numel == 0) return dst;
 
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
+    if (!supported && dtype == at::kBFloat16 && can_emulate_bfloat16(device)) {
+        dst.copy_(unary_op_vulkan(src.to(at::kFloat), operation, fallback));   // bfloat16 through float32 on the GPU
+        return dst;
+    }
     if (!supported || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
         TORCHVULKAN_FALLBACK("A unary op on ", dtype, " can't run on the Vulkan device. Falling back to CPU.");
         return fallback(src.cpu()).to(src.device());

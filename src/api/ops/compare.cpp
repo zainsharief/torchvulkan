@@ -188,6 +188,9 @@ at::Tensor where_vulkan(
 
     DeviceContext* context = get_device_context(out);
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
+    if (!is_dtype_supported(context, promoted) && promoted == at::kBFloat16 && can_emulate_bfloat16(context)) {
+        return at::where(c, a.to(at::kFloat), b.to(at::kFloat)).to(at::kBFloat16);   // exact: every bfloat16 is a float32
+    }
     if (!is_dtype_supported(context, promoted) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
         TORCHVULKAN_FALLBACK("A where on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         return at::where(c.cpu(), a.cpu(), b.cpu()).to(device);
@@ -241,6 +244,11 @@ at::Tensor& compare_scalar_out_vulkan(const at::Tensor& self, const at::Scalar& 
     }
     resize_output_like(out, self.sizes(), {self});
     c10::ScalarType promoted = at::result_type(self, other);
+    if (promoted == at::kBFloat16 && can_emulate_bfloat16(self) && !is_dtype_supported(self, promoted)) {
+        // the comparison runs in bfloat16 on the CPU, so the scalar is rounded to bfloat16 first; then exact in float32
+        at::Scalar rounded = other.isBoolean() ? other : at::Scalar(static_cast<double>(static_cast<float>(c10::BFloat16(other.to<float>()))));
+        return compare_scalar_out_vulkan(self.to(at::kFloat), rounded, out, op);
+    }
     if (!dispatch_compare_shader(self, nullptr, other, out, op, promoted)) {
         TORCHVULKAN_FALLBACK("A comparison on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare_scalar(self.cpu(), other, op));
@@ -268,6 +276,10 @@ at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, 
     c10::ScalarType promoted = at::result_type(self, other);
     at::Tensor lhs = self.to(out.device());
     at::Tensor rhs = other.to(out.device());
+    if (promoted == at::kBFloat16 && can_emulate_bfloat16(lhs) && !is_dtype_supported(lhs, promoted)) {
+        auto up = [](const at::Tensor& t) { return t.scalar_type() == at::kBFloat16 ? t.to(at::kFloat) : t; };
+        return compare_out_vulkan(up(lhs), up(rhs), out, op);   // exact in float32
+    }
     if (!dispatch_compare_shader(lhs, &rhs, at::Scalar(0), out, op, promoted)) {
         TORCHVULKAN_FALLBACK("A comparison on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         out.copy_(cpu_compare(self.cpu(), other.cpu(), op));

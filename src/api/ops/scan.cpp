@@ -198,6 +198,12 @@ void cumscanarg(
         cumscanarg_in_pieces(self, values, indices, d, op);
         return;
     }
+    if (self.scalar_type() == at::kBFloat16 && !is_dtype_supported(self, at::kBFloat16) && can_emulate_bfloat16(self)) {
+        at::Tensor wide = at::empty_like(values, values.options().dtype(at::kFloat));
+        cumscanarg(self.to(at::kFloat), wide, indices, dim, op);   // exact in float32
+        values.copy_(wide);
+        return;
+    }
     if (!is_dtype_supported(self, self.scalar_type())) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), op == CumArgOp::MAX ? " cummax" : " cummin", " can't run on the Vulkan device. Falling back to CPU.");
         auto r = op == CumArgOp::MAX ? at::cummax(self.cpu(), dim) : at::cummin(self.cpu(), dim);

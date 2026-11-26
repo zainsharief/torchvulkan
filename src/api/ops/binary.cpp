@@ -226,6 +226,9 @@ at::Tensor binary_op_vulkan(
     if (!out.has_value()) out = dispatch_binary_shader(self, at::Tensor(), other, alpha, operation, promoted);
     if (out.has_value()) return *out;
 
+    if (promoted == at::kBFloat16 && can_emulate_bfloat16(self)) {   // bfloat16 through float32 on the GPU, rounded once
+        return binary_op_vulkan(self.to(at::kFloat), other, alpha, operation, fallback).to(promoted);
+    }
     TORCHVULKAN_FALLBACK("A binary op on ", self.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
     return fallback(self.cpu(), other).to(self.device());
 }
@@ -260,6 +263,10 @@ at::Tensor binary_op_vulkan(
     if (!out.has_value()) out = dispatch_binary_shader(lhs, rhs, at::Scalar(0), alpha, operation, at::result_type(self, other));
     if (out.has_value()) return *out;
 
+    if (at::result_type(self, other) == at::kBFloat16 && can_emulate_bfloat16(lhs)) {   // through float32 on the GPU, rounded once
+        auto up = [](const at::Tensor& t) { return t.scalar_type() == at::kBFloat16 ? t.to(at::kFloat) : t; };
+        return binary_op_vulkan(up(lhs), up(rhs), alpha, operation, fallback).to(at::kBFloat16);
+    }
     TORCHVULKAN_FALLBACK("A binary op on ", at::result_type(self, other), " can't run on the Vulkan device. Falling back to CPU.");
     return fallback(lhs.cpu(), rhs.cpu()).to(lhs.device());
 }

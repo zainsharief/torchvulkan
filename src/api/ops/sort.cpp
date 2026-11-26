@@ -91,6 +91,11 @@ std::tuple<at::Tensor, at::Tensor> sort_along(const at::Tensor& self, int64_t di
     at::Tensor lines = moved.view({-1, n});
 
     auto sorted = dispatch_sort_shader(lines, descending);
+    if (!sorted.has_value() && self.scalar_type() == at::kBFloat16 && !is_dtype_supported(self, at::kBFloat16) && can_emulate_bfloat16(self)) {
+        // float32 holds every bfloat16 exactly, so the order and the (stable) indices are the same
+        auto [values, indices] = sort_along(self.to(at::kFloat), dim, descending);
+        return std::make_tuple(values.to(at::kBFloat16), indices);
+    }
     if (!sorted.has_value()) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " sort of this size can't run on the Vulkan device. Falling back to CPU.");
         auto [values, indices] = at::sort(self.cpu(), /*stable=*/true, dim, descending);
