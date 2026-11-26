@@ -126,6 +126,12 @@ KERNELS = [
     Kernel('scan_arg', 'ops/scan_arg.slang', [
         Entry('scan_arg_main', DTYPES),
     ]),
+    Kernel('bf16_widen', 'ops/bf16_convert.slang', [
+        Entry('bf16_widen_main', [U32]),
+    ]),
+    Kernel('bf16_narrow', 'ops/bf16_convert.slang', [
+        Entry('bf16_narrow_main', [U16]),
+    ]),
     Kernel('norm', 'ops/norm.slang', [
         Entry('norm_main', FLOATS),
     ]),

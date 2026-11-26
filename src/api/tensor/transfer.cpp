@@ -231,20 +231,44 @@ void copy_float8_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
 // bfloat16 <-> float32 with integer ops, for devices without shaderBFloat16 (can_emulate_bfloat16). Widening shifts the
 // bits up; narrowing rounds to nearest even and turns every NaN into 0xFFFF, which is what the CPU's (vectorized)
 // float32 -> bfloat16 copy produces.
+// bf16_widen_main / bf16_narrow_main: 8 elements per thread, as uint4 when both buffers are 16-byte aligned
+at::Tensor dispatch_bf16_convert(const at::Tensor& src, at::ScalarType out_dtype, torchvulkan::Kernel kernel, at::ScalarType key)
+{
+    at::Tensor s = src.contiguous();
+    at::Tensor out = at::empty(s.sizes(), s.options().dtype(out_dtype));
+    const uint64_t numel = static_cast<uint64_t>(s.numel());
+    if (numel == 0) return out;
+    DeviceContext* device = get_device_context(s);
+    const uint64_t src_address = get_tensor_address(s);
+    const uint64_t dst_address = get_output_address(out);
+    const uint32_t workgroup = 256;
+    SpecializationBuilder spd{};
+    spd.push(workgroup).push(uint32_t(src_address % 16 == 0 && dst_address % 16 == 0));
+    PushConstantBuilder pcs{};
+    pcs.push(src_address).push(dst_address).push(numel);
+    device->shader_manager->dispatchShader(
+        ShaderKey{kernel, key},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {s},
+        /* write = */ {out},
+        get_group_count((numel + 7) / 8, workgroup), 1, 1
+    );
+    return out;
+}
+
+// bfloat16 <-> float32 for devices without shaderBFloat16 (can_emulate_bfloat16), in one pass each (bf16_convert.slang).
+// Widening shifts the bits up; narrowing rounds to nearest even and turns every NaN into 0xFFFF, which is what the
+// CPU's (vectorized) float32 -> bfloat16 copy produces.
 at::Tensor bfloat16_to_float_emulated(const at::Tensor& src)
 {
-    at::Tensor bits = src.contiguous().view(at::kShort).to(at::kInt).bitwise_and(0xffff);
-    return bits.bitwise_left_shift(16).view(at::kFloat);
+    return dispatch_bf16_convert(src, at::kFloat, torchvulkan::Kernel::BF16_WIDEN, at::kUInt32);
 }
 
 at::Tensor float_to_bfloat16_emulated(const at::Tensor& src)
 {
-    at::Tensor bits = src.to(at::kFloat).contiguous().view(at::kInt);
-    at::Tensor lsb = bits.bitwise_right_shift(16).bitwise_and(1);
-    at::Tensor rounded = bits.add(lsb.add(0x7fff)).bitwise_right_shift(16);   // arithmetic: in int16 range
-    at::Tensor nan = bits.bitwise_and(0x7fffffff).gt(0x7f800000);
-    rounded = at::where(nan, at::full_like(rounded, -1), rounded);   // 0xFFFF
-    return rounded.to(at::kShort).view(at::kBFloat16);
+    return dispatch_bf16_convert(src.to(at::kFloat), at::kBFloat16, torchvulkan::Kernel::BF16_NARROW, at::kUInt16);
 }
 
 // a copy to or from bfloat16 on a device that can only emulate it; false if neither side is bfloat16 or the other side
