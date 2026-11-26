@@ -91,3 +91,17 @@ def test_bfloat16_matmul_and_copy_stay_on_the_device():
     env = dict(os.environ, TORCHVULKAN_STRICT='1')
     r = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == 0 and 'ok' in r.stdout, r.stderr[-2000:]
+
+
+def test_bfloat16_copy_broadcasts_and_writes_contiguous_destinations():
+    x = torch.randn(1, 96)
+    dst = torch.zeros(64, 96, dtype=torch.bfloat16, device=DEVICE)
+    dst.copy_(x.to(DEVICE))   # float32 -> bfloat16, broadcast
+    assert torch.equal(dst.cpu().view(torch.int16), x.expand(64, 96).to(torch.bfloat16).view(torch.int16))
+    wide = torch.zeros(64, 96, device=DEVICE)
+    wide.copy_(x.to(torch.bfloat16).to(DEVICE))   # bfloat16 -> float32, broadcast
+    assert torch.equal(wide.cpu(), x.expand(64, 96).to(torch.bfloat16).float())
+    y = torch.randn(33, 17).bfloat16()
+    out = torch.empty(33, 17, device=DEVICE)
+    out.copy_(y.to(DEVICE))   # contiguous: written in place
+    assert torch.equal(out.cpu(), y.float())
