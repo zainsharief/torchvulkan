@@ -232,10 +232,13 @@ void copy_float8_vulkan_to_vulkan(const at::Tensor& src, const at::Tensor& dst)
 // bits up; narrowing rounds to nearest even and turns every NaN into 0xFFFF, which is what the CPU's (vectorized)
 // float32 -> bfloat16 copy produces.
 // bf16_widen_main / bf16_narrow_main: 8 elements per thread, as uint4 when both buffers are 16-byte aligned
-at::Tensor dispatch_bf16_convert(const at::Tensor& src, at::ScalarType out_dtype, torchvulkan::Kernel kernel, at::ScalarType key)
+// writes straight into `into` when it is a contiguous tensor of out_dtype with src's shape, else into a new tensor
+at::Tensor dispatch_bf16_convert(const at::Tensor& src, at::ScalarType out_dtype, torchvulkan::Kernel kernel, at::ScalarType key,
+                                 const at::Tensor& into = at::Tensor())
 {
     at::Tensor s = src.contiguous();
-    at::Tensor out = at::empty(s.sizes(), s.options().dtype(out_dtype));
+    const bool direct = into.defined() && into.scalar_type() == out_dtype && into.is_contiguous() && into.sizes().equals(s.sizes());
+    at::Tensor out = direct ? into : at::empty(s.sizes(), s.options().dtype(out_dtype));
     const uint64_t numel = static_cast<uint64_t>(s.numel());
     if (numel == 0) return out;
     DeviceContext* device = get_device_context(s);
@@ -261,14 +264,14 @@ at::Tensor dispatch_bf16_convert(const at::Tensor& src, at::ScalarType out_dtype
 // bfloat16 <-> float32 for devices without shaderBFloat16 (can_emulate_bfloat16), in one pass each (bf16_convert.slang).
 // Widening shifts the bits up; narrowing rounds to nearest even and turns every NaN into 0xFFFF, which is what the
 // CPU's (vectorized) float32 -> bfloat16 copy produces.
-at::Tensor bfloat16_to_float_emulated(const at::Tensor& src)
+at::Tensor bfloat16_to_float_emulated(const at::Tensor& src, const at::Tensor& into = at::Tensor())
 {
-    return dispatch_bf16_convert(src, at::kFloat, torchvulkan::Kernel::BF16_WIDEN, at::kUInt32);
+    return dispatch_bf16_convert(src, at::kFloat, torchvulkan::Kernel::BF16_WIDEN, at::kUInt32, into);
 }
 
-at::Tensor float_to_bfloat16_emulated(const at::Tensor& src)
+at::Tensor float_to_bfloat16_emulated(const at::Tensor& src, const at::Tensor& into = at::Tensor())
 {
-    return dispatch_bf16_convert(src.to(at::kFloat), at::kBFloat16, torchvulkan::Kernel::BF16_NARROW, at::kUInt16);
+    return dispatch_bf16_convert(src.to(at::kFloat), at::kBFloat16, torchvulkan::Kernel::BF16_NARROW, at::kUInt16, into);
 }
 
 // a copy to or from bfloat16 on a device that can only emulate it; false if neither side is bfloat16 or the other side
@@ -280,10 +283,18 @@ bool copy_bfloat16_emulated(const at::Tensor& src, const at::Tensor& dst)
     if (s == at::kBFloat16 && d == at::kBFloat16) return false;
     if (s == at::kBFloat16) {
         if (!is_dtype_supported(src, d)) return false;
+        if (d == at::kFloat && dst.is_contiguous() && dst.sizes().equals(src.sizes())) {   // one pass, straight into dst
+            bfloat16_to_float_emulated(src, dst);
+            return true;
+        }
         dst.copy_(bfloat16_to_float_emulated(src));   // float32 -> d runs on the device
         return true;
     }
     if (!is_dtype_supported(src, s)) return false;
+    if (dst.is_contiguous() && dst.sizes().equals(src.sizes())) {   // (copy_ may broadcast src)
+        float_to_bfloat16_emulated(src, dst);
+        return true;
+    }
     dst.view(at::kShort).copy_(float_to_bfloat16_emulated(src).view(at::kShort));
     return true;
 }
