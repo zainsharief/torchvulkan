@@ -6,7 +6,7 @@ there. The shader declares every CoopMat with a placeholder dimension, and this
 rewrites the compiled SPIR-V, run by src/shaders/CMakeLists.txt after slangc for
 the kernels scripts/config.py lists with coop_dims:
 
-    splice_coop_dims.py in.spv out.spv --spec-id 18 --placeholder 1009
+    splice_coop_dims.py in.spv out.spv --spec-id 18 --placeholder 1009 [--spec-id 22 --placeholder 1013 ...]
 
 Fails when the placeholder is used anywhere but a cooperative matrix type.
 """
@@ -159,7 +159,10 @@ def splice_coop_dims(words, spec_id, placeholder, name):
 def main(args):
     data = args.input.read_bytes()
     words = struct.unpack(f'<{len(data) // 4}I', data)
-    words = splice_coop_dims(words, args.spec_id, args.placeholder, args.input.name)
+    if len(args.spec_id) != len(args.placeholder):
+        raise ValueError(f'{args.input.name}: every --spec-id needs a --placeholder')
+    for spec_id, placeholder in zip(args.spec_id, args.placeholder):
+        words = splice_coop_dims(words, spec_id, placeholder, args.input.name)
     args.output.write_bytes(struct.pack(f'<{len(words)}I', *words))
 
 
@@ -167,6 +170,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Splice a specialization constant into cooperative matrix dimensions.')
     parser.add_argument('input', type=Path, help='SPIR-V from slangc')
     parser.add_argument('output', type=Path, help='spliced SPIR-V')
-    parser.add_argument('--spec-id', type=int, required=True, help='SpecId of the dimension constant')
-    parser.add_argument('--placeholder', type=int, required=True, help='the literal dimension the shader declares')
+    parser.add_argument('--spec-id', type=int, action='append', required=True, help='SpecId of the dimension constant (repeatable)')
+    parser.add_argument('--placeholder', type=int, action='append', required=True, help='the literal dimension the shader declares, one per --spec-id')
     main(parser.parse_args())
