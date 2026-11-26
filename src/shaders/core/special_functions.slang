@@ -2800,5 +2800,7 @@ public float polygamma(float x, int n)
 {
     if (n == 0) return float.ext_digamma(x);
     if (n == 1) return trigamma(x);
+    // at the poles zeta is inf, which NVIDIA's compiler loses in the product below
+    if (x <= 0.0f && x == floor(x)) return (n % 2) != 0 ? _inf() : -_inf();
     return ((n % 2) != 0 ? 1.0f : -1.0f) * exp(float.ext_lgamma(float(n) + 1.0f)) * zeta(float(n + 1), x);
 }
