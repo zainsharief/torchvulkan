@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <string>
 
 #include "vk_mem_alloc.h"
 #include "cache.h"
@@ -34,6 +35,7 @@ struct DeviceContext {
     VolkDeviceTable device_table{};
     VkPhysicalDeviceProperties properties{};
     VkDriverId driver_id = static_cast<VkDriverId>(0);
+    std::string driver_info;
     VulkanShaderManager* shader_manager = nullptr;
     Autotuner* tuner = nullptr;
     VulkanCache cache;
