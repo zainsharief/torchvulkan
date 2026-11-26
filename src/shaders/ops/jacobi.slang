@@ -133,18 +133,23 @@ void applyRotations<T : __BuiltinFloatingPointType>(T* data, T* rotations, uint 
             }
         }
         AllMemoryBarrierWithGroupSync();
-        if (active && COMPLEX == 0)
+        // one active check around both stores: AMD's 22.20 driver stores from inactive lanes (to data[0]) when the
+        // complex case is an `else if (active)`
+        if (active)
         {
-            data[px] = c * x - s * y;
-            data[qx] = s * x + c * y;
-        }
-        else if (active)
-        {
-            // x' = c x - s conj(phase) y, y' = s phase x + c y
-            data[px * 2] = c * x - s * (ph_re * y + ph_im * yi);
-            data[px * 2 + 1] = c * xi - s * (ph_re * yi - ph_im * y);
-            data[qx * 2] = s * (ph_re * x - ph_im * xi) + c * y;
-            data[qx * 2 + 1] = s * (ph_re * xi + ph_im * x) + c * yi;
+            if (COMPLEX == 0)
+            {
+                data[px] = c * x - s * y;
+                data[qx] = s * x + c * y;
+            }
+            else
+            {
+                // x' = c x - s conj(phase) y, y' = s phase x + c y
+                data[px * 2] = c * x - s * (ph_re * y + ph_im * yi);
+                data[px * 2 + 1] = c * xi - s * (ph_re * yi - ph_im * y);
+                data[qx * 2] = s * (ph_re * x - ph_im * xi) + c * y;
+                data[qx * 2 + 1] = s * (ph_re * xi + ph_im * x) + c * yi;
+            }
         }
         AllMemoryBarrierWithGroupSync();
     }
