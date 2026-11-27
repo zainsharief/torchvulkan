@@ -165,6 +165,29 @@ def is_bf16_supported() -> bool:
 def _is_in_bad_fork() -> bool:
     return _C._is_in_bad_fork()
 
+def int_mm_scaled(a, b, scale_a, scale_b, bias=None, out_dtype=None) -> torch.Tensor:
+    """``(a @ b) * scale_a * scale_b + bias`` for int8 ``a`` [M, K] and ``b`` [K, N].
+
+    The product is accumulated exactly in int32, then scaled in float32 and returned as
+    ``out_dtype`` (float32 by default; float16 and bfloat16 too). ``scale_a`` holds 1 or M
+    float32 values (e.g. [M, 1]), ``scale_b`` 1 or N (e.g. [1, N]); ``bias`` has N values.
+    On Vulkan devices with int8 cooperative matrices the scaling and the bias run in the
+    GEMM's epilogue, so the int32 result never reaches memory; elsewhere (and on any other
+    device) this is ``torch._int_mm`` followed by the elementwise scaling.
+    """
+    return torch.ops.torchvulkan.int_mm_scaled(a, b, scale_a, scale_b, bias, out_dtype)
+
+
+def quantize_per_row(x, qmax=127.0):
+    """Symmetric per-row quantization of a 2D float tensor: ``(q, scale)`` for ``int_mm_scaled``.
+
+    ``scale = max(amax(|x|), 1e-10) / qmax`` (float32, [rows, 1]) and
+    ``q = clamp(round(x / scale), -qmax, qmax)`` as int8, rounding half to even, computed as
+    ``x * (qmax / max(amax(|x|), 1e-10))`` in float32. ``qmax`` 127 gives int8 codes, 7 int4 codes
+    held in int8. On Vulkan this is one pass over each row.
+    """
+    return torch.ops.torchvulkan.quantize_per_row(x, qmax)
+
 # schedules the device teardown for the end of the process (after Python has freed the tensors)
 atexit.register(_C._shutdown)
 atexit.register(_C._save_pipeline_caches)

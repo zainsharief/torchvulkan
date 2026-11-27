@@ -29,14 +29,15 @@ __exported import helpers.gemm;
 [[vk::constant_id(18)]] public const uint BLOCK_SIZE = 16;
 
 // Slang can't size a CoopMat by a spec constant: scripts/splice_coop_dims.py swaps this placeholder for BLOCK_SIZE,
-// so it must only appear in the typealiases below
-static const uint COOP_DIM = 1009;
+// so it must only appear in CoopMat typealiases (here and in matmul_coop.slang)
+public static const uint COOP_DIM = 1009;
 
 [[vk::constant_id(19)]] public const uint USE_SHARED_MEMORY = 1;
 [[vk::constant_id(20)]] public const uint LOADS_B = 1;
 
-// padding per shared-memory row, so consecutive rows fall in different banks; 8 keeps rows 16-byte aligned
-public static const uint PAD = 8;
+// padding per shared-memory row, so consecutive rows fall in different banks. A coop load needs its rows 16-byte
+// aligned: 8 does that for 16-bit types; int8 takes 0 or 16.
+[[vk::constant_id(21)]] public const uint PAD = 8;
 
 public static const uint SMEM_ROWS_A = WARPS_M * WARP_FRAGS_M * BLOCK_SIZE;
 public static const uint SMEM_COLS_B = WARPS_N * WARP_FRAGS_N * BLOCK_SIZE;
