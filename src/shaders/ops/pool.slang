@@ -67,7 +67,7 @@ int fractionalStart<T : ITorchVulkan>(int o, T sample, int input, int output, in
 }
 
 // the first maximum wins, and a NaN takes over wherever it appears, as in the CPU loop
-void maxWindow<T : ITorchVulkan>(T* input, int lo[3], int hi[3], int step[3], int in[3], out T value, out int64_t index)
+void maxWindow<T : ITorchVulkan>(uint64_t input, int64_t base, int lo[3], int hi[3], int step[3], int in[3], out T value, out int64_t index)
 {
     index = int64_t(lo[0]) * in[1] * in[2] + int64_t(lo[1]) * in[2] + lo[2];
     value = T.ext_lowest();
@@ -78,7 +78,7 @@ void maxWindow<T : ITorchVulkan>(T* input, int lo[3], int hi[3], int step[3], in
             for (int w = lo[2]; w < hi[2]; w += step[2])
             {
                 int64_t position = int64_t(d) * in[1] * in[2] + int64_t(h) * in[2] + w;
-                T v = input[position];
+                T v = T.load(input, uint64_t(base + position));
                 if (T.ext_gt(v, value) || T.ext_isnan(v))
                 {
                     value = v;
@@ -99,8 +99,7 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
     o[1] = int((rest / g.out[2]) % g.out[1]);
     o[2] = int(rest % g.out[2]);
 
-    T* input = (T*)pcs.input + plane * int64_t(g.in[0]) * g.in[1] * g.in[2];
-    T* output = (T*)pcs.output;
+    int64_t base = plane * int64_t(g.in[0]) * g.in[1] * g.in[2];
 
     int lo[3];
     int hi[3];
@@ -118,7 +117,6 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
     }
     else if (MODE == 4)
     {
-        T* samples = (T*)pcs.samples;
         [ForceUnroll] for (int a = 0; a < 3; a++)
         {
             if (g.sample_dims == 2 && a == 0)
@@ -128,7 +126,7 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
             else
             {
                 int k = (g.sample_dims == 2) ? (a == 2 ? 0 : 1) : a;
-                lo[a] = fractionalStart<T>(o[a], samples[plane * g.sample_dims + k], g.in[a], g.out[a], g.kernel[a]);
+                lo[a] = fractionalStart<T>(o[a], T.load(pcs.samples, plane * g.sample_dims + k), g.in[a], g.out[a], g.kernel[a]);
             }
             hi[a] = lo[a] + g.kernel[a];
             step[a] = 1;
@@ -148,8 +146,8 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
     {
         T value;
         int64_t index;
-        maxWindow<T>(input, lo, hi, step, g.in, value, index);
-        output[idx] = value;
+        maxWindow<T>(pcs.input, base, lo, hi, step, g.in, value, index);
+        T.store(pcs.output, idx, value);
         ((int64_t*)pcs.indices)[idx] = index;
         return;
     }
@@ -171,9 +169,9 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
         for (int d = lo[0]; d < hi[0]; d++)
             for (int h = lo[1]; h < hi[1]; h++)
                 for (int w = lo[2]; w < hi[2]; w++)
-                    sum = T.Accum.ext_add(sum, input[int64_t(d) * g.in[1] * g.in[2] + int64_t(h) * g.in[2] + w].toAccum());
+                    sum = T.Accum.ext_add(sum, T.load(pcs.input, uint64_t(base + int64_t(d) * g.in[1] * g.in[2] + int64_t(h) * g.in[2] + w)).toAccum());
         int64_t divisor = (g.divisor_override != 0) ? int64_t(g.divisor_override) : (g.count_include_pad ? pool_size : valid_size);
-        output[idx] = T.fromAccum(T.Accum.ext_div(sum, castValue<int64_t, T.Accum>(divisor)));
+        T.store(pcs.output, idx, T.fromAccum(T.Accum.ext_div(sum, castValue<int64_t, T.Accum>(divisor))));
         return;
     }
 
@@ -182,9 +180,9 @@ void poolForward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometry
     for (int d = lo[0]; d < hi[0]; d++)
         for (int h = lo[1]; h < hi[1]; h++)
             for (int w = lo[2]; w < hi[2]; w++)
-                sum = T.Accum.ext_add(sum, input[int64_t(d) * g.in[1] * g.in[2] + int64_t(h) * g.in[2] + w].toAccum());
+                sum = T.Accum.ext_add(sum, T.load(pcs.input, uint64_t(base + int64_t(d) * g.in[1] * g.in[2] + int64_t(h) * g.in[2] + w)).toAccum());
     [ForceUnroll] for (int a = 0; a < 3; a++) sum = T.Accum.ext_div(sum, castValue<int64_t, T.Accum>(int64_t(hi[a] - lo[a])));
-    output[idx] = T.fromAccum(sum);
+    T.store(pcs.output, idx, T.fromAccum(sum));
 }
 
 // summed in output order, as the CPU's loop
@@ -198,8 +196,7 @@ void poolBackward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometr
     i[1] = int((rest / g.in[2]) % g.in[1]);
     i[2] = int(rest % g.in[2]);
 
-    T* grad_output = (T*)pcs.input + plane * int64_t(g.out[0]) * g.out[1] * g.out[2];
-    T* grad_input = (T*)pcs.output;
+    int64_t base = plane * int64_t(g.out[0]) * g.out[1] * g.out[2];
 
     int lo[3];
     int hi[3];
@@ -251,7 +248,7 @@ void poolBackward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometr
                 }
                 if (!covers) continue;
 
-                T grad = grad_output[int64_t(d) * g.out[1] * g.out[2] + int64_t(h) * g.out[2] + w];
+                T grad = T.load(pcs.input, uint64_t(base + int64_t(d) * g.out[1] * g.out[2] + int64_t(h) * g.out[2] + w));
                 if (MODE == 5)
                 {
                     int64_t divisor = (g.divisor_override != 0) ? int64_t(g.divisor_override) : (g.count_include_pad ? pool_size : valid_size);
@@ -269,7 +266,7 @@ void poolBackward<T : ITorchVulkan>(uint64_t idx, PoolPushConstants pcs, Geometr
             }
         }
     }
-    grad_input[idx] = acc;
+    T.store(pcs.output, idx, acc);
 }
 
 void poolKernel<T : ITorchVulkan>(uint3 gi, PoolPushConstants pcs)

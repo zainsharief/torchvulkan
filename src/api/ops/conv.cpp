@@ -297,8 +297,8 @@ bool implicit_gemm_supported(const ConvProblem& p, std::initializer_list<at::Ten
     const at::Tensor& first = *operands.begin();
     at::ScalarType dtype = first.scalar_type();
     bool floating = dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kDouble;
-    if (!floating || !is_dtype_supported(first, dtype) || p.g.kernel.empty() || p.g.kernel.size() > 3) return false;
     DeviceContext* device = get_device_context(first);
+    if (!floating || !can_dispatch(device, torchvulkan::Kernel::CONV_SIMD, dtype) || p.g.kernel.empty() || p.g.kernel.size() > 3) return false;
     const auto& limits = device->properties.limits;
     if (CONV_WG * CONV_WG > limits.maxComputeWorkGroupInvocations || conv_tile_m(device, dtype) == 0) return false;
     if (p.groups > limits.maxComputeWorkGroupCount[2]) return false;
@@ -1112,8 +1112,14 @@ at::Tensor convolution_vulkan(
         return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format);
     }
 
-    at::Tensor output = transposed ? conv_transpose_forward(x, weight, g, groups, output_size) : conv_forward(x, weight, g, groups);
-    return add_bias(output, bias).contiguous(format);
+    // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
+    at::ScalarType dtype = x.scalar_type();
+    bool upcast = is_low_prec(dtype);
+    at::Tensor xa = upcast ? x.to(at::kFloat) : x;
+    at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
+    c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
+    at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
+    return add_bias(output, ba).to(dtype).contiguous(format);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(

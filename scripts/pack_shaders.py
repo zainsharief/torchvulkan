@@ -15,7 +15,7 @@ Output, in the build directory, included by the shader manager and the autotuner
         };
 
         const ShaderIndexEntry SHADER_INDEX[] = {
-            { Kernel::BINARY, c10::ScalarType::Float, c10::ScalarType::Undefined, 0 },
+            { Kernel::BINARY, c10::ScalarType::Float, DtypeMode::NATIVE, c10::ScalarType::Undefined, DtypeMode::NATIVE, 0 },
         };
 
 The arrays live in their own translation unit, so editing shader.cpp doesn't
@@ -55,11 +55,12 @@ def index_rows(variant: dict, binary: int) -> list[str]:
     """
     kernel = f'Kernel::{variant["kernel"].upper()}'
     rows = []
+    modes = [f'DtypeMode::{mode.upper()}' for _, mode in variant['aten']] + ['DtypeMode::NATIVE']
 
-    for combo in itertools.product(*variant['aten']):
+    for combo in itertools.product(*(aten for aten, _ in variant['aten'])):
         dtype = f'c10::ScalarType::{combo[0]}'
         dtype2 = f'c10::ScalarType::{combo[1]}' if len(combo) > 1 else 'c10::ScalarType::Undefined'
-        rows.append(f'    {{ {kernel}, {dtype}, {dtype2}, {binary} }}, // {variant["name"]}')
+        rows.append(f'    {{ {kernel}, {dtype}, {modes[0]}, {dtype2}, {modes[1]}, {binary} }}, // {variant["name"]}')
 
     return rows
 
@@ -92,7 +93,9 @@ struct ShaderBinary {
 struct ShaderIndexEntry {
     Kernel kernel;
     c10::ScalarType dtype;
+    DtypeMode mode;
     c10::ScalarType dtype2;
+    DtypeMode mode2;
     uint32_t binary;
 };
 

@@ -3,12 +3,14 @@
 #include <c10/core/Device.h>
 #include <volk.h>
 
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <string>
 
 #include "vk_mem_alloc.h"
 #include "cache.h"
+#include "generated/shader_kernels.h"
 
 class VulkanShaderManager;
 class Autotuner;
@@ -44,12 +46,13 @@ struct DeviceContext {
 
     bool support_float64 = false;
     bool support_int64 = false;
-    bool support_float32 = false;
-    bool support_int32 = false;
     bool support_float16 = false;
     bool support_bfloat16 = false;
     bool support_int16 = false;
     bool support_int8 = false;
+
+    // how each dtype runs on this device: natively, or as its emulated type (chooseModes in vulkan_context.cpp)
+    std::array<torchvulkan::DtypeMode, static_cast<size_t>(c10::ScalarType::NumOptions)> dtype_mode{};
 
     bool support_coopmat = false;
     std::vector<CoopMatShape> coopmat_shapes;

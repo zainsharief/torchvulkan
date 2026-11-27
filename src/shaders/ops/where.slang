@@ -25,7 +25,8 @@ public struct WherePushConstants
     public uint64_t numel;
 }
 
-public void whereKernel<T>(
+// cond is a bool tensor, loaded as B
+public void whereKernel<T : ITorchVulkan, B : ITorchVulkan>(
     uint3 gi,
     uint64_t address_cond,
     uint64_t address_a,
@@ -37,10 +38,6 @@ public void whereKernel<T>(
     uint idx = flat_thread(gi, WG_x);
     if (idx >= numel) return;
 
-    uint8_t* tensor_cond = (uint8_t*)address_cond;
-    T* tensor_a = (T*)address_a;
-    T* tensor_b = (T*)address_b;
-    T* tensor_out = (T*)address_out;
 
     uint idx_c = idx;
     uint idx_a = idx;
@@ -67,14 +64,14 @@ public void whereKernel<T>(
         }
     }
 
-    tensor_out[idx] = (tensor_cond[idx_c] != uint8_t(0)) ? tensor_a[idx_a] : tensor_b[idx_b];
+    T.store(address_out, idx, B.ext_nonzero(B.load(address_cond, idx_c)) ? T.load(address_a, idx_a) : T.load(address_b, idx_b));
 }
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void where_main<T>(
+void where_main<T : ITorchVulkan, B : ITorchVulkan>(
     uint3 gi : SV_DispatchThreadID,
     uniform WherePushConstants pcs)
 {
-    whereKernel<T>(gi, pcs.tensor_cond, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel);
+    whereKernel<T, B>(gi, pcs.tensor_cond, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel);
 }

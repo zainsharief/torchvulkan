@@ -59,12 +59,12 @@ void addc_main<T : ITorchVulkan>(
         }
     }
 
-    T.Accum self = ((T*)pcs.tensor_self)[idx_self].toAccum();
-    T.Accum a = ((T*)pcs.tensor1)[idx_1].toAccum();
-    T.Accum b = ((T*)pcs.tensor2)[idx_2].toAccum();
+    T.Accum self = T.load(pcs.tensor_self, idx_self).toAccum();
+    T.Accum a = T.load(pcs.tensor1, idx_1).toAccum();
+    T.Accum b = T.load(pcs.tensor2, idx_2).toAccum();
     T.Accum value = T.Accum.fromPushScalar(pcs.value);
     T.Accum combined;
     if (DIVIDE != 0) combined = HAS_VALUE != 0 ? value * T.Accum.ext_div(a, b) : T.Accum.ext_div(a, b);
     else combined = HAS_VALUE != 0 ? (value * a) * b : a * b;
-    ((T*)pcs.tensor_out)[idx] = T.fromAccum(self + combined);
+    T.store(pcs.tensor_out, idx, T.fromAccum(self + combined));
 }

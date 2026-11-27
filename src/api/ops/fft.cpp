@@ -105,7 +105,7 @@ at::Tensor bluestein(const at::Tensor& rows, bool inverse)
 
 at::ScalarType fft_dtype(const at::Tensor& self)
 {
-    return (self.scalar_type() == at::kComplexDouble && is_dtype_supported(self, at::kDouble)) ? at::kComplexDouble : at::kComplexFloat;
+    return (self.scalar_type() == at::kComplexDouble && can_dispatch(get_device_context(self), torchvulkan::Kernel::FFT, at::kDouble)) ? at::kComplexDouble : at::kComplexFloat;
 }
 
 at::Tensor transform_dim(const at::Tensor& self, int64_t dim, bool inverse)

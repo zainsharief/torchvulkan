@@ -27,7 +27,7 @@ struct GridSampleProblem {
 
 at::ScalarType grid_sample_dtype(const at::Tensor& input)
 {
-    return (input.scalar_type() == at::kDouble && is_dtype_supported(input, at::kDouble)) ? at::kDouble : at::kFloat;
+    return (input.scalar_type() == at::kDouble && can_dispatch(get_device_context(input), torchvulkan::Kernel::GRID_SAMPLE, at::kDouble)) ? at::kDouble : at::kFloat;
 }
 
 GridSampleProblem make_problem(const at::Tensor& input, const at::Tensor& grid, int64_t dims)

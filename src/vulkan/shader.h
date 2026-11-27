@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -107,6 +108,8 @@ public:
 
     bool supportsTimestamps() const { return timestampValidBits > 0; }
     uint32_t resolveBinary(ShaderKey key) const;
+    std::optional<uint32_t> tryResolveBinary(ShaderKey key) const;
+    bool canDispatch(ShaderKey key) const { return tryResolveBinary(key).has_value(); }
 
     void flush();
     void destroyAfterFlush(VulkanBuffer* buffer);
@@ -147,7 +150,7 @@ private:
     void flushIfPending();
 
     std::mutex cache_mutex_;
-    std::vector<int32_t> binaryIndex;
+    std::unordered_map<uint64_t, uint32_t> binaryIndex;
     std::vector<std::unordered_map<uint32_t, std::unordered_map<std::string, ShaderSubmitInfo, SpecializationKeyHash, std::equal_to<>>>> shaderCache;
     std::vector<VkShaderModule> shaderModuleCache;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;

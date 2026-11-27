@@ -55,7 +55,7 @@ bool dispatch_special_shader(
 {
     DeviceContext* device = get_device_context(out);
     at::ScalarType dtype = out.scalar_type();
-    if (!is_dtype_supported(device, dtype)) return false;
+    if (!can_dispatch(device, torchvulkan::Kernel::SPECIAL, dtype)) return false;
 
     bool use_scalar = !other.defined();
     at::Tensor a = self.to(out.device(), dtype);

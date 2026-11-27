@@ -26,13 +26,11 @@ public void searchsortedKernel<T : ITorchVulkan>(uint3 gi, SearchsortedPushConst
     uint64_t idx = uint64_t(flat_thread(gi, WG_x));
     if (idx >= pcs.count) return;
 
-    T* sorted = (T*)pcs.sorted;
     int64_t* sorter = (int64_t*)pcs.sorter;
-    T* values = (T*)pcs.values;
 
     uint64_t row = (pcs.shared_boundaries != 0) ? 0 : idx / uint64_t(pcs.values_per_row);
     uint64_t base = row * uint64_t(pcs.boundaries);
-    T value = values[idx];
+    T value = T.load(pcs.values, idx);
 
     uint start = 0;
     uint end = pcs.boundaries;
@@ -41,7 +39,7 @@ public void searchsortedKernel<T : ITorchVulkan>(uint3 gi, SearchsortedPushConst
         uint mid = start + ((end - start) >> 1);
         uint64_t position = base + uint64_t(mid);
         if (HAS_SORTER != 0) position = base + uint64_t(sorter[position]);
-        T mid_value = sorted[position];
+        T mid_value = T.load(pcs.sorted, position);
         bool before = (RIGHT != 0) ? !T.ext_gt(mid_value, value) : !T.ext_ge(mid_value, value);
         if (before) start = mid + 1;
         else end = mid;

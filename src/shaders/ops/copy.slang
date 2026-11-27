@@ -1,6 +1,7 @@
 module copy;
 
 import core.indexing;
+import core.dtype;
 
 [[vk::constant_id(0)]] public const uint NDIM = 0;
 [[vk::constant_id(1)]] public const uint WG_x = 0;
@@ -20,7 +21,7 @@ public struct CopyPushConstants
     public uint64_t numel;
 }
 
-public void copyKernel<T>(
+public void copyKernel<M : IElementMover>(
     uint3 gi,
     uint64_t address_in,
     uint64_t address_out,
@@ -29,9 +30,6 @@ public void copyKernel<T>(
 {
     uint idx = flat_thread(gi, WG_x);
     if (idx >= numel) return;
-
-    T* tensor_in = (T*)address_in;
-    T* tensor_out = (T*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_in = (uint*)md.strides_in;
@@ -48,7 +46,7 @@ public void copyKernel<T>(
         idx_out += coord * strides_out[i];
     }
 
-    tensor_out[idx_out] = tensor_in[idx_in];
+    M.move(address_out, idx_out, address_in, idx_in);
 }
 
 [shader("compute")]
@@ -57,5 +55,15 @@ void copy_main<T>(
     uint3 gi : SV_DispatchThreadID,
     uniform CopyPushConstants pcs)
 {
-    copyKernel<T>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel);
+    copyKernel<PointerMover<T>>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel);
+}
+
+// 1- and 2-byte elements on devices without 8/16-bit storage, as their emulated types
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void copy_emulated_main<T : ITorchVulkan>(
+    uint3 gi : SV_DispatchThreadID,
+    uniform CopyPushConstants pcs)
+{
+    copyKernel<ElementMover<T>>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel);
 }

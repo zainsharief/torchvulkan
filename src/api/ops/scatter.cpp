@@ -42,8 +42,7 @@ void dispatch_scatter_shader(
     const at::Tensor& keys,
     const at::Tensor& order,
     ScatterMode mode,
-    bool include_self,
-    bool round_bf16 = false)
+    bool include_self)
 {
     // an empty output has no buffer to address
     uint64_t count = keys.numel();
@@ -57,7 +56,6 @@ void dispatch_scatter_shader(
     spd.push(static_cast<uint32_t>(mode))
        .push(static_cast<uint32_t>(include_self))
        .push(static_cast<uint32_t>(at::isIntegralType(dtype, /*includeBool=*/true)))
-       .push(static_cast<uint32_t>(round_bf16))
        .push(workgroupSizeX);
 
     PushConstantBuilder pcs{};
@@ -92,7 +90,6 @@ bool is_copy(ScatterMode mode)
     return mode == ScatterMode::DIRECT || mode == ScatterMode::LAST;
 }
 
-// bfloat16 reductions run in float32: MoltenVK can't build its constants
 at::ScalarType scatter_kernel_dtype(const at::Tensor& self, ScatterMode mode)
 {
     at::ScalarType dtype = self.scalar_type();
@@ -104,7 +101,7 @@ at::ScalarType scatter_kernel_dtype(const at::Tensor& self, ScatterMode mode)
             default: return at::kLong;
         }
     }
-    if (dtype == at::kBFloat16 || !is_dtype_supported(self, dtype)) return at::kFloat;
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::SCATTER, dtype)) return at::kFloat;
     return dtype;
 }
 
@@ -168,12 +165,11 @@ at::Tensor scatter_into(const at::Tensor& self, const at::Tensor& keys, const at
     at::Tensor flat_keys = keys.reshape({-1}).to(at::kLong).contiguous();
     at::Tensor values = as_kernel_dtype(src.to(dtype).reshape({-1}).contiguous(), kernel, mode);
     if (flat_keys.numel() > 0) {
-        bool round_bf16 = dtype == at::kBFloat16 && kernel == at::kFloat;
         if (mode == ScatterMode::DIRECT) {
             dispatch_scatter_shader(result, base, values, flat_keys, at::Tensor(), mode, include_self);
         } else {
             auto [sorted, order] = at::sort(flat_keys, /*stable=*/true, /*dim=*/0, /*descending=*/false);
-            dispatch_scatter_shader(result, base, values, sorted.contiguous(), order.contiguous(), mode, include_self, round_bf16);
+            dispatch_scatter_shader(result, base, values, sorted.contiguous(), order.contiguous(), mode, include_self);
         }
     }
     if (direct) return self;
@@ -277,7 +273,7 @@ at::Tensor scatter_along_dim(const at::Tensor& self, int64_t dim, const at::Tens
 bool writes_self(const at::Tensor& self, const at::Tensor& out)
 {
     return out.is_same(self) && self.is_contiguous() && self.dim() > 0 && at::has_internal_overlap(self) == at::MemOverlap::No &&
-           !self.is_complex() && self.scalar_type() != at::kBFloat16 && self.scalar_type() != at::kBool;
+           !self.is_complex() && self.scalar_type() != at::kBool;
 }
 
 at::Tensor value_tensor(const at::Scalar& value, const at::Tensor& like)

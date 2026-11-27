@@ -1,6 +1,7 @@
 module index_gather;
 
 import core.indexing;
+import core.dtype;
 
 [[vk::constant_id(0)]] public const uint NDIM = 0;
 [[vk::constant_id(1)]] public const uint NUM_INDICES = 0;
@@ -27,13 +28,10 @@ public struct IndexGatherPushConstants
     public uint64_t numel;
 }
 
-public void indexGatherKernel<T>(uint3 gi, IndexGatherPushConstants pcs)
+public void indexGatherKernel<M : IElementMover>(uint3 gi, IndexGatherPushConstants pcs)
 {
     uint idx = flat_thread(gi, WG_x);
     if (idx >= pcs.numel) return;
-
-    T* tensor_out = (T*)pcs.tensor_out;
-    T* tensor_src = (T*)pcs.tensor_src;
 
     Metadata md = *(Metadata*)pcs.metadata;
     uint* strides_out = (uint*)md.strides_out;
@@ -69,7 +67,7 @@ public void indexGatherKernel<T>(uint3 gi, IndexGatherPushConstants pcs)
         offset += index * int64_t(index_bounds[NUM_INDICES + k]);
     }
 
-    tensor_out[idx_out] = tensor_src[offset];
+    M.move(pcs.tensor_out, idx_out, pcs.tensor_src, uint64_t(offset));
 }
 
 [shader("compute")]
@@ -78,5 +76,15 @@ void index_gather_main<T>(
     uint3 gi : SV_DispatchThreadID,
     uniform IndexGatherPushConstants pcs)
 {
-    indexGatherKernel<T>(gi, pcs);
+    indexGatherKernel<PointerMover<T>>(gi, pcs);
+}
+
+// 1- and 2-byte elements on devices without 8/16-bit storage, as their emulated types
+[shader("compute")]
+[numthreads(WG_x, 1, 1)]
+void index_gather_emulated_main<T : ITorchVulkan>(
+    uint3 gi : SV_DispatchThreadID,
+    uniform IndexGatherPushConstants pcs)
+{
+    indexGatherKernel<ElementMover<T>>(gi, pcs);
 }

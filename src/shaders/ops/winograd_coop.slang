@@ -19,7 +19,7 @@ struct FusedScratch<U>
     static groupshared U M[TILE_ROWS * TILE_COLS];
 }
 
-void stageChunk<T : ITorchVulkan & ICoopElement>(uint ti, uint row0, uint col0, uint c0, WinogradPushConstants pcs)
+void stageChunk<T : ITorchVulkan & ICoopElement>(uint ti, uint row0, uint col0, uint c0, WinogradPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     for (uint i = ti; i < BK * TILE_COLS; i += WORKGROUP_SIZE)
@@ -40,7 +40,7 @@ void stageChunk<T : ITorchVulkan & ICoopElement>(uint ti, uint row0, uint col0, 
     }
 }
 
-void fusedConv<T : ITorchVulkan & ICoopElement>(uint3 wg, uint ti, WinogradPushConstants pcs)
+void fusedConv<T : ITorchVulkan & ICoopElement>(uint3 wg, uint ti, WinogradPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     uint row0 = wg.y * TILE_ROWS;
@@ -130,7 +130,7 @@ void fusedConv<T : ITorchVulkan & ICoopElement>(uint3 wg, uint ti, WinogradPushC
 void winograd_coop_main<T : ITorchVulkan & ICoopElement>(
     uint3 wg : SV_GroupID,
     uint ti : SV_GroupIndex,
-    uniform WinogradPushConstants pcs)
+    uniform WinogradPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     fusedConv<T>(wg, ti, pcs);
 }

@@ -9,14 +9,16 @@
 
 namespace {
 
-constexpr size_t NUM_SCALAR_TYPES = static_cast<size_t>(c10::ScalarType::NumOptions);
+constexpr uint64_t NUM_SCALAR_TYPES = static_cast<uint64_t>(c10::ScalarType::NumOptions);
+constexpr uint64_t NUM_MODES = static_cast<uint64_t>(torchvulkan::DtypeMode::COUNT);
 
-size_t keySlot(torchvulkan::Kernel kernel, c10::ScalarType dtype, c10::ScalarType dtype2)
+uint64_t keySlot(torchvulkan::Kernel kernel, c10::ScalarType dtype, torchvulkan::DtypeMode mode, c10::ScalarType dtype2, torchvulkan::DtypeMode mode2)
 {
-    size_t k = static_cast<size_t>(kernel);
-    size_t d = static_cast<size_t>(dtype);
-    size_t d2 = static_cast<size_t>(dtype2);
-    return (k * NUM_SCALAR_TYPES + d) * NUM_SCALAR_TYPES + d2;
+    uint64_t slot = static_cast<uint64_t>(kernel);
+    slot = slot * NUM_SCALAR_TYPES + static_cast<uint64_t>(dtype);
+    slot = slot * NUM_MODES + static_cast<uint64_t>(mode);
+    slot = slot * NUM_SCALAR_TYPES + static_cast<uint64_t>(dtype2);
+    return slot * NUM_MODES + static_cast<uint64_t>(mode2);
 }
 
 } // namespace
@@ -24,10 +26,10 @@ size_t keySlot(torchvulkan::Kernel kernel, c10::ScalarType dtype, c10::ScalarTyp
 VulkanShaderManager::VulkanShaderManager(DeviceContext* device)
     : device(device), dispatcher(device)
 {
-    binaryIndex.assign(static_cast<size_t>(torchvulkan::Kernel::COUNT) * NUM_SCALAR_TYPES * NUM_SCALAR_TYPES, -1);
+    binaryIndex.reserve(torchvulkan::NUM_SHADER_INDEX);
     for (size_t i = 0; i < torchvulkan::NUM_SHADER_INDEX; i++) {
         const torchvulkan::ShaderIndexEntry& entry = torchvulkan::SHADER_INDEX[i];
-        binaryIndex[keySlot(entry.kernel, entry.dtype, entry.dtype2)] = static_cast<int32_t>(entry.binary);
+        binaryIndex[keySlot(entry.kernel, entry.dtype, entry.mode, entry.dtype2, entry.mode2)] = entry.binary;
     }
 
     shaderCache.resize(torchvulkan::NUM_SHADER_BINARIES);
@@ -347,16 +349,25 @@ void VulkanShaderManager::dispatchCopy(
     flushIfPending();
 }
 
+std::optional<uint32_t> VulkanShaderManager::tryResolveBinary(ShaderKey key) const
+{
+    // each dtype in the mode this device runs it in; an unused second dtype is Undefined, in the native mode
+    torchvulkan::DtypeMode mode = device->dtype_mode[static_cast<size_t>(key.dtype)];
+    torchvulkan::DtypeMode mode2 = key.dtype2 == c10::ScalarType::Undefined ? torchvulkan::DtypeMode::NATIVE : device->dtype_mode[static_cast<size_t>(key.dtype2)];
+    auto it = binaryIndex.find(keySlot(key.kernel, key.dtype, mode, key.dtype2, mode2));
+    if (it == binaryIndex.end()) return std::nullopt;
+    return it->second;
+}
+
 uint32_t VulkanShaderManager::resolveBinary(ShaderKey key) const
 {
-    int32_t binary = binaryIndex[keySlot(key.kernel, key.dtype, key.dtype2)];
-    if (binary >= 0) return static_cast<uint32_t>(binary);
+    if (std::optional<uint32_t> binary = tryResolveBinary(key)) return *binary;
 
     const char* kernel = torchvulkan::KERNEL_NAMES[static_cast<size_t>(key.kernel)];
     if (key.dtype2 == c10::ScalarType::Undefined) {
-        TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, ".");
+        TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, " on this device.");
     }
-    TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, " -> ", key.dtype2, ".");
+    TORCH_CHECK(false, "torchvulkan [ERROR]: no ", kernel, " shader was compiled for ", key.dtype, " -> ", key.dtype2, " on this device.");
 }
 
 ShaderSubmitInfo VulkanShaderManager::allocateShader(uint32_t binary, uint32_t subgroupSize, const SpecializationArgs& spec)

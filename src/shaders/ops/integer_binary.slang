@@ -84,14 +84,12 @@ T evalIntegerBinary<T : __BuiltinIntegerType>(T a, T b)
     }
 }
 
-public void integerBinaryKernel<T : __BuiltinIntegerType & ITorchVulkan>(uint3 gi, IntegerBinaryPushConstants<T> pcs)
+// in T.Accum: an 8- or 16-bit integer without native support computes in int32 and wraps on the store, as C++ promotes
+public void integerBinaryKernel<T : ITorchVulkan>(uint3 gi, IntegerBinaryPushConstants<T> pcs) where T.Accum : __BuiltinIntegerType
 {
     uint idx = flat_thread(gi, WG_x);
     if (idx >= pcs.numel) return;
 
-    T* tensor_a = (T*)pcs.tensor_a;
-    T* tensor_b = (T*)pcs.tensor_b;
-    T* tensor_out = (T*)pcs.tensor_out;
 
     uint idx_a = idx;
     uint idx_b = idx;
@@ -119,15 +117,15 @@ public void integerBinaryKernel<T : __BuiltinIntegerType & ITorchVulkan>(uint3 g
     }
 
     T b = T.fromPushScalar(pcs.scalar_value);
-    if (USE_SCALAR == 0) b = tensor_b[idx_b];
-    tensor_out[idx_out] = evalIntegerBinary<T>(tensor_a[idx_a], b);
+    if (USE_SCALAR == 0) b = T.load(pcs.tensor_b, idx_b);
+    T.store(pcs.tensor_out, idx_out, T.fromAccum(evalIntegerBinary<T.Accum>(T.load(pcs.tensor_a, idx_a).toAccum(), b.toAccum())));
 }
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void integer_binary_main<T : __BuiltinIntegerType & ITorchVulkan>(
+void integer_binary_main<T : ITorchVulkan>(
     uint3 gi : SV_DispatchThreadID,
-    uniform IntegerBinaryPushConstants<T> pcs)
+    uniform IntegerBinaryPushConstants<T> pcs) where T.Accum : __BuiltinIntegerType
 {
     integerBinaryKernel<T>(gi, pcs);
 }

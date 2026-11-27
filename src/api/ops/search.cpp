@@ -91,7 +91,7 @@ at::Tensor searchsorted_impl(
     if (out.numel() == 0) return out;
     if (sorted.size(-1) == 0) return out.zero_();
 
-    if (!is_dtype_supported(sorted, dtype) || values.numel() >= std::numeric_limits<uint32_t>::max()) {
+    if (!can_dispatch(get_device_context(sorted), torchvulkan::Kernel::SEARCHSORTED, dtype) || values.numel() >= std::numeric_limits<uint32_t>::max()) {
         TORCHVULKAN_FALLBACK("This searchsorted can't run on the Vulkan device. Falling back to CPU.");
         return at::searchsorted(sorted.cpu(), values.cpu(), out_int32, right, c10::nullopt, has_sorter ? c10::optional<at::Tensor>(sorter->cpu()) : c10::nullopt).to(self.device());
     }

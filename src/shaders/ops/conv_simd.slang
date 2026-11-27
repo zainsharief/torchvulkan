@@ -14,7 +14,7 @@ struct BiasEpilogue<T : ITorchVulkan> : IMatmulEpilogue<T.Accum>
     T.Accum apply(uint batch, uint row, uint col, T.Accum acc)
     {
         if (HAS_BIAS == 0) return acc;
-        return acc + ((T*)bias)[group * rows + row].toAccum();
+        return acc + T.load(bias, group * rows + row).toAccum();
     }
 }
 
@@ -81,7 +81,7 @@ void runGemm<T : __BuiltinArithmeticType, let VEC : int,
 void conv_simd_main<T : ITorchVulkan, let VEC : int>(
     uint3 li : SV_GroupThreadID,
     uint3 wg : SV_GroupID,
-    uniform ConvPushConstants pcs)
+    uniform ConvPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias Acc = T.Accum;
     static groupshared Acc smemA[TILE_M * (TILE_K + 1)];

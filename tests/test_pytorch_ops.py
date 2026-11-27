@@ -19,9 +19,9 @@ from torch.utils._pytree import tree_flatten, tree_map
 # all the datatypes we guarantee to be supported by torchvk
 VULKAN_DTYPES = [
     torch.float64, torch.uint64, torch.int64,
-    torch.float32, torch.uint32, torch.int32,
+    torch.complex32, torch.float32, torch.uint32, torch.int32,
     torch.float16, torch.bfloat16, torch.uint16, torch.int16,
-    torch.uint8, torch.int8,
+    torch.float8_e4m3fn, torch.float8_e5m2, torch.float8_e4m3fnuz, torch.float8_e5m2fnuz, torch.float8_e8m0fnu, torch.uint8, torch.int8,
     torch.bool,
 ]
 

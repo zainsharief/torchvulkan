@@ -46,7 +46,7 @@ at::Tensor cumscan(
     if (x.dim() == 0 || x.numel() == 0) return x.clone().to(out_dtype);
 
     if (x.is_complex()) return complex_cumscan(x, d, op).to(out_dtype);
-    if (!is_dtype_supported(x, compute) || x.dim() > MAX_DIMS || !fits_32bit_indexing({x})) {
+    if (!can_dispatch(get_device_context(x), torchvulkan::Kernel::SCAN, compute) || x.dim() > MAX_DIMS || !fits_32bit_indexing({x})) {
         TORCHVULKAN_FALLBACK("A ", compute, " cumulative op of this shape can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ScanOp::SUM ? at::cumsum(x.cpu(), d) : op == ScanOp::PROD ? at::cumprod(x.cpu(), d) : at::logcumsumexp(x.cpu(), d);
         return cpu.to(out_dtype).to(self.device());
@@ -194,11 +194,12 @@ void cumscanarg(
         return;
     }
     int64_t d = c10::maybe_wrap_dim(dim, self.dim());
-    if (is_dtype_supported(self, self.scalar_type()) && (self.dim() > MAX_DIMS || !fits_32bit_indexing({self}))) {
+    bool supported = can_dispatch(get_device_context(self), torchvulkan::Kernel::SCAN_ARG, self.scalar_type());
+    if (supported && (self.dim() > MAX_DIMS || !fits_32bit_indexing({self}))) {
         cumscanarg_in_pieces(self, values, indices, d, op);
         return;
     }
-    if (!is_dtype_supported(self, self.scalar_type())) {
+    if (!supported) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), op == CumArgOp::MAX ? " cummax" : " cummin", " can't run on the Vulkan device. Falling back to CPU.");
         auto r = op == CumArgOp::MAX ? at::cummax(self.cpu(), dim) : at::cummin(self.cpu(), dim);
         values.copy_(std::get<0>(r));
