@@ -80,10 +80,12 @@ ALL_INTEGERS = INTEGERS + EMULATED_INTEGERS
 BOOLS = [U8, BOOL_EMULATED] # a bool operand of a kernel computing in another dtype
 
 # casts: every native pair; an emulated dtype to and from float32 and int64 (which hold its values exactly) and
-# itself; float64 emulated to and from every native dtype. The host routes any other pair through float32 or int64
+# itself; float8 to and from the 16-bit floats (fp8 weights are decoded into the compute dtype every step); float64
+# emulated to and from every native dtype. The host routes any other pair through float32 or int64
 EMULATED = EMULATED_FLOATS + FLOAT8 + EMULATED_INTEGERS
 CAST_PAIRS = ([(s, d) for s in DTYPES for d in DTYPES] +
               [p for e in EMULATED for b in (F32, I64) for p in ((e, b), (b, e))] +
+              [p for f in FLOAT8 for h in (F16, BF16, F16_EMULATED, BF16_EMULATED) for p in ((f, h), (h, f))] +
               [(e, e) for e in EMULATED] +
               [p for n in DTYPES for p in ((F64_EMULATED, n), (n, F64_EMULATED))] + [(F64_EMULATED, F64_EMULATED)])
 
