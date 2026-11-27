@@ -14,7 +14,7 @@ __exported import helpers.unary_ops;
 public static const int TILE_N = 128;
 public static const int TILE_K = 16;
 
-public struct StridedMatrix<T> : IMatmulLoader<T>, IMatmulStore<T>
+public struct StridedMatrix<T : ITorchVulkan> : IMatmulLoader<T>, IMatmulStore<T>
 {
     public uint64_t address;
     public TensorStrides strides;
@@ -33,14 +33,12 @@ public struct StridedMatrix<T> : IMatmulLoader<T>, IMatmulStore<T>
 
     public T load(uint batch, uint row, uint col)
     {
-        T* tensor = (T*)address;
-        return tensor[offset(batch, row, col)];
+        return T.load(address, offset(batch, row, col));
     }
 
     public void store(uint batch, uint row, uint col, T value)
     {
-        T* tensor = (T*)address;
-        tensor[offset(batch, row, col)] = value;
+        T.store(address, offset(batch, row, col), value);
     }
 }
 

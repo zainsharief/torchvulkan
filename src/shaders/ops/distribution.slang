@@ -218,13 +218,10 @@ public void baseDistributionKernel<T : IRandomDtype, Op : IDistributionOp<T.Real
     if (index >= pcs.numel) return;
 
     var stream = RandomStream<R>(pcs.seed, pcs.offset, index);
-    T* output = (T*)pcs.output;
-    T* input0 = (T*)pcs.input0;
-    T* input1 = (T*)pcs.input1;
 
-    R a = castValue<T, R>(input0[index]);
-    R b = (pcs.input1 != 0) ? castValue<T, R>(input1[index]) : R(0);
-    output[index] = castValue<R, T>(Op.sample(stream, a, b, R.fromBits(pcs.tiny)));
+    R a = castValue<T, R>(T.load(pcs.input0, index));
+    R b = (pcs.input1 != 0) ? castValue<T, R>(T.load(pcs.input1, index)) : R(0);
+    T.store(pcs.output, index, castValue<R, T>(Op.sample(stream, a, b, R.fromBits(pcs.tiny))));
 }
 
 public void dispatchDistribution<T : IRandomDtype>(uint3 gi, DistributionPushConstants pcs)

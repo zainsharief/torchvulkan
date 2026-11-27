@@ -56,34 +56,24 @@ inline DeviceContext* get_device_context(const at::Tensor& t)
     return VulkanContext::Instance().GetDeviceContext(t.device().index());
 }
 
-inline bool is_dtype_supported(const DeviceContext* device, at::ScalarType dtype) 
+// whether `kernel` was compiled for a storage kind that holds `dtype` (and `dtype2`, for kernels taking two) on this device
+inline bool can_dispatch(const DeviceContext* device, torchvulkan::Kernel kernel, at::ScalarType dtype, at::ScalarType dtype2 = at::ScalarType::Undefined)
 {
-    switch (dtype) 
-    {
-        case at::kDouble: return device->support_float64;
-        case at::kLong: return device->support_int64;
-        case at::kUInt64: return device->support_int64;
-        
-        case at::kFloat: return device->support_float32;
-        case at::kInt: return device->support_int32;
-        case at::kUInt32: return device->support_int32;
-        
-        case at::kHalf: return device->support_float16;
-        case at::kBFloat16: return device->support_bfloat16;
-        case at::kShort: return device->support_int16;
-        case at::kUInt16: return device->support_int16;
-        
-        case at::kChar: return device->support_int8; 
-        case at::kByte: return device->support_int8; 
-        case at::kBool: return device->support_int8; 
-        
-        default: return false;
-    }
+    return device->shader_manager->canDispatch(ShaderKey{kernel, dtype, dtype2});
 }
 
-inline bool is_dtype_supported(const at::Tensor& on, at::ScalarType dtype)
+// what a cast between two dtypes without a cast variant of their own goes through
+inline at::ScalarType cast_bridge_dtype(at::ScalarType src, at::ScalarType dst)
 {
-    return is_dtype_supported(get_device_context(on), dtype);
+    return at::isIntegralType(src, /*includeBool=*/true) && at::isIntegralType(dst, /*includeBool=*/true) ? at::kLong : at::kFloat;
+}
+
+// whether a cast runs on this device, directly or through cast_bridge_dtype
+inline bool can_cast(const DeviceContext* device, at::ScalarType src, at::ScalarType dst)
+{
+    if (can_dispatch(device, torchvulkan::Kernel::CAST, src, dst)) return true;
+    at::ScalarType mid = cast_bridge_dtype(src, dst);
+    return can_dispatch(device, torchvulkan::Kernel::CAST, src, mid) && can_dispatch(device, torchvulkan::Kernel::CAST, mid, dst);
 }
 
 // the dtype whose byte-width variant moves `dtype`'s elements, for kernels that only copy (copy, index_gather)
@@ -100,10 +90,10 @@ inline c10::ScalarType get_dtype_width_variant(c10::ScalarType dtype)
     }
 }
 
-// copy-only kernels move bytes, so a dtype is usable when its byte-width variant is (complex128 has its own)
-inline bool is_dtype_copyable(const at::Tensor& on, c10::ScalarType dtype)
+// copy-only kernels move bytes, so a dtype is usable when its byte-width variant is
+inline bool is_dtype_copyable(const at::Tensor& on, c10::ScalarType dtype, torchvulkan::Kernel kernel)
 {
-    return c10::elementSize(dtype) == 16 || is_dtype_supported(on, get_dtype_width_variant(dtype));
+    return can_dispatch(get_device_context(on), kernel, get_dtype_width_variant(dtype));
 }
 
 // set by scripts/config.py, which compiles the shaders with the same table
@@ -544,7 +534,8 @@ inline std::vector<uint32_t> subgroup_size_options(const DeviceContext* device)
 inline std::vector<uint32_t> coop_block_sizes(const DeviceContext* device, at::ScalarType dtype, at::ScalarType accumulate)
 {
     std::vector<uint32_t> sizes;
-    if (!device->support_coopmat) return sizes;
+    // the cooperative-matrix kernels take native dtypes only: an emulated one runs the SIMD kernels
+    if (!device->support_coopmat || device->dtype_mode[static_cast<size_t>(dtype)] != torchvulkan::DtypeMode::NATIVE) return sizes;
     for (const CoopMatShape& s : device->coopmat_shapes)
     {
         if (s.a != dtype || s.b != dtype || s.c != accumulate || s.result != accumulate) continue;
@@ -603,10 +594,12 @@ inline std::vector<int64_t> to_ints(c10::SymIntArrayRef sizes)
     return values;
 }
 
-// the dtype a random kernel samples in: float64 for float64 outputs, float32 otherwise (T.Real in philox.slang)
-inline c10::ScalarType random_real_dtype(c10::ScalarType dtype)
+// the dtype a random kernel samples in: float64 for float64 outputs where the device has it, float32 otherwise
+// (T.Real in philox.slang; Float64Emulated samples in float32)
+inline c10::ScalarType random_real_dtype(const DeviceContext* device, c10::ScalarType dtype)
 {
-    return dtype == at::kDouble ? at::kDouble : at::kFloat;
+    bool native = device->dtype_mode[static_cast<size_t>(at::kDouble)] == torchvulkan::DtypeMode::NATIVE;
+    return dtype == at::kDouble && native ? at::kDouble : at::kFloat;
 }
 
 // the dtype a random kernel generates in when the device cannot write `dtype`

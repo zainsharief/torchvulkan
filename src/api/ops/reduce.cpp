@@ -53,7 +53,7 @@ at::Tensor dispatch_reduce_shader(
     at::ScalarType stype = self.scalar_type();
     bool dtype_needs_extended = c10::elementSize(stype) != 4;
     bool dtype_supported_subgroup =
-        at::isFloatingType(stype) && stype != at::kBFloat16 &&
+        at::isFloatingType(stype) && stype != at::kBFloat16 && can_dispatch(device, torchvulkan::Kernel::REDUCE_SUBGROUP, stype) &&
         c10::elementSize(stype) <= 4 &&
         (!dtype_needs_extended || device->support_subgroup_extended_types);
 
@@ -217,7 +217,8 @@ at::Tensor reduce_dims_vulkan(
     std::optional<at::Tensor> complex = complex_reduce(self, dims, keepdim, operation);
     if (complex.has_value()) return *complex;
     // more dims than the kernel takes: the kept dims and the reduced ones each flattened into one, reduced, and shaped back
-    if (self.dim() > MAX_DIMS && is_dtype_supported(self, self.scalar_type())) {
+    bool supported = can_dispatch(get_device_context(self), torchvulkan::Kernel::REDUCE, self.scalar_type());
+    if (self.dim() > MAX_DIMS && supported) {
         std::vector<bool> reduced(self.dim(), !(dims.has_value() && dims->size() > 0));
         if (dims.has_value()) for (int64_t d : *dims) reduced[c10::maybe_wrap_dim(d, self.dim())] = true;
         std::vector<int64_t> order, kept_sizes, out_sizes;
@@ -238,7 +239,7 @@ at::Tensor reduce_dims_vulkan(
         at::Tensor r = reduce_dims_vulkan(flat, at::IntArrayRef{1}, /*keepdim=*/false, operation, empty_value, has_subgroup);
         return unview(r.reshape(keepdim ? out_sizes : kept_sizes));
     }
-    if (!is_dtype_supported(self, self.scalar_type()) || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
+    if (!supported || self.dim() > MAX_DIMS || !fits_32bit_indexing({self})) {
         TORCHVULKAN_FALLBACK("A ", self.scalar_type(), " reduction of this shape can't run on the Vulkan device. Falling back to CPU.");
         return cpu_reduce_fallback(self.cpu(), dims, keepdim, operation).to(self.device());
     }
@@ -449,11 +450,12 @@ at::Tensor argreduce(
         return at::zeros(shape.sizes(), self.options().dtype(at::kLong));
     }
 
-    if (is_dtype_supported(x, x.scalar_type()) && x.dim() <= MAX_DIMS && !fits_32bit_indexing({x})) {
+    bool supported = can_dispatch(get_device_context(x), torchvulkan::Kernel::ARG_REDUCE, x.scalar_type());
+    if (supported && x.dim() <= MAX_DIMS && !fits_32bit_indexing({x})) {
         at::Tensor idx = argreduce_chunked(x, d, op);
         return keepdim ? idx : idx.squeeze(d);
     }
-    if (!is_dtype_supported(x, x.scalar_type()) || x.dim() > MAX_DIMS) {
+    if (!supported || x.dim() > MAX_DIMS) {
         TORCHVULKAN_FALLBACK("This ", op == ArgOp::ARGMAX ? "argmax" : "argmin", " on ", x.scalar_type(), " can't run on the Vulkan device. Falling back to CPU.");
         at::Tensor cpu = op == ArgOp::ARGMAX ? at::argmax(self.cpu(), dim, keepdim) : at::argmin(self.cpu(), dim, keepdim);
         return cpu.to(self.device());

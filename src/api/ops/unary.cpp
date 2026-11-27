@@ -80,7 +80,7 @@ at::Tensor unary_op_vulkan(
 {
     DeviceContext* device = get_device_context(src);
     at::ScalarType dtype = src.scalar_type();
-    bool supported = is_dtype_supported(device, dtype);
+    bool supported = can_dispatch(device, torchvulkan::Kernel::UNARY, dtype);
 
     at::Tensor dst = OutputTarget::take(dtype, src.sizes(), {src});
     if (!dst.defined()) dst = at::empty_like(src);

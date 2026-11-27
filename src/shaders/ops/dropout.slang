@@ -19,7 +19,8 @@ public struct DropoutPushConstants
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void dropout_main<T : IRandomDtype, let VEC_SIZE : int>(
+// the mask is a bool tensor, stored as B
+void dropout_main<T : IRandomDtype, B : ITorchVulkan, let VEC_SIZE : int>(
     uint3 gi : SV_DispatchThreadID,
     uniform DropoutPushConstants pcs)
 {
@@ -33,9 +34,6 @@ void dropout_main<T : IRandomDtype, let VEC_SIZE : int>(
     R keepProb = R.fromBits(pcs.keep_prob);
     R scale = R.fromBits(pcs.scale);
 
-    T* input = (T*)pcs.input;
-    T* output = (T*)pcs.output;
-    uint8_t* mask = (uint8_t*)pcs.mask;
 
     for (int k = 0; k < VEC_SIZE; k++)
     {
@@ -44,8 +42,8 @@ void dropout_main<T : IRandomDtype, let VEC_SIZE : int>(
 
         bool kept = stream.uniform() < keepProb;
         // multiplying by zero rather than writing it keeps torch's nan for a dropped inf
-        R value = castValue<T, R>(input[element]) * (kept ? scale : R(0));
-        output[element] = castValue<R, T>(value);
-        mask[element] = kept ? uint8_t(1) : uint8_t(0);
+        R value = castValue<T, R>(T.load(pcs.input, element)) * (kept ? scale : R(0));
+        T.store(pcs.output, element, castValue<R, T>(value));
+        B.store(pcs.mask, element, B.castFromI64(kept ? 1 : 0));
     }
 }

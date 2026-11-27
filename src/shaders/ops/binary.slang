@@ -160,35 +160,30 @@ public void baseBinaryKernel<T : ITorchVulkan, Op : IBinaryOp<T>, let VEC_SIZE :
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        T* tensor_a = (T*)address_a;
-        T* tensor_out = (T*)address_out;
 
         T va[VEC_SIZE];
-        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) va[k] = tensor_a[idx * VEC_SIZE + k];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) va[k] = T.load(address_a, idx * VEC_SIZE + k);
 
         T vb[VEC_SIZE];
         [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = scalar_value;
 
         if (USE_SCALAR == 0)
         {
-            T* tensor_b = (T*)address_b;
-            [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = tensor_b[idx * VEC_SIZE + k];
+            [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = T.load(address_b, idx * VEC_SIZE + k);
         }
 
         T res[VEC_SIZE];
         [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = Op.eval(va[k], vb[k], alpha);
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
-        for (uint i = 0; i < count; i++) tensor_out[idx * VEC_SIZE + i] = res[i];
+        uint count = (remainder >= VEC_SIZE) ? VEC_SIZE : uint(remainder);
+        T.storeVec<VEC_SIZE>(address_out, idx * VEC_SIZE, res, count);
 
         return;
     }
 
     if (idx >= numel) return;
 
-    T* tensor_a = (T*)address_a;
-    T* tensor_out = (T*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_a = (uint*)md.strides_a;
@@ -208,15 +203,14 @@ public void baseBinaryKernel<T : ITorchVulkan, Op : IBinaryOp<T>, let VEC_SIZE :
         idx_out += coord * strides_out[i];
     }
 
-    T v1 = tensor_a[idx_a];
+    T v1 = T.load(address_a, idx_a);
     T v2 = scalar_value;
     if (USE_SCALAR == 0)
     {
-        T* tensor_b = (T*)address_b;
-        v2 = tensor_b[idx_b];
+        v2 = T.load(address_b, idx_b);
     }
 
-    tensor_out[idx_out] = Op.eval(v1, v2, alpha);
+    T.store(address_out, idx_out, Op.eval(v1, v2, alpha));
 }
 
 public void dispatchBinary<T : ITorchVulkan, let VEC_SIZE : int>(

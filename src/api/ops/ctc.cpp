@@ -65,7 +65,7 @@ CtcProblem make_problem(const at::Tensor& log_probs, const at::Tensor& targets, 
         );
     }
 
-    at::ScalarType dtype = (log_probs.scalar_type() == at::kDouble && is_dtype_supported(log_probs, at::kDouble)) ? at::kDouble : at::kFloat;
+    at::ScalarType dtype = (log_probs.scalar_type() == at::kDouble && can_dispatch(get_device_context(log_probs), torchvulkan::Kernel::CTC, at::kDouble)) ? at::kDouble : at::kFloat;
     at::TensorOptions long_options = log_probs.options().dtype(at::kLong);
     p.log_probs = log_probs.to(dtype).contiguous();
     p.targets = flat_targets.numel() > 0 ? flat_targets : at::zeros({1}, long_options);

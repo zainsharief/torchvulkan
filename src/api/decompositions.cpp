@@ -26,7 +26,7 @@ std::vector<int64_t> all_dims(const at::Tensor& t)
 at::Tensor p_norm(const at::Tensor& self, double p, at::OptionalIntArrayRef dim, bool keepdim)
 {
     at::ScalarType odt = self.scalar_type();
-    bool low = is_low_prec(odt);
+    bool low = is_low_prec(odt) || at::isFloat8Type(odt);
     bool complex_half = odt == at::kComplexHalf;  // like half, accumulates in float
     at::Tensor a = at::abs(low ? self.to(at::kFloat) : complex_half ? self.to(at::kComplexFloat) : self);
     std::vector<int64_t> dv = (dim.has_value() && dim->size() > 0)
@@ -614,7 +614,7 @@ std::tuple<at::Tensor, at::Tensor> compute_var_mean(
     );
 
     at::ScalarType odt = self_in.scalar_type();
-    bool low = is_low_prec(odt);
+    bool low = is_low_prec(odt) || at::isFloat8Type(odt);
     at::Tensor self = low ? self_in.to(at::kFloat) : self_in;
 
     at::Tensor mean_keep = at::mean(self, dim, /*keepdim=*/true);
@@ -665,6 +665,8 @@ at::Tensor std_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
+    // float8 has no sqrt: root the float32 variance and round once
+    if (at::isFloat8Type(self.scalar_type())) return std_correction_vulkan(self.to(at::kFloat), dim, correction, keepdim).to(self.scalar_type());
     return at::sqrt(std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std")));
 }
 
@@ -683,6 +685,10 @@ std::tuple<at::Tensor, at::Tensor> std_mean_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
+    if (at::isFloat8Type(self.scalar_type())) {
+        auto [stdev, mean] = std_mean_correction_vulkan(self.to(at::kFloat), dim, correction, keepdim);
+        return std::make_tuple(stdev.to(self.scalar_type()), mean.to(self.scalar_type()));
+    }
     at::Tensor var, mean;
     std::tie(var, mean) = compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std_mean");
     return std::make_tuple(at::sqrt(var), mean);
@@ -1117,6 +1123,10 @@ at::Tensor addbmm_vulkan(const at::Tensor& self, const at::Tensor& batch1, const
     TORCH_CHECK(batch1.size(0) == batch2.size(0), "batch1 and batch2 must have same number of batches, got ", batch1.size(0), " and ", batch2.size(0));
     TORCH_CHECK(batch1.size(2) == batch2.size(1), "Incompatible matrix sizes for bmm (", batch1.size(1), "x", batch1.size(2), " and ", batch2.size(1), "x", batch2.size(2), ")");
     int64_t b = batch1.size(0), n = batch1.size(1), k = batch1.size(2), p = batch2.size(2);
+    // float8 has no add: run in float32 and round once
+    if (at::isFloat8Type(self.scalar_type())) {
+        return addbmm_vulkan(self.to(at::kFloat), batch1.to(at::kFloat), batch2.to(at::kFloat), beta, alpha).to(self.scalar_type());
+    }
 
     at::Tensor product = (b == 0 || k == 0)
         ? at::zeros({n, p}, batch1.options())

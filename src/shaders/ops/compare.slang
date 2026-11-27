@@ -43,7 +43,8 @@ public struct LogicalAndOp<T : ITorchVulkan> : ICompareOp<T> { public static boo
 public struct LogicalOrOp<T : ITorchVulkan> : ICompareOp<T> { public static bool eval(T a, T b) { return T.ext_nonzero(a) || T.ext_nonzero(b); } }
 public struct LogicalXorOp<T : ITorchVulkan> : ICompareOp<T> { public static bool eval(T a, T b) { return T.ext_nonzero(a) != T.ext_nonzero(b); } }
 
-public void baseCompareKernel<T : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE : int>(
+// the result is a bool tensor, stored as B
+public void baseCompareKernel<T : ITorchVulkan, B : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE : int>(
     uint3 gi,
     uint64_t address_a,
     uint64_t address_b,
@@ -58,10 +59,9 @@ public void baseCompareKernel<T : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        T* tensor_a = (T*)address_a;
 
         T va[VEC_SIZE];
-        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) va[k] = tensor_a[idx * VEC_SIZE + k];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) va[k] = T.load(address_a, idx * VEC_SIZE + k);
 
         T vb[VEC_SIZE];
         [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = scalar_value;
@@ -69,25 +69,21 @@ public void baseCompareKernel<T : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE
         // the second operand has no address when it is a scalar, so it is only read when it exists
         if (USE_SCALAR == 0)
         {
-            T* tensor_b = (T*)address_b;
-            [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = tensor_b[idx * VEC_SIZE + k];
+            [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) vb[k] = T.load(address_b, idx * VEC_SIZE + k);
         }
 
-        uint8_t res[VEC_SIZE];
-        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = Op.eval(va[k], vb[k]) ? uint8_t(1) : uint8_t(0);
+        B res[VEC_SIZE];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = B.castFromI64(Op.eval(va[k], vb[k]) ? 1 : 0);
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
-        uint8_t* tensor_out = (uint8_t*)address_out;
-        for (uint i = 0; i < count; i++) tensor_out[idx * VEC_SIZE + i] = res[i];
+        uint count = (remainder >= VEC_SIZE) ? VEC_SIZE : uint(remainder);
+        B.storeVec<VEC_SIZE>(address_out, idx * VEC_SIZE, res, count);
 
         return;
     }
 
     if (idx >= numel) return;
 
-    T* tensor_a = (T*)address_a;
-    uint8_t* tensor_out = (uint8_t*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_a = (uint*)md.strides_a;
@@ -107,42 +103,41 @@ public void baseCompareKernel<T : ITorchVulkan, Op : ICompareOp<T>, let VEC_SIZE
         idx_out += coord * strides_out[i];
     }
 
-    T va = tensor_a[idx_a];
+    T va = T.load(address_a, idx_a);
 
     // the second operand has no address when it is a scalar, so it is only read when it exists
     T vb = scalar_value;
     if (USE_SCALAR == 0)
     {
-        T* tensor_b = (T*)address_b;
-        vb = tensor_b[idx_b];
+        vb = T.load(address_b, idx_b);
     }
 
-    tensor_out[idx_out] = Op.eval(va, vb) ? uint8_t(1) : uint8_t(0);
+    B.store(address_out, idx_out, B.castFromI64(Op.eval(va, vb) ? 1 : 0));
 }
 
-public void dispatchCompare<T : ITorchVulkan, let VEC_SIZE : int>(uint3 gi, ComparePushConstants<T> pcs)
+public void dispatchCompare<T : ITorchVulkan, B : ITorchVulkan, let VEC_SIZE : int>(uint3 gi, ComparePushConstants<T> pcs)
 {
     T scalar_value = T.fromPushScalar(pcs.scalar_value);
     switch (OP_TYPE)
     {
-    case 0: baseCompareKernel<T, EqOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 1: baseCompareKernel<T, NeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 2: baseCompareKernel<T, LtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 3: baseCompareKernel<T, LeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 4: baseCompareKernel<T, GtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 5: baseCompareKernel<T, GeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 6: baseCompareKernel<T, LogicalAndOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 7: baseCompareKernel<T, LogicalOrOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
-    case 8: baseCompareKernel<T, LogicalXorOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 0: baseCompareKernel<T, B, EqOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 1: baseCompareKernel<T, B, NeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 2: baseCompareKernel<T, B, LtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 3: baseCompareKernel<T, B, LeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 4: baseCompareKernel<T, B, GtOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 5: baseCompareKernel<T, B, GeOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 6: baseCompareKernel<T, B, LogicalAndOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 7: baseCompareKernel<T, B, LogicalOrOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
+    case 8: baseCompareKernel<T, B, LogicalXorOp<T>, VEC_SIZE>(gi, pcs.tensor_a, pcs.tensor_b, pcs.tensor_out, pcs.metadata, pcs.numel, scalar_value); break;
     default: break;
     }
 }
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void compare_main<T : ITorchVulkan, let VEC_SIZE : int>(
+void compare_main<T : ITorchVulkan, B : ITorchVulkan, let VEC_SIZE : int>(
     uint3 gi : SV_DispatchThreadID,
     uniform ComparePushConstants<T> pcs)
 {
-    dispatchCompare<T, VEC_SIZE>(gi, pcs);
+    dispatchCompare<T, B, VEC_SIZE>(gi, pcs);
 }

@@ -174,7 +174,9 @@ uint64_t matmul_tune_key(const MatmulOperands& ops, uint32_t M, uint32_t N, uint
 bool matmul_simd_fits(DeviceContext* device, c10::ScalarType compute_type, uint32_t tile_m, uint32_t subgroup, uint32_t M, uint32_t N)
 {
     const auto& limits = device->properties.limits;
-    uint64_t shared_bytes = c10::elementSize(compute_type) * ((tile_m * (MATMUL_TILE_K + 1)) + (MATMUL_TILE_K * MATMUL_TILE_N));
+    // 8- and 16-bit integers accumulate in int32
+    size_t element = at::isIntegralType(compute_type, /*includeBool=*/true) ? std::max<size_t>(4, c10::elementSize(compute_type)) : c10::elementSize(compute_type);
+    uint64_t shared_bytes = element * ((tile_m * (MATMUL_TILE_K + 1)) + (MATMUL_TILE_K * MATMUL_TILE_N));
     uint64_t max_m = uint64_t(1) << log2_ceil(M);
     uint64_t max_n = uint64_t(1) << log2_ceil(N);
     if (MATMUL_WG * MATMUL_WG > limits.maxComputeWorkGroupInvocations || shared_bytes > limits.maxComputeSharedMemorySize) return false;
@@ -264,7 +266,8 @@ at::Tensor dispatch_matmul_simd_shader(
     DeviceContext* device = get_device_context(self_);
     const auto& limits = device->properties.limits;
     c10::ScalarType result_dtype = at::result_type(shape.self, shape.other);
-    if (!is_dtype_supported(device, result_dtype) || MATMUL_WG * MATMUL_WG > limits.maxComputeWorkGroupInvocations) {
+    if (!can_dispatch(device, torchvulkan::Kernel::MATMUL_SIMD, result_dtype) ||
+        MATMUL_WG * MATMUL_WG > limits.maxComputeWorkGroupInvocations) {
         TORCHVULKAN_FALLBACK("A ", result_dtype, " matmul can't run on the Vulkan device. Falling back to CPU.");
         return cpu_fallback();
     }
@@ -299,6 +302,18 @@ at::Tensor dispatch_matmul_simd_shader(
     auto make_dispatch = [&](const TuneConfig& config, int64_t b0, int64_t batch) {
         return matmul_simd_dispatch(ops, out, has_bias, activation, alpha, beta, config[0], config[1], b0, batch);
     };
+    const int64_t max_batch = limits.maxComputeWorkGroupCount[2];
+
+    if (result_dtype == at::kDouble && device->dtype_mode[static_cast<size_t>(at::kDouble)] == torchvulkan::DtypeMode::EMULATED) {
+        for (int64_t b0 = 0; b0 < B; b0 += max_batch)
+        {
+            TuneDispatch d = make_dispatch(TuneConfig{{MATMUL_TILE_N, device->default_subgroup_size}}, b0, std::min(max_batch, B - b0));
+            d.groupX = static_cast<uint32_t>(ceil_div(N, MATMUL_WG));
+            d.groupY = static_cast<uint32_t>(ceil_div(M, MATMUL_WG));
+            dispatch_tuned_shader(device, d);
+        }
+        return finish_matmul_output(out, shape);
+    }
 
     TuneSpace space;
     space.params = {
@@ -307,7 +322,6 @@ at::Tensor dispatch_matmul_simd_shader(
     };
     space.valid = [&](const TuneConfig& config) { return matmul_simd_fits(device, compute_type, config[0], config[1], M, N); };
 
-    const int64_t max_batch = limits.maxComputeWorkGroupCount[2];
     const TuneConfig& config = device->tuner->select(
         ShaderKey{torchvulkan::Kernel::MATMUL_SIMD, result_dtype},
         matmul_tune_key(ops, M, N, K, B),
@@ -385,7 +399,7 @@ at::Tensor dispatch_matmul_coop_shader(
     const auto& limits = device->properties.limits;
     c10::ScalarType promoted_type = at::result_type(self_, other_);
     if (at::isComplexType(promoted_type)) return complex_matmul(self_, other_, bias_, alpha, beta, promoted_type);
-    if (!is_dtype_supported(device, promoted_type)) return simd_fallback();
+    if (!can_dispatch(device, torchvulkan::Kernel::MATMUL_COOP, promoted_type)) return simd_fallback();
 
     c10::ScalarType accumulate_type = matmul_accumulate_dtype(promoted_type);
     std::vector<uint32_t> available_block_sizes = coop_block_sizes(device, promoted_type, accumulate_type);

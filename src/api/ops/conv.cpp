@@ -297,8 +297,8 @@ bool implicit_gemm_supported(const ConvProblem& p, std::initializer_list<at::Ten
     const at::Tensor& first = *operands.begin();
     at::ScalarType dtype = first.scalar_type();
     bool floating = dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kDouble;
-    if (!floating || !is_dtype_supported(first, dtype) || p.g.kernel.empty() || p.g.kernel.size() > 3) return false;
     DeviceContext* device = get_device_context(first);
+    if (!floating || !can_dispatch(device, torchvulkan::Kernel::CONV_SIMD, dtype) || p.g.kernel.empty() || p.g.kernel.size() > 3) return false;
     const auto& limits = device->properties.limits;
     if (CONV_WG * CONV_WG > limits.maxComputeWorkGroupInvocations || conv_tile_m(device, dtype) == 0) return false;
     if (p.groups > limits.maxComputeWorkGroupCount[2]) return false;

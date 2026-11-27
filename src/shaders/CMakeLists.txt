@@ -24,6 +24,7 @@ endif()
 
 file(GLOB_RECURSE SHADER_MODULES CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/src/shaders/core/*.slang"
+     "${CMAKE_SOURCE_DIR}/src/shaders/dtype/*.slang"
      "${CMAKE_SOURCE_DIR}/src/shaders/helpers/*.slang"
      "${CMAKE_SOURCE_DIR}/src/shaders/ops/*.slang")
 

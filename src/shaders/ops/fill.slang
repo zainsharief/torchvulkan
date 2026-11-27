@@ -21,7 +21,7 @@ public struct FillPushConstants<T : ITorchVulkan>
     public T.PushScalar fill_value;
 }
 
-public void fillKernel<T, let VEC_SIZE : int>(
+public void fillKernel<T : ITorchVulkan, let VEC_SIZE : int>(
     uint3 gi,
     uint64_t address,
     uint64_t address_metadata,
@@ -29,15 +29,16 @@ public void fillKernel<T, let VEC_SIZE : int>(
     T fill_value)
 {
     uint idx = flat_thread(gi, WG_x);
-    T* tensor = (T*)address;
 
     if (IS_CONTIG == 1)
     {
         if (idx * VEC_SIZE >= numel) return;
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
-        for (uint i = 0; i < count; i++) tensor[idx * VEC_SIZE + i] = fill_value;
+        uint count = (remainder >= VEC_SIZE) ? VEC_SIZE : uint(remainder);
+        T values[VEC_SIZE];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) values[k] = fill_value;
+        T.storeVec<VEC_SIZE>(address, idx * VEC_SIZE, values, count);
 
         return;
     }
@@ -52,7 +53,7 @@ public void fillKernel<T, let VEC_SIZE : int>(
     var walker = IndexWalker(md.sizes, NDIM, idx);
     for (uint i = 0; i < NDIM; i++) idx_in += walker.next(i) * strides[i];
 
-    tensor[idx_in] = fill_value;
+    T.store(address, idx_in, fill_value);
 }
 
 [shader("compute")]

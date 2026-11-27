@@ -126,7 +126,7 @@ void dispatch_norm_shader(NormMode mode, const NormArgs& a, uint32_t groups)
 bool can_use_norm_shader(const at::Tensor& input)
 {
     return input.device().type() == c10::DeviceType::PrivateUse1 && is_dtype_float(input.scalar_type()) &&
-        is_dtype_supported(get_device_context(input), input.scalar_type()) && input.numel() > 0 &&
+        can_dispatch(get_device_context(input), torchvulkan::Kernel::NORM, input.scalar_type()) && input.numel() > 0 &&
         input.numel() <= std::numeric_limits<int32_t>::max();
 }
 
@@ -195,7 +195,7 @@ std::tuple<at::Tensor, at::Tensor> fused_rms_norm_vulkan(
     args.outer = static_cast<uint32_t>(input.numel() / args.channels);
     args.eps = eps_value;
     args.rms = true;
-    args.stats_accum = true;
+    args.stats_accum = compute != dtype; // float32 statistics for float16 and bfloat16
     args.y = at::empty(input.sizes(), args.x.options());
     args.rstd = at::empty(row_stat_shape(input, nnorm), args.x.options().dtype(compute));
     dispatch_norm_shader(NormMode::ROW_FORWARD, args, args.outer);
@@ -244,7 +244,7 @@ std::tuple<at::Tensor, at::Tensor> fused_rms_norm_backward_vulkan(
     args.channels = static_cast<uint32_t>(normalized_numel(input, nnorm));
     args.outer = static_cast<uint32_t>(input.numel() / args.channels);
     args.rms = true;
-    args.stats_accum = true;
+    args.stats_accum = compute != dtype; // float32 statistics for float16 and bfloat16
 
     at::Tensor grad_input, grad_weight;
     if (output_mask[0]) {

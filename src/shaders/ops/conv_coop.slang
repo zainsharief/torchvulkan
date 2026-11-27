@@ -20,7 +20,7 @@ struct ConvTile
 
 // clamped indices: lavapipe performs loads in untaken branches
 void gatherSlice<T : ITorchVulkan & ICoopElement, A : IMatmulLoader<T.Accum>, B : IColumnGather<T>>(
-    uint ti, ConvTile tile, uint k, A a, B b, B.Column columns[GATHER_COLUMNS], inout T regA[LOADS_A], inout T regB[LOADS_B * GATHER_COLUMNS])
+    uint ti, ConvTile tile, uint k, A a, B b, B.Column columns[GATHER_COLUMNS], inout T regA[LOADS_A], inout T regB[LOADS_B * GATHER_COLUMNS]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -48,7 +48,7 @@ void gatherSlice<T : ITorchVulkan & ICoopElement, A : IMatmulLoader<T.Accum>, B 
     }
 }
 
-void storeSlice<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LOADS_A], T regB[LOADS_B * GATHER_COLUMNS])
+void storeSlice<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LOADS_A], T regB[LOADS_B * GATHER_COLUMNS]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -67,7 +67,7 @@ void storeSlice<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LOA
     }
 }
 
-void multiplySlice<T : ITorchVulkan & ICoopElement>(ConvTile tile, uint stage, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+void multiplySlice<T : ITorchVulkan & ICoopElement>(ConvTile tile, uint stage, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     uint base_a = stage * stageA();
     uint base_b = stage * stageB();
@@ -100,7 +100,7 @@ void multiplySlice<T : ITorchVulkan & ICoopElement>(ConvTile tile, uint stage, i
 }
 
 void finishTile<T : ITorchVulkan & ICoopElement, S : IMatmulStore<T.Accum>>(
-    uint ti, ConvTile tile, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N], S out, uint64_t bias)
+    uint ti, ConvTile tile, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N], S out, uint64_t bias) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     uint lane = ti % SUBGROUP_SIZE;
@@ -133,7 +133,7 @@ void finishTile<T : ITorchVulkan & ICoopElement, S : IMatmulStore<T.Accum>>(
 }
 
 void convGemm<T : ITorchVulkan & ICoopElement, A : IMatmulLoader<T.Accum>, B : IColumnGather<T>, S : IMatmulStore<T.Accum>>(
-    uint3 wg, uint ti, A a, B b, S out, uint64_t bias, uint group, uint M, uint N, uint K)
+    uint3 wg, uint ti, A a, B b, S out, uint64_t bias, uint group, uint M, uint N, uint K) where T.Accum : __BuiltinArithmeticType
 {
     // a phase with no taps still writes zeros and the bias
     if (N == 0) return;
@@ -180,7 +180,7 @@ void convGemm<T : ITorchVulkan & ICoopElement, A : IMatmulLoader<T.Accum>, B : I
 }
 
 void gatherSliceK<T : ITorchVulkan & ICoopElement, A : IColumnGather<T>, B : IColumnGather<T>>(
-    uint ti, ConvTile tile, uint k, A a, B b, A.Column rows[LOADS_A], B.Column cols[LOADS_B], inout T regA[LOADS_A], inout T regB[LOADS_B])
+    uint ti, ConvTile tile, uint k, A a, B b, A.Column rows[LOADS_A], B.Column cols[LOADS_B], inout T regA[LOADS_A], inout T regB[LOADS_B]) where T.Accum : __BuiltinArithmeticType
 {
     uint kk = k + ti % BK;
     A.Row ak = a.row(min(kk, tile.K - 1));
@@ -197,7 +197,7 @@ void gatherSliceK<T : ITorchVulkan & ICoopElement, A : IColumnGather<T>, B : ICo
     }
 }
 
-void storeSliceK<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LOADS_A], T regB[LOADS_B])
+void storeSliceK<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LOADS_A], T regB[LOADS_B]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -212,7 +212,7 @@ void storeSliceK<T : ITorchVulkan & ICoopElement>(uint ti, uint stage, T regA[LO
 }
 
 void convGemmK<T : ITorchVulkan & ICoopElement, A : IColumnGather<T>, B : IColumnGather<T>, S : IMatmulStore<T.Accum>>(
-    uint3 wg, uint ti, A a, B b, S out, uint M, uint N, uint K)
+    uint3 wg, uint ti, A a, B b, S out, uint M, uint N, uint K) where T.Accum : __BuiltinArithmeticType
 {
     ConvTile tile;
     tile.batch = wg.z;
@@ -259,7 +259,7 @@ void convGemmK<T : ITorchVulkan & ICoopElement, A : IColumnGather<T>, B : IColum
 void conv_coop_main<T : ITorchVulkan & ICoopElement, let VEC : int>(
     uint3 li : SV_GroupThreadID,
     uint3 wg : SV_GroupID,
-    uniform ConvPushConstants pcs)
+    uniform ConvPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     uint ti = li.x;
     uint threads = WORKGROUP_SIZE;

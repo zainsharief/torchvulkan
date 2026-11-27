@@ -21,7 +21,8 @@ public struct ResampleU8PushConstants
 }
 
 // as ATen's uint8 separable loops: a rounding bias, the integer products, then shift and clamp
-void resampleU8Kernel<T : ITorchVulkan>(uint64_t idx, ResampleU8PushConstants pcs)
+// T holds the uint8 image, W the int16 weights
+void resampleU8Kernel<T : ITorchVulkan, W : ITorchVulkan>(uint64_t idx, ResampleU8PushConstants pcs)
 {
     if (idx >= pcs.count) return;
     uint64_t inner = uint64_t(pcs.inner);
@@ -29,26 +30,25 @@ void resampleU8Kernel<T : ITorchVulkan>(uint64_t idx, ResampleU8PushConstants pc
     uint o = uint((idx / inner) % uint64_t(pcs.out_length));
     uint64_t k = idx % inner;
 
-    T* input = (T*)pcs.input;
     int64_t first = ((int64_t*)pcs.index_min)[o];
     int64_t size = ((int64_t*)pcs.index_size)[o];
-    int16_t* weights = (int16_t*)pcs.weights + int64_t(o) * pcs.taps;
+    uint64_t weights = uint64_t(o) * pcs.taps;
     uint64_t base = outer * uint64_t(pcs.in_length) * inner + k;
 
     int acc = 1 << (pcs.precision - 1);
     for (int64_t j = 0; j < size; j++)
     {
-        int value = castValue<T, int32_t>(input[base + uint64_t(first + j) * inner]);
-        acc += value * int(weights[j]);
+        int value = castValue<T, int32_t>(T.load(pcs.input, base + uint64_t(first + j) * inner));
+        acc += value * castValue<W, int32_t>(W.load(pcs.weights, weights + uint64_t(j)));
     }
-    ((T*)pcs.output)[idx] = castValue<int32_t, T>(clamp(acc >> int(pcs.precision), 0, 255));
+    T.store(pcs.output, idx, castValue<int32_t, T>(clamp(acc >> int(pcs.precision), 0, 255)));
 }
 
 [shader("compute")]
 [numthreads(WG_x, 1, 1)]
-void resample_u8_main<T : ITorchVulkan>(
+void resample_u8_main<T : ITorchVulkan, W : ITorchVulkan>(
     uint3 gi : SV_DispatchThreadID,
     uniform ResampleU8PushConstants pcs)
 {
-    resampleU8Kernel<T>(uint64_t(flat_thread(gi, WG_x)), pcs);
+    resampleU8Kernel<T, W>(uint64_t(flat_thread(gi, WG_x)), pcs);
 }

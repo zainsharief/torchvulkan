@@ -24,7 +24,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> dispatch_sort_shader(const at:
     int64_t padded = 1;
     while (padded < n) padded <<= 1;
 
-    if (!is_dtype_supported(device, lines.scalar_type()) || L * padded > std::numeric_limits<int32_t>::max()) return std::nullopt;
+    if (!can_dispatch(device, torchvulkan::Kernel::SORT, lines.scalar_type()) || L * padded > std::numeric_limits<int32_t>::max()) return std::nullopt;
 
     // two copies of the keys and positions: each step reads one and writes the other
     at::Tensor keys[2] = {at::empty({L, padded}, lines.options()), at::empty({L, padded}, lines.options())};
