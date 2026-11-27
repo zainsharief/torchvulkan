@@ -3,11 +3,10 @@
 #include <ATen/SDPBackend.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/native/transformers/attention.h>
-#include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
-#include <mutex>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -395,31 +394,37 @@ void merge_splits(
     lse.copy_(at::where(at::eq(total, neg_inf()), at::scalar_tensor(pos_inf(), total.options()), total));
 }
 
-// wall time of merging `splits` partial outputs for this shape, timed once on scratch tensors: the tuner
-// adds it to a split config's kernel time, which alone would make splitting look free
-double merge_ns(const Attention& a, int64_t splits)
-{
-    static std::mutex mutex;
-    static std::map<std::vector<int64_t>, double> cache;
-    DeviceContext* device = get_device_context(a.q);
-    const std::vector<int64_t> key{reinterpret_cast<int64_t>(device), static_cast<int64_t>(a.accumulate), a.B, a.Hq, a.L, a.Dv, splits};
-    std::lock_guard<std::mutex> lock(mutex);
-    auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
+// The SIMD kernels stage whole query and key/value rows in shared memory, so past a 128-wide head their tiles shrink
+// until they reread keys and values far more often than the matmul-based path: on an RX 6800 XT (RADV, 64 KiB) the
+// fused forward is 2x slower at D=256 and 3x at 320-496, and the backward 20x at D=512. PyTorch likewise stops
+// flash attention at 256 and runs larger heads on its math path. So without cooperative matrices those heads go
+// chunked. With them it depends on the device (emulated coop loses to chunked, real coop often doesn't), so the
+// tuner times the chunked path against the fused kernels it picked.
+constexpr int64_t SIMD_MAX_FUSED_HEAD = 128;
 
-    at::TensorOptions options = a.q.options().dtype(a.accumulate);
-    at::Tensor partial_out = at::zeros({a.B * splits, a.Hq, a.L, a.Dv}, options);
-    at::Tensor partial_lse = at::zeros({a.B * splits, a.Hq, a.L}, options);
-    at::Tensor out = attention_output(a);
-    at::Tensor lse = at::empty({a.B, a.Hq, a.L}, options);
-    merge_splits(a, splits, partial_out, partial_lse, out, lse);
-    device->flush();
-    const int runs = 3;
-    const auto start = std::chrono::steady_clock::now();
-    for (int i = 0; i < runs; i++) merge_splits(a, splits, partial_out, partial_lse, out, lse);
-    device->flush();
-    const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / runs;
-    return cache.emplace(key, ns).first->second;
+bool large_head(const Attention& a) { return std::max(a.D, a.Dv) > SIMD_MAX_FUSED_HEAD; }
+
+// tuned_id bit of the fused-or-chunked choice (attention_tune_key takes bits 0-45, the mode 46-47)
+constexpr uint64_t PATH_CHOICE = uint64_t(1) << 48;
+
+// Whether the tuner finds the chunked path faster than `fused`, the fused kernels with their tuned configs.
+bool chunked_is_faster(const Attention& a, AttentionMode mode, ShaderKey shader, const std::function<void()>& fused, const std::function<void()>& chunked)
+{
+    DeviceContext* device = get_device_context(a.q);
+    TuneSpace space;
+    space.params = {{"chunked", {0, 1}}};
+    const TuneConfig& config = device->tuner->select(
+        shader,
+        attention_tune_key(a) | (static_cast<uint64_t>(mode) << 46) | PATH_CHOICE,
+        space,
+        [&](const TuneConfig& c) {
+            TuneDispatch d;
+            d.dispatch = false;
+            d.extra = c[0] == 1 ? chunked : fused;
+            return d;
+        }
+    );
+    return !config.empty() && config[0] == 1;
 }
 
 std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
@@ -432,11 +437,12 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     if (a.k.stride(3) != 1) a.k = a.k.contiguous();
     if (a.v.stride(3) != 1) a.v = a.v.contiguous();
     if (!fused_shapes_fit(a, device)) return std::nullopt;
+    std::vector<uint32_t> blocks = coop_block_sizes(device, a.dtype, a.accumulate);
+    if (blocks.empty() && large_head(a)) return std::nullopt;
 
     at::Tensor out = attention_output(a);
     at::Tensor lse = at::empty({a.B, a.Hq, a.L}, a.q.options().dtype(a.accumulate));
 
-    std::vector<uint32_t> blocks = coop_block_sizes(device, a.dtype, a.accumulate);
     std::vector<uint32_t> kernels = {0};
     if (blocks.empty()) {
         blocks = {0};
@@ -485,15 +491,20 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
         return std::make_tuple(at::empty({a.B * t.splits, a.Hq, a.L, a.Dv}, options), at::empty({a.B * t.splits, a.Hq, a.L}, options));
     };
 
+    const ShaderKey shader{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION_SIMD, a.dtype};
     const TuneConfig& config = device->tuner->select(
-        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION_SIMD, a.dtype},
+        shader,
         attention_tune_key(a),
         space,
         [&](const TuneConfig& c) {
             AttentionTiling t = attention_tiling(c);
             auto [o, l] = targets(t);
             TuneDispatch d = attention_forward_dispatch(a, c, o, l, 0, std::min<int64_t>(a.B, limits.maxComputeWorkGroupCount[2] / t.splits));
-            if (t.splits > 1) d.extra_ns = merge_ns(a, t.splits);
+            // charged for the merge, or splitting would look free
+            if (t.splits > 1) {
+                d.extra = [a, splits = t.splits, o = o, l = l, out, lse]() { merge_splits(a, splits, o, l, out, lse); };
+                d.extra_key = t.splits;
+            }
             return d;
         }
     );
@@ -504,10 +515,16 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
 
     // the batch (times the splits) is the grid's z dimension, so it goes in chunks of the device's limit
     int64_t max_batch = limits.maxComputeWorkGroupCount[2] / tiling.splits;
-    for (int64_t b0 = 0; b0 < a.B; b0 += max_batch) {
-        dispatch_tuned_shader(device, attention_forward_dispatch(a, config, partial_out, partial_lse, b0, std::min(max_batch, a.B - b0)));
+    auto run = [&]() {
+        for (int64_t b0 = 0; b0 < a.B; b0 += max_batch) {
+            dispatch_tuned_shader(device, attention_forward_dispatch(a, config, partial_out, partial_lse, b0, std::min(max_batch, a.B - b0)));
+        }
+        if (tiling.splits > 1) merge_splits(a, tiling.splits, partial_out, partial_lse, out, lse);
+    };
+    if (large_head(a) && chunked_is_faster(a, AttentionMode::FORWARD, shader, run, [&]() { chunked_forward(a, attention_output(a)); })) {
+        return std::nullopt;
     }
-    if (tiling.splits > 1) merge_splits(a, tiling.splits, partial_out, partial_lse, out, lse);
+    run();
     return std::make_tuple(out, lse);
 }
 
@@ -600,7 +617,8 @@ TuneDispatch attention_backward_dispatch(
     return d;
 }
 
-bool run_backward(
+// The tuned config of one backward pass, or nullptr if none fits.
+const TuneConfig* tune_backward(
     AttentionMode mode,
     const Attention& a,
     const at::Tensor& dout,
@@ -662,12 +680,24 @@ bool run_backward(
         space,
         [&](const TuneConfig& c) { return attention_backward_dispatch(mode, a, c, dout, lse, delta, grad_a, grad_b, 0, std::min(max_batch, a.B)); }
     );
-    if (config.empty()) return false;
+    return config.empty() ? nullptr : &config;
+}
 
+void run_backward(
+    AttentionMode mode,
+    const Attention& a,
+    const TuneConfig& config,
+    const at::Tensor& dout,
+    const at::Tensor& lse,
+    const at::Tensor& delta,
+    const at::Tensor& grad_a,
+    const at::Tensor& grad_b)
+{
+    DeviceContext* device = get_device_context(a.q);
+    int64_t max_batch = device->properties.limits.maxComputeWorkGroupCount[2];
     for (int64_t b0 = 0; b0 < a.B; b0 += max_batch) {
         dispatch_tuned_shader(device, attention_backward_dispatch(mode, a, config, dout, lse, delta, grad_a, grad_b, b0, std::min(max_batch, a.B - b0)));
     }
-    return true;
 }
 
 std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> fused_backward(
@@ -683,6 +713,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> fused_backward(
     a.k = a.k.contiguous();
     a.v = a.v.contiguous();
     if (!fused_shapes_fit(a, device)) return std::nullopt;
+    if (coop_block_sizes(device, a.dtype, a.accumulate).empty() && large_head(a)) return std::nullopt;
 
     at::Tensor dout = grad_out.to(a.dtype).contiguous();
     at::Tensor stats = lse.to(a.accumulate).contiguous();
@@ -691,8 +722,27 @@ std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> fused_backward(
     at::Tensor grad_q = at::empty({a.B, a.Hq, a.L, a.D}, a.q.options());
     at::Tensor grad_k = at::empty({a.B, a.Hk, a.S, a.D}, a.q.options());
     at::Tensor grad_v = at::empty({a.B, a.Hk, a.S, a.Dv}, a.q.options());
-    if (!run_backward(AttentionMode::BACKWARD_KV, a, dout, stats, delta, grad_k, grad_v)) return std::nullopt;
-    if (!run_backward(AttentionMode::BACKWARD_Q, a, dout, stats, delta, grad_q, at::Tensor())) return std::nullopt;
+    const TuneConfig* kv_config = tune_backward(AttentionMode::BACKWARD_KV, a, dout, stats, delta, grad_k, grad_v);
+    if (!kv_config) return std::nullopt;
+    const TuneConfig* q_config = tune_backward(AttentionMode::BACKWARD_Q, a, dout, stats, delta, grad_q, at::Tensor());
+    if (!q_config) return std::nullopt;
+
+    auto run = [&]() {
+        run_backward(AttentionMode::BACKWARD_KV, a, *kv_config, dout, stats, delta, grad_k, grad_v);
+        run_backward(AttentionMode::BACKWARD_Q, a, *q_config, dout, stats, delta, grad_q, at::Tensor());
+    };
+    if (large_head(a)) {
+        // timed with its setup, as chunked_backward does its own
+        auto fused = [&]() {
+            at::sum(at::mul(grad_out.to(a.dtype).to(a.accumulate), out.to(a.accumulate)), {-1});
+            run();
+        };
+        const ShaderKey shader{torchvulkan::Kernel::ATTENTION_COOP_BACKWARD, a.dtype};
+        if (chunked_is_faster(a, AttentionMode::BACKWARD_KV, shader, fused, [&]() { chunked_backward(a, grad_out, out, lse, false); })) {
+            return std::nullopt;
+        }
+    }
+    run();
     return std::make_tuple(grad_q, grad_k, grad_v);
 }
 

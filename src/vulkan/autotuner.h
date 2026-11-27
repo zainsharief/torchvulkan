@@ -39,7 +39,10 @@ struct TuneDispatch
     std::vector<at::Tensor> read;
     std::vector<at::Tensor> write;
     uint32_t groupX = 1, groupY = 1, groupZ = 1;
-    double extra_ns = 0; // work the config adds outside this dispatch, added to its time
+    // work outside the dispatch, timed by the tuner and added; configs with the same extra_key share one timing
+    std::function<void()> extra;
+    uint64_t extra_key = 0;
+    bool dispatch = true; // false: the config is only its extra work
 };
 
 class Autotuner
@@ -70,5 +73,6 @@ private:
     void save(uint64_t hash, uint64_t tuned_id, const TuneConfig& config);
 
     TuneConfig fastest(const TuneSpace& space, const std::function<TuneDispatch(const TuneConfig&)>& build);
+    double time_work(const std::function<void()>& work);
     void compile(const std::vector<TuneConfig>& configs, const std::function<TuneDispatch(const TuneConfig&)>& build);
 };
