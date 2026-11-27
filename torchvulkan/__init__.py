@@ -177,6 +177,17 @@ def int_mm_scaled(a, b, scale_a, scale_b, bias=None, out_dtype=None) -> torch.Te
     """
     return torch.ops.torchvulkan.int_mm_scaled(a, b, scale_a, scale_b, bias, out_dtype)
 
+
+def quantize_per_row(x, qmax=127.0):
+    """Symmetric per-row quantization of a 2D float tensor: ``(q, scale)`` for ``int_mm_scaled``.
+
+    ``scale = max(amax(|x|), 1e-10) / qmax`` (float32, [rows, 1]) and
+    ``q = clamp(round(x / scale), -qmax, qmax)`` as int8, rounding half to even, computed as
+    ``x * (qmax / max(amax(|x|), 1e-10))`` in float32. ``qmax`` 127 gives int8 codes, 7 int4 codes
+    held in int8. On Vulkan this is one pass over each row.
+    """
+    return torch.ops.torchvulkan.quantize_per_row(x, qmax)
+
 # schedules the device teardown for the end of the process (after Python has freed the tensors)
 atexit.register(_C._shutdown)
 atexit.register(_C._save_pipeline_caches)

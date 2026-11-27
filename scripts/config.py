@@ -222,6 +222,9 @@ KERNELS = [
     Kernel('int_mm_coop', 'ops/matmul_coop.slang', [
         Entry('int_mm_coop_main', [I8], ('vec',)),
     ], coop_dims=(18, 1009, 22, 1013)),
+    Kernel('quantize_rows', 'ops/quantize_rows.slang', [
+        Entry('quantize_rows_main', [F32, F16, BF16]),
+    ]),
     Kernel('int_mm_scaled_coop', 'ops/matmul_coop.slang', [
         Entry('int_mm_scaled_coop_main', [F32, F16, BF16]),
     ], coop_dims=(18, 1009, 22, 1013)),

@@ -1076,6 +1076,69 @@ at::Tensor int_mm_scaled_vulkan(const at::Tensor& self, const at::Tensor& mat2, 
     return out;
 }
 
+
+// torchvulkan::quantize_per_row: symmetric per-row quantization of a [rows, cols] float tensor to int8 codes in
+// [-qmax, qmax] (127 for int8, 7 for int4 codes held in int8) and a float32 [rows, 1] scale, the activation side of
+// int_mm_scaled: scale = max(amax(|x|), 1e-10) / qmax, q = clamp(round(x * (qmax / max(amax(|x|), 1e-10))), -qmax, qmax),
+// rounding half to even like torch.round, and qmax / amax as torch evaluates it (reciprocal(amax) * qmax)
+void check_quantize_per_row(const at::Tensor& x, double qmax)
+{
+    TORCH_CHECK(x.dim() == 2, "quantize_per_row: expected a 2D tensor, got ", x.dim(), "D");
+    TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
+        "quantize_per_row: expected a float32, float16 or bfloat16 tensor, got ", x.scalar_type());
+    TORCH_CHECK(qmax >= 1.0 && qmax <= 127.0, "quantize_per_row: qmax must be in [1, 127], got ", qmax);
+}
+
+std::tuple<at::Tensor, at::Tensor> quantize_per_row_reference(const at::Tensor& x, double qmax)
+{
+    check_quantize_per_row(x, qmax);
+    at::Tensor xf = x.to(at::kFloat);
+    at::Tensor amax = xf.abs().amax(-1, /*keepdim=*/true).clamp_min_(1e-10);
+    at::Tensor q = (xf * (static_cast<float>(qmax) / amax)).round_().clamp_(-qmax, qmax).to(at::kChar);
+    return {q, amax.div_(static_cast<float>(qmax))};
+}
+
+std::tuple<at::Tensor, at::Tensor> quantize_per_row_vulkan(const at::Tensor& x, double qmax)
+{
+    check_quantize_per_row(x, qmax);
+    const int64_t rows = x.size(0), cols = x.size(1);
+    DeviceContext* device = get_device_context(x);
+    const auto& limits = device->properties.limits;
+    if (rows == 0 || cols == 0 || !is_dtype_supported(device, x.scalar_type()) || !is_dtype_supported(device, at::kChar) ||
+        cols > UINT32_MAX || rows > int64_t(limits.maxComputeWorkGroupCount[1]) * 32768) {
+        return quantize_per_row_reference(x, qmax);
+    }
+    at::Tensor input = x.stride(1) == 1 ? x : x.contiguous();
+    TORCH_CHECK(input.stride(0) <= UINT32_MAX, "quantize_per_row: row stride too large");
+    if (!fits_32bit_indexing({input})) return quantize_per_row_reference(x, qmax);
+    at::Tensor q = at::empty({rows, cols}, x.options().dtype(at::kChar));
+    at::Tensor scale = at::empty({rows, 1}, x.options().dtype(at::kFloat));
+
+    // core/indexing's flat_group: rows of 32768 workgroups
+    const uint32_t group_x = static_cast<uint32_t>(std::min<int64_t>(rows, 32768));
+    const uint32_t group_y = static_cast<uint32_t>(ceil_div(rows, 32768));
+    const uint32_t wg = std::min<uint32_t>(256, limits.maxComputeWorkGroupSize[0]);
+    SpecializationBuilder spd{};
+    spd.push(uint32_t(1) << (31 - std::countl_zero(wg))); // WG_x, a power of two for the tree reduction
+    PushConstantBuilder pcs{};
+    pcs.push(get_tensor_address(input))
+       .push(get_tensor_address(q))
+       .push(get_tensor_address(scale))
+       .push(static_cast<uint32_t>(rows))
+       .push(static_cast<uint32_t>(cols))
+       .push(static_cast<uint32_t>(input.stride(0)))
+       .push(static_cast<float>(qmax));
+    device->shader_manager->dispatchShader(
+        ShaderKey{torchvulkan::Kernel::QUANTIZE_ROWS, x.scalar_type()},
+        device->default_subgroup_size,
+        spd.build(),
+        pcs.build(),
+        /* read = */ {input},
+        /* write = */ {q, scale},
+        group_x, group_y, 1);
+    return {q, scale};
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
@@ -1097,12 +1160,15 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 TORCH_LIBRARY(torchvulkan, m) {
     m.def("int_mm_scaled(Tensor self, Tensor mat2, Tensor scale_a, Tensor scale_b, Tensor? bias=None, "
           "ScalarType? out_dtype=None) -> Tensor");
+    m.def("quantize_per_row(Tensor x, float qmax=127.0) -> (Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(torchvulkan, CompositeExplicitAutograd, m) {
     m.impl("int_mm_scaled", &int_mm_scaled_reference);
+    m.impl("quantize_per_row", &quantize_per_row_reference);
 }
 
 TORCH_LIBRARY_IMPL(torchvulkan, PrivateUse1, m) {
     m.impl("int_mm_scaled", &int_mm_scaled_vulkan);
+    m.impl("quantize_per_row", &quantize_per_row_vulkan);
 }

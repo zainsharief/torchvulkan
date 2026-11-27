@@ -82,3 +82,54 @@ def test_rejects_bad_arguments():
         torchvulkan.int_mm_scaled(a.float(), b, s, s)
     with pytest.raises(RuntimeError, match="out_dtype"):
         torchvulkan.int_mm_scaled(a, b, s, s, out_dtype=torch.int32)
+
+
+def quantize_reference(x, qmax):
+    xf = x.cpu().float()
+    amax = xf.abs().amax(-1, keepdim=True).clamp_min(1e-10)
+    q = (xf * (qmax / amax)).round().clamp(-qmax, qmax).to(torch.int8)
+    return q, amax / qmax
+
+
+def check_quantized(q, scale, want_q, want_scale):
+    # Vulkan divides within 2.5 ulp: the scale may differ in its last bits, and a code whose x * qmax / amax lands on
+    # a .5 boundary may round the other way
+    torch.testing.assert_close(scale.cpu(), want_scale, rtol=3e-7, atol=0)
+    diff = (q.cpu().int() - want_q.int()).abs()
+    assert diff.max().item() <= 1
+    assert diff.count_nonzero().item() <= max(1, want_q.numel() // 1000)
+
+
+@pytest.mark.parametrize("rows,cols", [(1, 7), (37, 300), (4150, 3072), (64, 8192), (5, 65536)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("qmax", [127.0, 7.0])
+def test_quantize_per_row_matches_reference(rows, cols, dtype, qmax):
+    g = torch.Generator().manual_seed(rows * cols)
+    x = (torch.randn(rows, cols, generator=g) * torch.rand(rows, 1, generator=g) * 10).to(dtype)
+    q, scale = torchvulkan.quantize_per_row(x.to(DEVICE), qmax)
+    want_q, want_scale = quantize_reference(x, qmax)
+    assert q.dtype == torch.int8 and scale.dtype == torch.float32 and scale.shape == (rows, 1)
+    check_quantized(q, scale, want_q, want_scale)
+
+
+def test_quantize_per_row_zero_rows_and_strided_input():
+    x = torch.zeros(4, 64)
+    x[2] = torch.linspace(-3, 3, 64)
+    base = torch.randn(4, 128)
+    base[:, ::2] = x
+    view = base.to(DEVICE)[:, ::2]  # a strided view: copied to contiguous first
+    q, scale = torchvulkan.quantize_per_row(view)
+    want_q, want_scale = quantize_reference(x, 127.0)
+    check_quantized(q, scale, want_q, want_scale)
+
+
+def test_quantize_then_int_mm_scaled_matches_float_linear():
+    g = torch.Generator().manual_seed(7)
+    x = torch.randn(300, 1024, generator=g)
+    w = torch.randint(-127, 128, (512, 1024), dtype=torch.int8, generator=g)
+    w_scale = torch.rand(1, 512, generator=g) * 1e-2
+    q, s = torchvulkan.quantize_per_row(x.to(DEVICE))
+    got = torchvulkan.int_mm_scaled(q, w.to(DEVICE).t(), s, w_scale.to(DEVICE))
+    want = x.double() @ (w.double() * w_scale.double().t()).t()
+    rel = ((got.cpu().double() - want).norm() / want.norm()).item()
+    assert rel < 1e-2  # int8 activation quantization error
