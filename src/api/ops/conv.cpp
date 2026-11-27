@@ -1112,8 +1112,14 @@ at::Tensor convolution_vulkan(
         return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format);
     }
 
-    at::Tensor output = transposed ? conv_transpose_forward(x, weight, g, groups, output_size) : conv_forward(x, weight, g, groups);
-    return add_bias(output, bias).contiguous(format);
+    // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
+    at::ScalarType dtype = x.scalar_type();
+    bool upcast = dtype == at::kHalf || dtype == at::kBFloat16;
+    at::Tensor xa = upcast ? x.to(at::kFloat) : x;
+    at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
+    c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
+    at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
+    return add_bias(output, ba).to(dtype).contiguous(format);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
