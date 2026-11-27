@@ -2,6 +2,7 @@
 #include "shader.h"
 
 #include <cstring>
+#include <memory>
 
 VulkanAllocator globalVulkanAllocator;
 REGISTER_ALLOCATOR(c10::DeviceType::PrivateUse1, &globalVulkanAllocator);
@@ -90,6 +91,28 @@ void VulkanAllocator::copy_data(void* dest, const void* src, std::size_t count) 
     copy_device_to_device(dest, /* dest_offset = */ 0, src, /* src_offset = */ 0, count);
 }
 
+namespace {
+
+// below this a staging copy costs about as much as importing the pages
+constexpr size_t HOST_IMPORT_MIN_BYTES = 4ull << 20;
+
+// the host memory around [ptr, ptr + count) as a buffer the GPU copies to or from directly, with ptr's offset in it;
+// null when the device can't import it (no VK_EXT_external_memory_host, a mapping the driver refuses, ...)
+std::unique_ptr<VulkanBuffer> import_host_range(DeviceContext* device, const void* ptr, std::size_t count, uint64_t& offset)
+{
+    if (!device->support_external_memory_host || count < HOST_IMPORT_MIN_BYTES) return nullptr;
+    const uintptr_t align = device->host_pointer_alignment;
+    const uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+    const uintptr_t base = start & ~(align - 1);
+    const uintptr_t end = (start + count + align - 1) & ~(align - 1);
+    auto buffer = std::make_unique<VulkanBuffer>(device);
+    if (buffer->importHostPointer(reinterpret_cast<void*>(base), end - base) != VK_SUCCESS) return nullptr;
+    offset = start - base;
+    return buffer;
+}
+
+} // namespace
+
 void VulkanAllocator::copy_host_to_device(void* dest, uint64_t dest_offset, const void* src, std::size_t count) const
 {
     if (count == 0) return;
@@ -97,6 +120,14 @@ void VulkanAllocator::copy_host_to_device(void* dest, uint64_t dest_offset, cons
     TORCH_CHECK(dest != nullptr, "torchvulkan [ERROR]: Destination tensor cannot be null.");
     VulkanBuffer* dstBuffer = static_cast<VulkanBuffer*>(dest);
     DeviceContext* device = dstBuffer->owner();
+
+    // the GPU reads the source in place; the caller may change or free it once this returns, so wait for the copy
+    uint64_t offset = 0;
+    if (std::unique_ptr<VulkanBuffer> host = import_host_range(device, src, count, offset)) {
+        device->shader_manager->dispatchCopy(host.get(), offset, dstBuffer, dest_offset, count);
+        device->flush();
+        return;
+    }
 
     VulkanBuffer* stagingBuffer = allocateBuffer(device, count, MemoryUsage::HOST_TO_DEVICE);
     std::memcpy(stagingBuffer->data(), src, count);
@@ -112,6 +143,14 @@ void VulkanAllocator::copy_device_to_host(void* dest, const void* src, uint64_t 
     TORCH_CHECK(dest != nullptr, "torchvulkan [ERROR]: Destination tensor cannot be null.");
     VulkanBuffer* srcBuffer = static_cast<VulkanBuffer*>(const_cast<void*>(src));
     DeviceContext* device = srcBuffer->owner();
+
+    // the GPU writes straight into the destination: no staging buffer and no memcpy
+    uint64_t offset = 0;
+    if (std::unique_ptr<VulkanBuffer> host = import_host_range(device, dest, count, offset)) {
+        device->shader_manager->dispatchCopy(srcBuffer, src_offset, host.get(), offset, count);
+        device->flush();
+        return;
+    }
 
     VulkanBuffer* stagingBuffer = allocateBuffer(device, count, MemoryUsage::DEVICE_TO_HOST);
     device->shader_manager->dispatchCopy(srcBuffer, src_offset, stagingBuffer, /* dstOffset = */ 0, count);

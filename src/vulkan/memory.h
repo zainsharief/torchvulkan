@@ -23,6 +23,9 @@ public:
     VulkanBuffer& operator=(const VulkanBuffer&) = delete;
 
     VkResult createBuffer(size_t size, MemoryUsage usage);
+    // wraps [base, base + size) of host memory (VK_EXT_external_memory_host) for copies; base and size aligned to
+    // DeviceContext::host_pointer_alignment. The host memory must outlive the buffer
+    VkResult importHostPointer(void* base, size_t size);
 
     void* data() { return mappedData_; }
     size_t size() const { return size_; }
@@ -43,6 +46,7 @@ private:
 
     DeviceContext* owner_ = nullptr;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
+    VkDeviceMemory importedMemory_ = VK_NULL_HANDLE;
     VmaAllocationInfo allocInfo_{};
     VkBuffer buffer_ = VK_NULL_HANDLE;
     size_t size_ = 0;

@@ -566,6 +566,24 @@ void VulkanContext::createDeviceWithExtensions()
             deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         }
 
+        // host memory imported as a buffer, so large copies skip the staging buffer and its memcpy; TORCHVULKAN_HOST_IMPORT=0
+        // keeps the staging path
+        const char* hostImport = std::getenv("TORCHVULKAN_HOST_IMPORT");
+        if (hasExt(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && !(hostImport && std::strcmp(hostImport, "0") == 0))
+        {
+            VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+            VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            props2.pNext = &hostProps;
+            vkGetPhysicalDeviceProperties2(device->physicalDevice, &props2);
+            uint64_t alignment = hostProps.minImportedHostPointerAlignment;
+            if (alignment != 0 && (alignment & (alignment - 1)) == 0)
+            {
+                device->support_external_memory_host = true;
+                device->host_pointer_alignment = alignment;
+                deviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+            }
+        }
+
         #ifdef __APPLE__
         if (hasExt("VK_KHR_portability_subset")) {
             deviceExtensions.push_back("VK_KHR_portability_subset");

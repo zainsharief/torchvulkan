@@ -62,6 +62,9 @@ struct DeviceContext {
     bool support_subgroup_arithmetic = false;
     bool support_pipeline_statistics = false;
     bool support_memory_budget = false;
+    // VK_EXT_external_memory_host: large host <-> device copies DMA straight to and from the host memory
+    bool support_external_memory_host = false;
+    uint64_t host_pointer_alignment = 0;
     uint32_t min_subgroup_size = 0;
     uint32_t max_subgroup_size = 0;
     uint32_t default_subgroup_size = 0;

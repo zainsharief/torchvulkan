@@ -60,9 +60,74 @@ VkResult VulkanBuffer::createBuffer(size_t size, MemoryUsage usage)
     return result;
 }
 
+VkResult VulkanBuffer::importHostPointer(void* base, size_t size)
+{
+    size_ = size;
+    usage_ = MemoryUsage::DEVICE_TO_HOST;
+    deviceLocal_ = false;
+    const VolkDeviceTable& vk = owner_->device_table;
+    const VkExternalMemoryHandleTypeFlagBits handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+
+    VkMemoryHostPointerPropertiesEXT hostProps{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+    VkResult result = vk.vkGetMemoryHostPointerPropertiesEXT(owner_->device, handleType, base, &hostProps);
+    if (result != VK_SUCCESS) return result;
+
+    VkExternalMemoryBufferCreateInfo externalInfo{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    externalInfo.handleTypes = handleType;
+    VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.pNext = &externalInfo;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    result = vk.vkCreateBuffer(owner_->device, &bufferInfo, nullptr, &buffer_);
+    if (result != VK_SUCCESS) return result;
+
+    VkMemoryRequirements requirements{};
+    vk.vkGetBufferMemoryRequirements(owner_->device, buffer_, &requirements);
+    // a host-coherent type, so the CPU sees the GPU's writes through its own mapping without an invalidate
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(owner_->allocator, &props);
+    uint32_t typeIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < props->memoryTypeCount; i++) {
+        bool allowed = (requirements.memoryTypeBits & hostProps.memoryTypeBits & (1u << i)) != 0;
+        if (allowed && (props->memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { typeIndex = i; break; }
+    }
+    if (typeIndex == UINT32_MAX || requirements.size > size) {
+        vk.vkDestroyBuffer(owner_->device, buffer_, nullptr);
+        buffer_ = VK_NULL_HANDLE;
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+
+    VkImportMemoryHostPointerInfoEXT importInfo{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
+    importInfo.handleType = handleType;
+    importInfo.pHostPointer = base;
+    VkMemoryAllocateInfo allocateInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocateInfo.pNext = &importInfo;
+    allocateInfo.allocationSize = size;
+    allocateInfo.memoryTypeIndex = typeIndex;
+    result = vk.vkAllocateMemory(owner_->device, &allocateInfo, nullptr, &importedMemory_);
+    if (result == VK_SUCCESS) result = vk.vkBindBufferMemory(owner_->device, buffer_, importedMemory_, 0);
+    if (result != VK_SUCCESS) {
+        vk.vkDestroyBuffer(owner_->device, buffer_, nullptr);
+        if (importedMemory_ != VK_NULL_HANDLE) vk.vkFreeMemory(owner_->device, importedMemory_, nullptr);
+        buffer_ = VK_NULL_HANDLE;
+        importedMemory_ = VK_NULL_HANDLE;
+        return result;
+    }
+    owner_->trackBuffer(this);
+    return VK_SUCCESS;
+}
+
 void VulkanBuffer::release()
 {
     if (buffer_ == VK_NULL_HANDLE) return;
+    if (importedMemory_ != VK_NULL_HANDLE) {
+        owner_->device_table.vkDestroyBuffer(owner_->device, buffer_, nullptr);
+        owner_->device_table.vkFreeMemory(owner_->device, importedMemory_, nullptr);
+        buffer_ = VK_NULL_HANDLE;
+        importedMemory_ = VK_NULL_HANDLE;
+        return;
+    }
     vmaDestroyBuffer(owner_->allocator, buffer_, allocation_);
     buffer_ = VK_NULL_HANDLE;
     allocation_ = VK_NULL_HANDLE;
