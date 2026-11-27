@@ -72,7 +72,7 @@ void loadRows<T : ITorchVulkan & ICoopElement>(uint t, T* src, uint base, uint r
     }
 }
 
-void attentionWarp<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionPushConstants pcs)
+void attentionWarp<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
 
@@ -266,7 +266,7 @@ void attentionWarp<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionP
 void attention_warp_main<T : ITorchVulkan & ICoopElement>(
     uint3 wg : SV_GroupID,
     uint t : SV_GroupIndex,
-    uniform AttentionPushConstants pcs)
+    uniform AttentionPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     attentionWarp<T>(wg, t, pcs);
 }
