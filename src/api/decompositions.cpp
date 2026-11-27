@@ -249,7 +249,8 @@ at::Tensor soft_margin_loss_vulkan(const at::Tensor& self, const at::Tensor& tar
     bool low = is_low_prec(odt);
     at::Tensor s = low ? self.to(at::kFloat) : self;
     at::Tensor t = low ? target.to(at::kFloat) : target;
-    at::Tensor loss = at::softplus(at::neg(at::mul(s, t)), 1, 20);
+    at::Tensor margin = at::neg(at::mul(s, t));
+    at::Tensor loss = margin.is_complex() ? at::log1p(at::exp(margin)) : at::softplus(margin, 1, 20);
     at::Tensor r = reduce_loss(loss, reduction);
     return low ? r.to(odt) : r;
 }
