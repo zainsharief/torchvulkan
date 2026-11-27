@@ -1114,7 +1114,7 @@ at::Tensor convolution_vulkan(
 
     // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
     at::ScalarType dtype = x.scalar_type();
-    bool upcast = dtype == at::kHalf || dtype == at::kBFloat16;
+    bool upcast = is_low_prec(dtype);
     at::Tensor xa = upcast ? x.to(at::kFloat) : x;
     at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
     c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;

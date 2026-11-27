@@ -135,8 +135,7 @@ bool fits_dtype(const at::Scalar& s, at::ScalarType dtype)
     if (s.isComplex() || !s.isFloatingPoint()) return true;
     double v = s.toDouble();
     if (!std::isfinite(v)) return true;
-    double limit = dtype == at::kHalf ? 65504.0 : 3.3895313892515355e38;
-    return std::abs(v) <= limit;
+    return std::abs(v) <= get_dtype_limits(dtype).second;
 }
 
 torchvulkan::ComplexParts complex_pow(const torchvulkan::ComplexParts& base, const torchvulkan::ComplexParts& exponent)

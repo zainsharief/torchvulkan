@@ -91,7 +91,7 @@ at::Tensor apply_matmul_activation(
 
 c10::ScalarType matmul_accumulate_dtype(c10::ScalarType dtype)
 {
-    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+    return is_low_prec(dtype) ? at::kFloat : dtype;
 }
 
 struct MatmulShape {

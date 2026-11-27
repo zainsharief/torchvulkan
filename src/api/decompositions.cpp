@@ -26,7 +26,7 @@ std::vector<int64_t> all_dims(const at::Tensor& t)
 at::Tensor p_norm(const at::Tensor& self, double p, at::OptionalIntArrayRef dim, bool keepdim)
 {
     at::ScalarType odt = self.scalar_type();
-    bool low = is_low_prec(odt) || at::isFloat8Type(odt);
+    bool low = is_low_prec(odt);
     bool complex_half = odt == at::kComplexHalf;  // like half, accumulates in float
     at::Tensor a = at::abs(low ? self.to(at::kFloat) : complex_half ? self.to(at::kComplexFloat) : self);
     std::vector<int64_t> dv = (dim.has_value() && dim->size() > 0)
@@ -437,6 +437,7 @@ at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntAr
 
 at::Tensor silu_vulkan(const at::Tensor& self)
 {
+    if (is_low_prec(self.scalar_type())) return silu_vulkan(self.to(at::kFloat)).to(self.scalar_type());
     return at::mul(self, at::sigmoid(self));
 }
 
@@ -535,7 +536,7 @@ at::Tensor log_softmax_backward_vulkan(
 
     // half and bfloat16 in float32, rounded once, as softmax_backward_vulkan and the CPU's opmath
     at::ScalarType out_type = grad_output.scalar_type();
-    bool upcast = out_type == at::kHalf || out_type == at::kBFloat16;
+    bool upcast = is_low_prec(out_type);
     at::Tensor go = upcast ? grad_output.to(at::kFloat) : grad_output;
     at::Tensor out = upcast ? output.to(at::kFloat) : output;
     at::Tensor sum_grad = at::sum(go, {dim}, /*keepdim=*/true);
@@ -561,7 +562,7 @@ at::Tensor softmax_backward_vulkan(
     if (grad_output.numel() == 0) return grad_output.clone();
 
     at::ScalarType out_type = grad_output.scalar_type();
-    bool upcast = out_type == at::kHalf || out_type == at::kBFloat16;
+    bool upcast = is_low_prec(out_type);
     at::Tensor go = upcast ? grad_output.to(at::kFloat) : grad_output;
     at::Tensor out = upcast ? output.to(at::kFloat) : output;
 
@@ -614,7 +615,7 @@ std::tuple<at::Tensor, at::Tensor> compute_var_mean(
     );
 
     at::ScalarType odt = self_in.scalar_type();
-    bool low = is_low_prec(odt) || at::isFloat8Type(odt);
+    bool low = is_low_prec(odt);
     at::Tensor self = low ? self_in.to(at::kFloat) : self_in;
 
     at::Tensor mean_keep = at::mean(self, dim, /*keepdim=*/true);

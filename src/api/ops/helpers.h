@@ -231,6 +231,11 @@ inline int get_dtype_digits(at::ScalarType dtype)
         case at::kFloat: return std::numeric_limits<float>::digits;
         case at::kHalf: return std::numeric_limits<c10::Half>::digits;
         case at::kBFloat16: return std::numeric_limits<c10::BFloat16>::digits;
+        case at::kFloat8_e4m3fn: return std::numeric_limits<c10::Float8_e4m3fn>::digits;
+        case at::kFloat8_e5m2: return std::numeric_limits<c10::Float8_e5m2>::digits;
+        case at::kFloat8_e4m3fnuz: return std::numeric_limits<c10::Float8_e4m3fnuz>::digits;
+        case at::kFloat8_e5m2fnuz: return std::numeric_limits<c10::Float8_e5m2fnuz>::digits;
+        case at::kFloat8_e8m0fnu: return std::numeric_limits<c10::Float8_e8m0fnu>::digits;
 
         case at::kBool: return std::numeric_limits<bool>::digits;
         case at::kByte: return std::numeric_limits<uint8_t>::digits;
@@ -254,6 +259,11 @@ inline std::pair<double, double> get_dtype_limits(at::ScalarType dtype)
         case at::kFloat: return {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::max()};
         case at::kHalf: return {static_cast<double>(std::numeric_limits<c10::Half>::lowest()), static_cast<double>(std::numeric_limits<c10::Half>::max())};
         case at::kBFloat16: return {static_cast<double>(std::numeric_limits<c10::BFloat16>::lowest()), static_cast<double>(std::numeric_limits<c10::BFloat16>::max())};
+        case at::kFloat8_e4m3fn: return {static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::max())};
+        case at::kFloat8_e5m2: return {static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::max())};
+        case at::kFloat8_e4m3fnuz: return {static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::max())};
+        case at::kFloat8_e5m2fnuz: return {static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::max())};
+        case at::kFloat8_e8m0fnu: return {static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::max())};
 
         case at::kBool: return {0, 1};
         case at::kByte: return {std::numeric_limits<uint8_t>::lowest(), std::numeric_limits<uint8_t>::max()};
@@ -276,6 +286,11 @@ inline double get_dtype_epsilon(at::ScalarType dtype)
         case at::kDouble: return std::numeric_limits<double>::epsilon();
         case at::kHalf: return static_cast<double>(std::numeric_limits<c10::Half>::epsilon());
         case at::kBFloat16: return static_cast<double>(std::numeric_limits<c10::BFloat16>::epsilon());
+        case at::kFloat8_e4m3fn: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::epsilon());
+        case at::kFloat8_e5m2: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::epsilon());
+        case at::kFloat8_e4m3fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::epsilon());
+        case at::kFloat8_e5m2fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::epsilon());
+        case at::kFloat8_e8m0fnu: return static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::epsilon());
         default: return std::numeric_limits<float>::epsilon();
     }
 }
@@ -287,6 +302,11 @@ inline double get_dtype_smallest_normal(at::ScalarType dtype)
         case at::kDouble: return std::numeric_limits<double>::min();
         case at::kHalf: return static_cast<double>(std::numeric_limits<c10::Half>::min());
         case at::kBFloat16: return static_cast<double>(std::numeric_limits<c10::BFloat16>::min());
+        case at::kFloat8_e4m3fn: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::min());
+        case at::kFloat8_e5m2: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::min());
+        case at::kFloat8_e4m3fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::min());
+        case at::kFloat8_e5m2fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::min());
+        case at::kFloat8_e8m0fnu: return static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::min());
         default: return std::numeric_limits<float>::min();
     }
 }
@@ -298,6 +318,11 @@ inline int64_t round_to_dtype(int64_t value, at::ScalarType dtype)
         case at::kDouble: return static_cast<int64_t>(static_cast<double>(value));
         case at::kHalf: return static_cast<int64_t>(static_cast<float>(c10::Half(static_cast<float>(value))));
         case at::kBFloat16: return static_cast<int64_t>(static_cast<float>(c10::BFloat16(static_cast<float>(value))));
+        case at::kFloat8_e4m3fn: return static_cast<int64_t>(static_cast<float>(c10::Float8_e4m3fn(static_cast<float>(value))));
+        case at::kFloat8_e5m2: return static_cast<int64_t>(static_cast<float>(c10::Float8_e5m2(static_cast<float>(value))));
+        case at::kFloat8_e4m3fnuz: return static_cast<int64_t>(static_cast<float>(c10::Float8_e4m3fnuz(static_cast<float>(value))));
+        case at::kFloat8_e5m2fnuz: return static_cast<int64_t>(static_cast<float>(c10::Float8_e5m2fnuz(static_cast<float>(value))));
+        case at::kFloat8_e8m0fnu: return static_cast<int64_t>(static_cast<float>(c10::Float8_e8m0fnu(static_cast<float>(value))));
         default: return static_cast<int64_t>(static_cast<float>(value));
     }
 }
@@ -462,11 +487,16 @@ inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optiona
     return self.scalar_type();
 }
 
+inline bool is_low_prec(at::ScalarType dtype)
+{
+    return dtype == at::kHalf || dtype == at::kBFloat16 || at::isFloat8Type(dtype);
+}
+
 // the dtype a reduction accumulates in is not always the dtype it returns
 inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
 {
     if (dtype == at::kComplexHalf) return at::kComplexFloat;
-    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+    return is_low_prec(dtype) ? at::kFloat : dtype;
 }
 
 // a result built as a view of a private buffer (view_as_complex of real pairs, a moved or narrowed scratch tensor):
@@ -566,11 +596,6 @@ inline uint32_t coop_threads(const CoopTiling& t) { return t.warps_m * t.warps_n
 inline bool is_dtype_float(at::ScalarType dtype)
 {
     return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kDouble;
-}
-
-inline bool is_low_prec(at::ScalarType dtype)
-{
-    return dtype == at::kHalf || dtype == at::kBFloat16;
 }
 
 // the complex dtype a real one pairs into: complex128 for float64, complex64 otherwise
