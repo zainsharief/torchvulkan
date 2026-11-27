@@ -3,7 +3,9 @@
 #include <ATen/SDPBackend.h>
 #include <ATen/native/DispatchStub.h>
 #include <ATen/native/transformers/attention.h>
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -210,12 +212,14 @@ struct AttentionTiling {
     uint32_t block;
     uint32_t subgroup;
     uint32_t splits = 1;
+    bool warp = false; // attention_warp: br is the subgroups times block
 };
 
 AttentionTiling attention_tiling(const TuneConfig& config)
 {
     AttentionTiling t{config[0] == 1, config[1], config[2], config[3], config[4], config[5]};
     if (config.values.size() > 6) t.splits = config[6];
+    t.warp = config[0] == 2;
     return t;
 }
 
@@ -239,6 +243,17 @@ uint64_t coop_shared_t(uint64_t br, uint64_t bc, uint64_t dp, uint64_t dvp)
 uint64_t coop_shared_a(uint64_t br, uint64_t bc, uint64_t dvp, uint64_t wg)
 {
     return br * (std::max(bc, dvp) + ATTENTION_COOP_PAD) + wg;
+}
+
+// must match SharedT and SharedA in attention_warp.slang
+uint64_t warp_shared_t(uint64_t bc, uint64_t dp, uint64_t dvp, uint64_t subgroups, uint64_t block)
+{
+    return bc * (dp + ATTENTION_COOP_PAD) + bc * (dvp + ATTENTION_COOP_PAD) + subgroups * block * (bc + ATTENTION_COOP_PAD);
+}
+
+uint64_t warp_shared_a(uint64_t bc, uint64_t subgroups, uint64_t block, uint64_t subgroup)
+{
+    return subgroups * block * (bc + ATTENTION_COOP_PAD) + block * block + subgroups * (2 * block + subgroup);
 }
 
 uint64_t coop_backward_shared_t(uint64_t br, uint64_t bc, uint64_t dp, uint64_t dvp)
@@ -276,6 +291,15 @@ uint64_t attention_tune_key(const Attention& a)
 {
     uint64_t key = static_cast<uint64_t>(a.D) | (static_cast<uint64_t>(a.Dv) << 10) | (log2_ceil(a.L) << 20) | (log2_ceil(a.S) << 26) | (log2_ceil(a.B * a.Hq) << 32);
     return key | (log2_ceil(a.group) << 38) | (uint64_t(a.bias.defined()) << 44) | (uint64_t(a.causal) << 45);
+}
+
+// a pinned kernel tunes on its own; the warp kernel's bit keeps choices tuned before it existed from being reused
+uint64_t forward_tune_key(const Attention& a, const std::vector<uint32_t>& kernels)
+{
+    uint64_t key = attention_tune_key(a);
+    if (kernels.size() == 1) key |= (uint64_t(kernels[0]) + 1) << 46;
+    if (std::find(kernels.begin(), kernels.end(), 2u) != kernels.end()) key |= uint64_t(1) << 48;
+    return key;
 }
 
 void push_forward_constants(
@@ -317,7 +341,30 @@ TuneDispatch attention_forward_dispatch(
     uint32_t keys = t.splits > 1 ? static_cast<uint32_t>(split_keys(a, t)) : 0;
 
     TuneDispatch d;
-    if (t.coop) {
+    if (t.warp) {
+        uint32_t Dp = static_cast<uint32_t>(round_up(D, t.block));
+        uint32_t Dvp = static_cast<uint32_t>(round_up(Dv, t.block));
+        uint32_t subgroups = t.wg / t.subgroup;
+        d.key = ShaderKey{torchvulkan::Kernel::ATTENTION_WARP, a.dtype};
+        d.subgroupSize = t.subgroup;
+        d.spd.push(t.wg)
+             .push(t.subgroup)
+             .push(t.bc)
+             .push(D)
+             .push(Dv)
+             .push(Dp)
+             .push(Dvp)
+             .push(static_cast<uint32_t>(a.group))
+             .push(static_cast<uint32_t>(a.bias.defined()))
+             .push(static_cast<uint32_t>(a.causal))
+             .push(t.block)
+             .push(t.splits)
+             .push(keys)
+             .push(static_cast<uint32_t>(warp_shared_t(t.bc, Dp, Dvp, subgroups, t.block)))
+             .push(static_cast<uint32_t>(warp_shared_a(t.bc, subgroups, t.block, t.subgroup)))
+             .push(Dp / t.block)   // Q_FRAGS
+             .push(Dvp / t.block); // O_FRAGS
+    } else if (t.coop) {
         uint32_t Dp = static_cast<uint32_t>(round_up(D, t.block));
         uint32_t Dvp = static_cast<uint32_t>(round_up(Dv, t.block));
         d.key = ShaderKey{torchvulkan::Kernel::ATTENTION_COOP, a.dtype};
@@ -442,6 +489,12 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
         blocks = {0};
     } else {
         kernels.push_back(1);
+        kernels.push_back(2);
+    }
+    // TORCHVULKAN_ATTENTION_KERNEL=0|1|2 limits the tuner to one forward kernel (simd, coop, warp), for tests
+    if (const char* only = std::getenv("TORCHVULKAN_ATTENTION_KERNEL")) {
+        uint32_t k = static_cast<uint32_t>(std::atoi(only));
+        if (std::find(kernels.begin(), kernels.end(), k) != kernels.end()) kernels = {k};
     }
 
     uint64_t max_threads = std::min(limits.maxComputeWorkGroupInvocations, limits.maxComputeWorkGroupSize[0]);
@@ -453,7 +506,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     space.params = {
         {"kernel", kernels},
         {"wg", {64, 128, 256}},
-        {"br", {8, 16, 32, 64}},
+        {"br", {8, 16, 32, 64, 128}},
         {"bc", {16, 32, 64}},
         {"block", blocks},
         {"subgroup", subgroup_size_options(device)},
@@ -462,6 +515,20 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     space.kernel_param = 0;
     space.valid = [&](const TuneConfig& config) {
         AttentionTiling t = attention_tiling(config);
+        if (t.warp) {
+            // each subgroup owns `block` query rows; the softmax gives each row subgroup / block lanes
+            if (t.wg > max_threads || t.wg % t.subgroup != 0 || t.subgroup % t.block != 0) return false;
+            uint64_t subgroups = t.wg / t.subgroup;
+            if (t.br != subgroups * t.block || t.bc % t.block != 0 || t.bc % (t.subgroup / t.block) != 0) return false;
+            if (!fits_workgroup_size(device, t.wg, t.subgroup)) return false;
+            if (t.splits > 1 && ((t.splits - 1) * split_keys(a, t) >= a.S || t.splits > limits.maxComputeWorkGroupCount[2])) return false;
+            if (t.br > std::max<uint64_t>(2 * max_l, t.block) || ceil_div(a.L, t.br) > limits.maxComputeWorkGroupCount[0]) return false;
+            uint64_t Dp = round_up(a.D, t.block);
+            uint64_t Dvp = round_up(a.Dv, t.block);
+            return t_bytes * warp_shared_t(t.bc, Dp, Dvp, subgroups, t.block) +
+                a_bytes * warp_shared_a(t.bc, subgroups, t.block, t.subgroup) <= limits.maxComputeSharedMemorySize;
+        }
+        if (t.br == 128) return false; // attention_warp's eight subgroups only
         if (t.wg > max_threads || t.bc > t.wg || t.br > t.wg) return false;
         if (t.splits > 1 && ((t.splits - 1) * split_keys(a, t) >= a.S || t.splits > limits.maxComputeWorkGroupCount[2])) return false;
         if (t.br > std::max<uint64_t>(2 * max_l, 8) || ceil_div(a.L, t.br) > limits.maxComputeWorkGroupCount[0]) return false;
@@ -486,8 +553,8 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
     };
 
     const TuneConfig& config = device->tuner->select(
-        ShaderKey{kernels.size() > 1 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION_SIMD, a.dtype},
-        attention_tune_key(a),
+        ShaderKey{blocks.front() != 0 ? torchvulkan::Kernel::ATTENTION_COOP : torchvulkan::Kernel::ATTENTION_SIMD, a.dtype},
+        forward_tune_key(a, kernels),
         space,
         [&](const TuneConfig& c) {
             AttentionTiling t = attention_tiling(c);
