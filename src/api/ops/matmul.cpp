@@ -749,65 +749,46 @@ at::Tensor scaled_mm_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, cons
     return scaled_mm_out_vulkan(mat1, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
 }
 
-// torch._int_mm: int8 [M, K] x int8 [K, N] -> int32 [M, N]
-at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out)
+// int8 cooperative-matrix shapes with int32 accumulation, as {block (M = N), K}: NVIDIA offers 16x16x32 only
+void int8_coop_shapes(DeviceContext* device, std::vector<uint32_t>& blocks, std::vector<uint32_t>& block_ks)
 {
-    TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "_int_mm: expected 2D tensors, got ", self.dim(), "D and ", mat2.dim(), "D");
-    TORCH_CHECK(self.scalar_type() == at::kChar && mat2.scalar_type() == at::kChar,
-        "_int_mm: expected int8 inputs, got ", self.scalar_type(), " and ", mat2.scalar_type());
-    TORCH_CHECK(self.size(1) == mat2.size(0), "_int_mm: self.size(1) (", self.size(1), ") must match mat2.size(0) (", mat2.size(0), ")");
-    TORCH_CHECK(out.scalar_type() == at::kInt, "_int_mm: out must be int32, got ", out.scalar_type());
+    if (!device->support_coopmat) return;
+    for (const CoopMatShape& s : device->coopmat_shapes) {
+        if (s.a != at::kChar || s.b != at::kChar || s.c != at::kInt || s.result != at::kInt || s.m != s.n) continue;
+        bool listed = false; // drivers list each shape again with saturating accumulation
+        for (size_t i = 0; i < blocks.size(); i++) listed |= blocks[i] == s.m && block_ks[i] == s.k;
+        if (listed) continue;
+        blocks.push_back(s.m);
+        block_ks.push_back(s.k);
+    }
+}
+
+// The epilogue of int_mm_scaled_coop_main: out = float(acc) * scale_a * scale_b (+ bias) as dtype. The scales are
+// contiguous float32 with one value or one per row (scale_a) / column (scale_b); the bias is contiguous float32 [N].
+struct Int8ScaledEpilogue
+{
+    at::Tensor scale_a;
+    at::Tensor scale_b;
+    at::Tensor bias;
+    at::ScalarType dtype;
+};
+
+// self @ mat2 for int8 [M, K] x [K, N] on int8 cooperative matrices into the contiguous [M, N] result: int32 for
+// _int_mm (no epilogue, tuned against the scalar kernel), or the scaled epilogue's dtype. Returns false, dispatching
+// nothing, when no coop config applies.
+bool int8_mm_coop(DeviceContext* device, const at::Tensor& self, const at::Tensor& mat2, const at::Tensor& result,
+    const Int8ScaledEpilogue* epilogue, const std::function<TuneDispatch()>& scalar_dispatch)
+{
     const int64_t M = self.size(0), K = self.size(1), N = mat2.size(1);
-    TORCH_CHECK(M <= UINT32_MAX && N <= UINT32_MAX && K <= UINT32_MAX, "_int_mm: dimensions too large");
-    at::native::resize_output(out, {M, N});
-    if (M == 0 || N == 0) return out;
-    if (K == 0) return out.zero_();
-
-    // the kernels write rows of a contiguous result
-    at::Tensor result = out.is_contiguous() ? out : at::empty({M, N}, out.options());
-    DeviceContext* device = get_device_context(self);
-    materialize_cow(result);
-
-    auto scalar_dispatch = [&]() {
-        TuneDispatch d;
-        d.key = ShaderKey{torchvulkan::Kernel::INT_MM, at::kChar};
-        d.subgroupSize = device->default_subgroup_size;
-        d.pcs.push(get_tensor_address(self))
-             .push(get_tensor_address(mat2))
-             .push(get_tensor_address(result))
-             .push(self.stride(0))
-             .push(self.stride(1))
-             .push(mat2.stride(0))
-             .push(mat2.stride(1))
-             .push(result.stride(0))
-             .push(static_cast<uint32_t>(M))
-             .push(static_cast<uint32_t>(N))
-             .push(static_cast<uint32_t>(K));
-        d.read = {self, mat2};
-        d.write = {result};
-        d.groupX = static_cast<uint32_t>(ceil_div(N, 64));
-        d.groupY = static_cast<uint32_t>(ceil_div(M, 64));
-        return d;
-    };
-
-    // int8 cooperative-matrix shapes with int32 accumulation, as {block (M = N), K}: NVIDIA offers 16x16x32 only
     std::vector<uint32_t> blocks, block_ks;
-    if (device->support_coopmat) {
-        for (const CoopMatShape& s : device->coopmat_shapes) {
-            if (s.a != at::kChar || s.b != at::kChar || s.c != at::kInt || s.result != at::kInt || s.m != s.n) continue;
-            bool listed = false; // drivers list each shape again with saturating accumulation
-            for (size_t i = 0; i < blocks.size(); i++) listed |= blocks[i] == s.m && block_ks[i] == s.k;
-            if (listed) continue;
-            blocks.push_back(s.m);
-            block_ks.push_back(s.k);
-        }
-    }
+    int8_coop_shapes(device, blocks, block_ks);
     auto coop_loadable = [](const at::Tensor& t) { return t.stride(-1) == 1 || t.stride(-2) == 1; };
-    if (blocks.empty() || !coop_loadable(self) || !coop_loadable(mat2) || !fits_32bit_indexing({self, mat2, result})) {
-        dispatch_tuned_shader(device, scalar_dispatch());
-        if (!result.is_same(out)) out.copy_(result);
-        return out;
-    }
+    if (blocks.empty() || !coop_loadable(self) || !coop_loadable(mat2) || !fits_32bit_indexing({self, mat2, result})) return false;
+
+    const bool scaled = epilogue != nullptr;
+    const bool has_bias = scaled && epilogue->bias.defined();
+    const ShaderKey shader = scaled ? ShaderKey{torchvulkan::Kernel::INT_MM_SCALED_COOP, epilogue->dtype}
+                                    : ShaderKey{torchvulkan::Kernel::INT_MM_COOP, at::kChar};
 
     // the coop kernel takes [batch, rows, cols] strides
     at::Tensor a = self.unsqueeze(0), b = mat2.unsqueeze(0), c = result.unsqueeze(0);
@@ -818,6 +799,7 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
     strides_of(c, strides_out);
     uint32_t a_transposed = coop_transposed(a) ? 1 : 0;
     uint32_t b_transposed = coop_transposed(b) ? 1 : 0;
+    // int_mm_scaled_coop_main loads the int8 operands with this VEC as a literal 4
     const uint32_t vecSize = get_dtype_vec_size(at::kChar);
     auto vec_aligned = [&](const at::Tensor& t, uint32_t transposed, const uint32_t (&strides)[4]) {
         uint32_t lead = transposed ? strides[2] : strides[1];
@@ -839,7 +821,7 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
         uint32_t threads = coop_threads(t);
 
         TuneDispatch d;
-        d.key = ShaderKey{torchvulkan::Kernel::INT_MM_COOP, at::kChar};
+        d.key = shader;
         d.subgroupSize = t.subgroup;
         d.spd.push(threads)
              .push(t.subgroup)
@@ -850,7 +832,7 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
              .push(t.bk)
              .push(uint32_t(0)) // HAS_ALPHA
              .push(uint32_t(0)) // ACTIVATION
-             .push(uint32_t(0)) // HAS_BIAS
+             .push(uint32_t(has_bias)) // HAS_BIAS
              .push(a_transposed)
              .push(b_transposed)
              .push(coop_aligned(c, false) ? uint32_t(1) : uint32_t(0))
@@ -864,21 +846,42 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
              .push(static_cast<uint32_t>(ceil_div(t.bk * tile_n / vecSize, threads))) // LOADS_B
              .push(config[8]) // PAD
              .push(block_k);
-        d.pcs.push(get_tensor_address(a))
-             .push(get_tensor_address(b))
-             .push(get_tensor_address(c))
-             .push(uint64_t(0))
-             .push_array(strides_a)
-             .push_array(strides_b)
-             .push_array(strides_out)
-             .push_array(strides_bias)
-             .push(static_cast<uint32_t>(M))
-             .push(static_cast<uint32_t>(N))
-             .push(static_cast<uint32_t>(K))
-             .push(uint32_t(0)) // padding
-             .push(int32_t(1))  // alpha
-             .push(int32_t(0)); // beta
-        d.read = {a, b};
+        if (scaled) {
+            // IntMmScaledPushConstants in ops/matmul_coop.slang
+            uint32_t scale_layout = (epilogue->scale_a.numel() == M && M != 1 ? 1u : 0u) |
+                (epilogue->scale_b.numel() == N && N != 1 ? 2u : 0u);
+            d.pcs.push(get_tensor_address(a))
+                 .push(get_tensor_address(b))
+                 .push(get_tensor_address(c))
+                 .push(has_bias ? get_tensor_address(epilogue->bias) : uint64_t(0))
+                 .push(get_tensor_address(epilogue->scale_a))
+                 .push(get_tensor_address(epilogue->scale_b))
+                 .push_array(strides_a)
+                 .push_array(strides_b)
+                 .push_array(strides_out)
+                 .push(static_cast<uint32_t>(M))
+                 .push(static_cast<uint32_t>(N))
+                 .push(static_cast<uint32_t>(K))
+                 .push(scale_layout);
+            d.read = {a, b, epilogue->scale_a, epilogue->scale_b};
+            if (has_bias) d.read.push_back(epilogue->bias);
+        } else {
+            d.pcs.push(get_tensor_address(a))
+                 .push(get_tensor_address(b))
+                 .push(get_tensor_address(c))
+                 .push(uint64_t(0))
+                 .push_array(strides_a)
+                 .push_array(strides_b)
+                 .push_array(strides_out)
+                 .push_array(strides_bias)
+                 .push(static_cast<uint32_t>(M))
+                 .push(static_cast<uint32_t>(N))
+                 .push(static_cast<uint32_t>(K))
+                 .push(uint32_t(0)) // padding
+                 .push(int32_t(1))  // alpha
+                 .push(int32_t(0)); // beta
+            d.read = {a, b};
+        }
         d.write = {c};
         d.groupX = static_cast<uint32_t>(ceil_div(N, tile_n));
         d.groupY = static_cast<uint32_t>(ceil_div(M, tile_m));
@@ -901,7 +904,8 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
         {"shared", {0, 1}},
         {"subgroup", subgroup_size_options(device)},
         {"pad", {0, 16}}, // shared-memory rows stay 16-byte aligned, as coop loads require
-        {"kernel", {0, 1}},
+        // the scaled epilogue has no scalar kernel; its callers fall back to _int_mm and elementwise scaling
+        {"kernel", scaled ? std::vector<uint32_t>{1} : std::vector<uint32_t>{0, 1}},
     };
     space.kernel_param = 9;
     space.valid = [&](const TuneConfig& config) {
@@ -936,9 +940,59 @@ at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at
     };
 
     uint64_t key = a_transposed | (b_transposed << 1) | (log2_ceil(M) << 8) | (log2_ceil(N) << 16) | (log2_ceil(K) << 24) |
-        (m_align << 40) | (n_align << 43) | (uint64_t(direct_aligned) << 46);
-    const TuneConfig& config = device->tuner->select(ShaderKey{torchvulkan::Kernel::INT_MM_COOP, at::kChar}, key, space, make_dispatch);
-    dispatch_tuned_shader(device, config.empty() ? scalar_dispatch() : make_dispatch(config));
+        (m_align << 40) | (n_align << 43) | (uint64_t(direct_aligned) << 46) | (uint64_t(has_bias) << 47);
+    const TuneConfig& config = device->tuner->select(shader, key, space, make_dispatch);
+    if (config.empty()) {
+        if (scaled) return false;
+        dispatch_tuned_shader(device, scalar_dispatch());
+        return true;
+    }
+    dispatch_tuned_shader(device, make_dispatch(config));
+    return true;
+}
+
+// torch._int_mm: int8 [M, K] x int8 [K, N] -> int32 [M, N]
+at::Tensor& int_mm_out_vulkan(const at::Tensor& self, const at::Tensor& mat2, at::Tensor& out)
+{
+    TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "_int_mm: expected 2D tensors, got ", self.dim(), "D and ", mat2.dim(), "D");
+    TORCH_CHECK(self.scalar_type() == at::kChar && mat2.scalar_type() == at::kChar,
+        "_int_mm: expected int8 inputs, got ", self.scalar_type(), " and ", mat2.scalar_type());
+    TORCH_CHECK(self.size(1) == mat2.size(0), "_int_mm: self.size(1) (", self.size(1), ") must match mat2.size(0) (", mat2.size(0), ")");
+    TORCH_CHECK(out.scalar_type() == at::kInt, "_int_mm: out must be int32, got ", out.scalar_type());
+    const int64_t M = self.size(0), K = self.size(1), N = mat2.size(1);
+    TORCH_CHECK(M <= UINT32_MAX && N <= UINT32_MAX && K <= UINT32_MAX, "_int_mm: dimensions too large");
+    at::native::resize_output(out, {M, N});
+    if (M == 0 || N == 0) return out;
+    if (K == 0) return out.zero_();
+
+    // the kernels write rows of a contiguous result
+    at::Tensor result = out.is_contiguous() ? out : at::empty({M, N}, out.options());
+    DeviceContext* device = get_device_context(self);
+    materialize_cow(result);
+
+    std::function<TuneDispatch()> scalar_dispatch = [&]() {
+        TuneDispatch d;
+        d.key = ShaderKey{torchvulkan::Kernel::INT_MM, at::kChar};
+        d.subgroupSize = device->default_subgroup_size;
+        d.pcs.push(get_tensor_address(self))
+             .push(get_tensor_address(mat2))
+             .push(get_tensor_address(result))
+             .push(self.stride(0))
+             .push(self.stride(1))
+             .push(mat2.stride(0))
+             .push(mat2.stride(1))
+             .push(result.stride(0))
+             .push(static_cast<uint32_t>(M))
+             .push(static_cast<uint32_t>(N))
+             .push(static_cast<uint32_t>(K));
+        d.read = {self, mat2};
+        d.write = {result};
+        d.groupX = static_cast<uint32_t>(ceil_div(N, 64));
+        d.groupY = static_cast<uint32_t>(ceil_div(M, 64));
+        return d;
+    };
+
+    if (!int8_mm_coop(device, self, mat2, result, nullptr, scalar_dispatch)) dispatch_tuned_shader(device, scalar_dispatch());
     if (!result.is_same(out)) out.copy_(result);
     return out;
 }
@@ -947,6 +1001,78 @@ at::Tensor int_mm_vulkan(const at::Tensor& self, const at::Tensor& mat2)
 {
     at::Tensor out = at::empty({0}, self.options().dtype(at::kInt));
     int_mm_out_vulkan(self, mat2, out);
+    return out;
+}
+
+// torchvulkan::int_mm_scaled: (self @ mat2) * scale_a * scale_b + bias for int8 operands, as out_dtype (float32 by
+// default). scale_a has 1 or M values (e.g. [M, 1]), scale_b 1 or N (e.g. [1, N]), both float32; bias is [N]. The
+// product is accumulated exactly in int32 and scaled in float32, in that order.
+void check_int_mm_scaled(const at::Tensor& self, const at::Tensor& mat2, const at::Tensor& scale_a, const at::Tensor& scale_b,
+    const std::optional<at::Tensor>& bias, at::ScalarType dtype)
+{
+    TORCH_CHECK(self.dim() == 2 && mat2.dim() == 2, "int_mm_scaled: expected 2D tensors, got ", self.dim(), "D and ", mat2.dim(), "D");
+    TORCH_CHECK(self.scalar_type() == at::kChar && mat2.scalar_type() == at::kChar,
+        "int_mm_scaled: expected int8 inputs, got ", self.scalar_type(), " and ", mat2.scalar_type());
+    TORCH_CHECK(self.size(1) == mat2.size(0), "int_mm_scaled: self.size(1) (", self.size(1), ") must match mat2.size(0) (", mat2.size(0), ")");
+    TORCH_CHECK(scale_a.scalar_type() == at::kFloat && scale_b.scalar_type() == at::kFloat,
+        "int_mm_scaled: expected float32 scales, got ", scale_a.scalar_type(), " and ", scale_b.scalar_type());
+    TORCH_CHECK(scale_a.numel() == 1 || scale_a.numel() == self.size(0),
+        "int_mm_scaled: scale_a must have 1 or M (", self.size(0), ") elements, got ", scale_a.numel());
+    TORCH_CHECK(scale_b.numel() == 1 || scale_b.numel() == mat2.size(1),
+        "int_mm_scaled: scale_b must have 1 or N (", mat2.size(1), ") elements, got ", scale_b.numel());
+    if (bias.has_value() && bias->defined()) {
+        TORCH_CHECK(bias->numel() == mat2.size(1), "int_mm_scaled: bias must have N (", mat2.size(1), ") elements, got ", bias->numel());
+        TORCH_CHECK(at::isFloatingType(bias->scalar_type()), "int_mm_scaled: expected a floating-point bias, got ", bias->scalar_type());
+    }
+    TORCH_CHECK(dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16,
+        "int_mm_scaled: out_dtype must be float32, float16 or bfloat16, got ", dtype);
+}
+
+at::Tensor int_mm_scaled_reference(const at::Tensor& self, const at::Tensor& mat2, const at::Tensor& scale_a,
+    const at::Tensor& scale_b, const std::optional<at::Tensor>& bias, std::optional<at::ScalarType> out_dtype)
+{
+    const at::ScalarType dtype = out_dtype.value_or(at::kFloat);
+    check_int_mm_scaled(self, mat2, scale_a, scale_b, bias, dtype);
+    const int64_t M = self.size(0), N = mat2.size(1);
+    at::Tensor acc = at::_int_mm(self, mat2).to(at::kFloat);
+    acc.mul_(scale_a.reshape({scale_a.numel() == 1 ? 1 : M, 1})).mul_(scale_b.reshape({1, scale_b.numel() == 1 ? 1 : N}));
+    if (bias.has_value() && bias->defined()) acc.add_(bias->to(at::kFloat).reshape({1, N}));
+    return acc.to(dtype);
+}
+
+at::Tensor int_mm_scaled_vulkan(const at::Tensor& self, const at::Tensor& mat2, const at::Tensor& scale_a,
+    const at::Tensor& scale_b, const std::optional<at::Tensor>& bias, std::optional<at::ScalarType> out_dtype)
+{
+    const at::ScalarType dtype = out_dtype.value_or(at::kFloat);
+    check_int_mm_scaled(self, mat2, scale_a, scale_b, bias, dtype);
+    const int64_t M = self.size(0), K = self.size(1), N = mat2.size(1);
+    TORCH_CHECK(M <= UINT32_MAX && N <= UINT32_MAX && K <= UINT32_MAX, "int_mm_scaled: dimensions too large");
+    const bool has_bias = bias.has_value() && bias->defined();
+    for (const at::Tensor& t : {mat2, scale_a, scale_b}) {
+        TORCH_CHECK(t.device() == self.device(), "int_mm_scaled: expected all tensors on ", self.device(), ", got ", t.device());
+    }
+    if (has_bias) TORCH_CHECK(bias->device() == self.device(), "int_mm_scaled: expected the bias on ", self.device(), ", got ", bias->device());
+
+    DeviceContext* device = get_device_context(self);
+    if (M == 0 || N == 0 || K == 0 || !is_dtype_supported(device, dtype)) {
+        return int_mm_scaled_reference(self, mat2, scale_a, scale_b, bias, out_dtype);
+    }
+    at::Tensor out = at::empty({M, N}, self.options().dtype(dtype));
+    materialize_cow(out);
+    Int8ScaledEpilogue epilogue{
+        scale_a.reshape({-1}).contiguous(),
+        scale_b.reshape({-1}).contiguous(),
+        has_bias ? bias->to(at::kFloat).reshape({-1}).contiguous() : at::Tensor(),
+        dtype,
+    };
+    std::function<TuneDispatch()> no_scalar = []() -> TuneDispatch {
+        TORCH_CHECK(false, "int_mm_scaled: the scaled epilogue has no scalar kernel");
+        return TuneDispatch{};
+    };
+    if (!int8_mm_coop(device, self, mat2, out, &epilogue, no_scalar)) {
+        // no int8 cooperative matrices here: _int_mm (scalar kernel) and elementwise scaling
+        return int_mm_scaled_reference(self, mat2, scale_a, scale_b, bias, out_dtype);
+    }
     return out;
 }
 
@@ -966,4 +1092,17 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("_addmm_activation.out", &addmm_activation_out_vulkan);
     m.impl("_int_mm", &int_mm_vulkan);
     m.impl("_int_mm.out", &int_mm_out_vulkan);
+}
+
+TORCH_LIBRARY(torchvulkan, m) {
+    m.def("int_mm_scaled(Tensor self, Tensor mat2, Tensor scale_a, Tensor scale_b, Tensor? bias=None, "
+          "ScalarType? out_dtype=None) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL(torchvulkan, CompositeExplicitAutograd, m) {
+    m.impl("int_mm_scaled", &int_mm_scaled_reference);
+}
+
+TORCH_LIBRARY_IMPL(torchvulkan, PrivateUse1, m) {
+    m.impl("int_mm_scaled", &int_mm_scaled_vulkan);
 }

@@ -558,3 +558,98 @@ void int_mm_coop_main<T : ITorchVulkan & ICoopElement, let VEC : int>(
     if (USE_SHARED_MEMORY == 1) coopMatmulStaged<T, int32_t, int32_t, VEC>(wg, ti, pcs);
     else coopMatmulDirect<T, int32_t, int32_t>(wg, ti, pcs);
 }
+
+// torchvulkan::int_mm_scaled: int8 operands with int32 accumulation like _int_mm, then out = float(acc) * scale_a[row] *
+// scale_b[col] (+ bias[col]) in float32, stored as TOut. The int32 result never reaches memory. The scales and the bias
+// are contiguous float32; a scale with one element is broadcast (SCALE_A_ROWS / SCALE_B_COLS 0). The staged tiles load
+// the int8 bytes with VEC 4, the host's int8 vector size. CoopPushConstants plus the two scale addresses would pass
+// the 128-byte limit, so this carries only what the kernel varies.
+struct IntMmScaledPushConstants
+{
+    uint64_t tensor_a;
+    uint64_t tensor_b;
+    uint64_t tensor_out;
+    uint64_t tensor_bias;
+    uint64_t scale_a;
+    uint64_t scale_b;
+    TensorStrides strides_a;
+    TensorStrides strides_b;
+    TensorStrides strides_out;
+    uint m_dim;
+    uint n_dim;
+    uint k_dim;
+    uint scale_layout; // bit 0: scale_a has one value per row, bit 1: scale_b has one value per column
+}
+
+void finishTileScaled<TOut : ITorchVulkan & ICoopElement>(
+    uint ti, CoopTile tile, IntMmScaledPushConstants p, inout Accumulator<int32_t> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+{
+    TOut* tensor_out = (TOut*)p.tensor_out;
+    float* tensor_bias = (float*)p.tensor_bias;
+    float* scale_a = (float*)p.scale_a;
+    float* scale_b = (float*)p.scale_b;
+    bool rows = (p.scale_layout & 1u) != 0;
+    bool cols = (p.scale_layout & 2u) != 0;
+    uint lane = ti % SUBGROUP_SIZE;
+    uint scratch = (ti / SUBGROUP_SIZE) * BLOCK_SIZE * BLOCK_SIZE;
+
+    // no continue or early exit: Metal spills the accumulators when the control flow isn't structured
+    [unroll] for (uint mi = 0; mi < WARP_FRAGS_M; ++mi)
+    {
+        [unroll] for (uint nj = 0; nj < WARP_FRAGS_N; ++nj)
+        {
+            uint row = tile.tile_m + tile.warp_row_base + mi * BLOCK_SIZE;
+            uint col = tile.tile_n + tile.warp_col_base + nj * BLOCK_SIZE;
+            acc[mi * WARP_FRAGS_N + nj].Store<linalg::CoopMatMatrixLayout.RowMajor>(EpilogueShared<int32_t>.smem, scratch, BLOCK_SIZE);
+            GroupMemoryBarrierWithWaveSync();
+            for (uint i = lane; i < BLOCK_SIZE * BLOCK_SIZE; i += SUBGROUP_SIZE)
+            {
+                uint r = row + i / BLOCK_SIZE;
+                uint c = col + i % BLOCK_SIZE;
+                if (r < p.m_dim && c < p.n_dim)
+                {
+                    float v = float(EpilogueShared<int32_t>.smem[scratch + i]) * scale_a[rows ? r : 0] * scale_b[cols ? c : 0];
+                    if (HAS_BIAS == 1) v = v + tensor_bias[c];
+                    tensor_out[r * p.strides_out.row + c * p.strides_out.col] = castValue<float, TOut>(v);
+                }
+            }
+            GroupMemoryBarrierWithWaveSync();
+        }
+    }
+}
+
+[shader("compute")]
+[numthreads(WORKGROUP_SIZE, 1, 1)]
+void int_mm_scaled_coop_main<TOut : ITorchVulkan & ICoopElement>(
+    uint3 wg : SV_GroupID,
+    uint ti : SV_GroupIndex,
+    uniform IntMmScaledPushConstants p)
+{
+    CoopPushConstants<int32_t> pcs;
+    pcs.tensor_a = p.tensor_a;
+    pcs.tensor_b = p.tensor_b;
+    pcs.tensor_out = p.tensor_out;
+    pcs.tensor_bias = 0;
+    pcs.strides_a = p.strides_a;
+    pcs.strides_b = p.strides_b;
+    pcs.strides_out = p.strides_out;
+    pcs.strides_bias.batch = 0;
+    pcs.strides_bias.row = 0;
+    pcs.strides_bias.col = 0;
+    pcs.strides_bias.padding = 0;
+    pcs.m_dim = p.m_dim;
+    pcs.n_dim = p.n_dim;
+    pcs.k_dim = p.k_dim;
+    pcs.padding = 0;
+    pcs.alpha = 1;
+    pcs.beta = 0;
+
+    CoopTile tile = makeTile<int32_t>(wg, ti, pcs);
+    Accumulator<int32_t> acc[WARP_FRAGS_M * WARP_FRAGS_N];
+    [unroll] for (uint i = 0; i < WARP_FRAGS_M * WARP_FRAGS_N; ++i) acc[i] = Accumulator<int32_t>(int32_t(0));
+    GroupMemoryBarrierWithGroupSync();
+
+    if (USE_SHARED_MEMORY == 1) accumulateStaged<int8_t, int32_t, 4>(ti, tile, pcs, acc);
+    else accumulateDirect<int8_t, int32_t>(ti, tile, pcs, acc);
+    finishTileScaled<TOut>(ti, tile, p, acc);
+}

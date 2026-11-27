@@ -165,6 +165,18 @@ def is_bf16_supported() -> bool:
 def _is_in_bad_fork() -> bool:
     return _C._is_in_bad_fork()
 
+def int_mm_scaled(a, b, scale_a, scale_b, bias=None, out_dtype=None) -> torch.Tensor:
+    """``(a @ b) * scale_a * scale_b + bias`` for int8 ``a`` [M, K] and ``b`` [K, N].
+
+    The product is accumulated exactly in int32, then scaled in float32 and returned as
+    ``out_dtype`` (float32 by default; float16 and bfloat16 too). ``scale_a`` holds 1 or M
+    float32 values (e.g. [M, 1]), ``scale_b`` 1 or N (e.g. [1, N]); ``bias`` has N values.
+    On Vulkan devices with int8 cooperative matrices the scaling and the bias run in the
+    GEMM's epilogue, so the int32 result never reaches memory; elsewhere (and on any other
+    device) this is ``torch._int_mm`` followed by the elementwise scaling.
+    """
+    return torch.ops.torchvulkan.int_mm_scaled(a, b, scale_a, scale_b, bias, out_dtype)
+
 # schedules the device teardown for the end of the process (after Python has freed the tensors)
 atexit.register(_C._shutdown)
 atexit.register(_C._save_pipeline_caches)
