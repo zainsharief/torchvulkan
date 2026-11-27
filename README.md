@@ -186,6 +186,7 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | `TORCHVULKAN_CACHE_DIR` | Directory for the pipeline cache. |
 | `TORCHVULKAN_TUNE_BUDGET_S` | Seconds the autotuner may spend searching for one operation's fastest kernel configuration before it settles for the best found so far (default `20`; `0` for no limit). |
 | `TORCHVULKAN_TUNE_LOG=1` | Print each configuration the autotuner times and the one it chooses. |
+| `TORCHVULKAN_AMD_LLPC=0` | Windows, AMD: keep the driver's default shader compiler. By default torchvulkan sets `AMD_ENABLE_LLPC=1` before the driver loads, so shaders are compiled with LLPC, because the default compiler miscompiles some kernels on RDNA1/2. |
 
 ## Limitations
 

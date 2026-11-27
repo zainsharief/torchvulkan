@@ -42,6 +42,8 @@ static bool isEnvSet(const char* name)
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+static bool requestedLlpc = false;
+
 static VkResult loadVulkan()
 {
 #ifdef __APPLE__
@@ -61,6 +63,16 @@ static VkResult loadVulkan()
             const char* error = dlerror();
             TORCH_WARN("torchvulkan: failed to load the bundled MoltenVK (", error ? error : "vkGetInstanceProcAddr not found", "); falling back to the system Vulkan loader.");
         }
+    }
+#endif
+#ifdef _WIN32
+    // AMD's Windows driver compiles with LLPC instead of its default compiler when AMD_ENABLE_LLPC=1 is set as it loads;
+    // the default compiler miscompiles some of our shaders on RDNA1/2 (#78)
+    const char* llpc = std::getenv("TORCHVULKAN_AMD_LLPC");
+    bool llpcOff = llpc != nullptr && llpc[0] == '0';
+    if (!llpcOff && std::getenv("AMD_ENABLE_LLPC") == nullptr) {
+        _putenv_s("AMD_ENABLE_LLPC", "1");
+        requestedLlpc = true;
     }
 #endif
     return volkInitialize();
@@ -340,6 +352,10 @@ void VulkanContext::createDeviceContexts()
         context->properties = props2.properties;
         context->driver_id = props12.driverID;
         context->driver_info = props12.driverInfo;
+        if (requestedLlpc && props12.driverID == VK_DRIVER_ID_AMD_PROPRIETARY && context->driver_info.find("(LLPC)") == std::string::npos) {
+            TORCH_WARN("torchvulkan [WARNING]: '", props.deviceName, "' compiles shaders with AMD's default compiler, not LLPC (driver ", context->driver_info,
+                       "). On RDNA1/2 that compiler miscompiles some kernels (#78); was the Vulkan driver loaded before torchvulkan?");
+        }
 
         // pipelines are pinned to the largest subgroup size unless they require another (see createPipeline); without control, kernels get the driver's default.
         // a pinned size caps a workgroup at size * maxComputeWorkgroupSubgroups, so devices where that is below the workgroups

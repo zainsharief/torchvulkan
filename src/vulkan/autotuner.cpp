@@ -29,8 +29,10 @@ constexpr double FULL_TIMING_TARGET_NS = 250e6;
 
 // only configs probing within this factor of the best full timing are timed in full
 constexpr double FULL_TIMING_FACTOR = 4.0;
-// a kernel still over FULL_TIMING_FACTOR after this many configs is abandoned; also the compile batch size
+// a kernel still over HOPELESS_FACTOR after this many configs is abandoned; also the compile batch size. Looser than
+// FULL_TIMING_FACTOR: an emulated coop kernel's configs can differ 10x, so its first samples can all be poor
 constexpr size_t HOPELESS_AFTER = 4;
+constexpr double HOPELESS_FACTOR = 8.0;
 // a kernel whose first config probes this far over the best is skipped
 constexpr double KERNEL_DROP_FACTOR = 20.0;
 // enough workgroups to fill a large GPU, few enough that an emulated kernel can't run for seconds
@@ -295,7 +297,7 @@ TuneConfig Autotuner::fastest(const TuneSpace& space, const std::function<TuneDi
             best = c;
             return true;
         };
-        auto hopeless = [&]() { return considered.size() >= HOPELESS_AFTER && best_own > FULL_TIMING_FACTOR * best_time; };
+        auto hopeless = [&]() { return considered.size() >= HOPELESS_AFTER && best_own > HOPELESS_FACTOR * best_time; };
 
         // samples in bit-reversed order, so each batch spreads over the whole space rather than covering one stretch of
         // it (configs() varies the last param fastest, so a stretch mostly differs in the last params)

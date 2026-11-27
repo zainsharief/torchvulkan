@@ -13,6 +13,7 @@ __exported import helpers.unary_ops;
 
 public static const int TILE_N = 128;
 public static const int TILE_K = 16;
+static const int THREAD_SIZE_M_MAX = 128 / TILE_K;
 
 public struct StridedMatrix<T> : IMatmulLoader<T>, IMatmulStore<T>
 {
@@ -125,9 +126,11 @@ public void matmulTile<
     const int VECTORS_PER_THREAD_ROW_M = THREAD_SIZE_N / VEC;
 
     // 2D: Slang can't emit an array size that multiplies the TILE_M spec constant by VEC
-    vector<T, VEC> accum[THREAD_SIZE_M][THREAD_SIZE_N / VEC];
-    [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i)
+    // sized by the largest TILE_M, with constant loop bounds: LLPC keeps an array sized by a spec constant in scratch
+    vector<T, VEC> accum[THREAD_SIZE_M_MAX][THREAD_SIZE_N / VEC];
+    [ForceUnroll] for (int i = 0; i < THREAD_SIZE_M_MAX; ++i)
     {
+        if (i >= THREAD_SIZE_M) break;
         [unroll] for (int j = 0; j < THREAD_SIZE_N / VEC; ++j) accum[i][j] = vector<T, VEC>(T(0));
     }
 
@@ -227,8 +230,9 @@ public void matmulTile<
                 b_frag[j] = smemB[k * VECTORS_PER_TILE_ROW_N + base_vec_col];
             }
 
-            [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i)
+            [ForceUnroll] for (int i = 0; i < THREAD_SIZE_M_MAX; ++i)
             {
+                if (i >= THREAD_SIZE_M) break;
                 T a_val = smemA[(thread_row_start + i) * (TILE_K + 1) + k];
 
                 [unroll] for (int j = 0; j < THREAD_SIZE_N / VEC; ++j)
@@ -245,8 +249,9 @@ public void matmulTile<
     uint global_col_start = wg.x * TILE_N + thread_col_start;
 
     // write the results back to global memory
-    [unroll] for (int i = 0; i < THREAD_SIZE_M; ++i)
+    [ForceUnroll] for (int i = 0; i < THREAD_SIZE_M_MAX; ++i)
     {
+        if (i >= THREAD_SIZE_M) break;
         uint g_row = global_row_start + i;
 
         [unroll] for (int j_vec = 0; j_vec < VECTORS_PER_THREAD_ROW_M; ++j_vec)
