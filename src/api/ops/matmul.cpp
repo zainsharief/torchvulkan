@@ -760,10 +760,39 @@ at::Tensor scaled_mm_vulkan(const at::Tensor& mat1, const at::Tensor& mat2, cons
     return scaled_mm_out_vulkan(mat1, mat2, scale_a, scale_b, bias, scale_result, out_dtype, use_fast_accum, out);
 }
 
+// _scaled_mm_v2 as the CPU runs it: one scale per operand, tensorwise or rowwise, nothing swizzled, then _scaled_mm
+at::Tensor& scaled_mm_v2_out_vulkan(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::ITensorListRef& scale_a, at::IntArrayRef recipe_a,
+    at::IntArrayRef swizzle_a, const at::ITensorListRef& scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const std::optional<at::Tensor>& bias,
+    std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum, at::Tensor& out)
+{
+    TORCH_CHECK_VALUE(contraction_dim.empty() || (contraction_dim.size() == 2 && contraction_dim[0] == 1 && contraction_dim[1] == 0),
+        "torch._scaled_mm_v2 only supports contraction_dim=(1, 0)");
+    TORCH_CHECK_VALUE(scale_a.size() == 1 && scale_a.front().scalar_type() == at::kFloat, "scale_a must have 1 Float element");
+    TORCH_CHECK_VALUE(scale_b.size() == 1 && scale_b.front().scalar_type() == at::kFloat, "scale_b must have 1 Float element");
+    auto no_swizzle = [](at::IntArrayRef s) { return std::all_of(s.begin(), s.end(), [](int64_t v) { return v == 0; }); };
+    TORCH_CHECK_VALUE(no_swizzle(swizzle_a) && no_swizzle(swizzle_b), "Vulkan does not support swizzle.");
+    // ScalingType: TensorWise = 0, RowWise = 1
+    auto known = [](at::IntArrayRef r) { return r.size() == 1 && (r[0] == 0 || r[0] == 1); };
+    TORCH_CHECK_VALUE(known(recipe_a) && known(recipe_b), "Invalid scaling configuration for _scaled_mm_v2: unsupported recipe(s). Got mat_a.dtype=",
+        mat_a.scalar_type(), ", mat_b.dtype=", mat_b.scalar_type(), ", recipe_a.size()=", recipe_a.size(), ", recipe_b.size()=", recipe_b.size());
+    return scaled_mm_out_vulkan(mat_a, mat_b, scale_a.front(), scale_b.front(), bias, std::nullopt, out_dtype, use_fast_accum, out);
+}
+
+at::Tensor scaled_mm_v2_vulkan(const at::Tensor& mat_a, const at::Tensor& mat_b, const at::ITensorListRef& scale_a, at::IntArrayRef recipe_a,
+    at::IntArrayRef swizzle_a, const at::ITensorListRef& scale_b, at::IntArrayRef recipe_b, at::IntArrayRef swizzle_b, const std::optional<at::Tensor>& bias,
+    std::optional<at::ScalarType> out_dtype, at::IntArrayRef contraction_dim, bool use_fast_accum)
+{
+    at::Tensor out = at::empty({0}, mat_a.options().dtype(out_dtype.value_or(mat_a.scalar_type())));
+    return scaled_mm_v2_out_vulkan(mat_a, mat_b, scale_a, recipe_a, swizzle_a, scale_b, recipe_b, swizzle_b, bias, out_dtype, contraction_dim,
+        use_fast_accum, out);
+}
+
 } // namespace
 
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("mm", &mm_vulkan);
+    m.impl("_scaled_mm_v2", &scaled_mm_v2_vulkan);
+    m.impl("_scaled_mm_v2.out", &scaled_mm_v2_out_vulkan);
     m.impl("_scaled_mm", &scaled_mm_vulkan);
     m.impl("_scaled_mm.out", &scaled_mm_out_vulkan);
     m.impl("bmm", &bmm_vulkan);
