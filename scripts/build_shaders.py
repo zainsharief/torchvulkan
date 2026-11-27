@@ -35,15 +35,20 @@ def kernel_variants(kernel, src):
     module = src / kernel.module
 
     for entry in kernel.entries:
+        pairs = entry.pairs
         if entry.pairwise:
-            for s, d in itertools.product(entry.dtypes, repeat=2):
+            pairs = list(itertools.product(entry.dtypes, repeat=2))
+        elif entry.dtypes2 is not None:
+            pairs = list(itertools.product(entry.dtypes, entry.dtypes2))
+        if pairs is not None:
+            for s, d in pairs:
                 args = [s.slang, d.slang] + value_args(entry, max(s.bytes, d.bytes))
-                yield f'{kernel.name}_{s.name}_{d.name}', module, entry.function, args, [s.aten, d.aten]
+                yield f'{kernel.name}_{s.name}_{d.name}', module, entry.function, args, [(s.aten, s.mode), (d.aten, d.mode)]
             continue
 
         for d in entry.dtypes:
             args = [d.slang] + value_args(entry, d.bytes)
-            yield f'{kernel.name}_{d.name}', module, entry.function, args, [d.aten]
+            yield f'{kernel.name}_{d.name}', module, entry.function, args, [(d.aten, d.mode)]
 
 
 def write_if_changed(path, text):
@@ -84,6 +89,10 @@ def main(args):
     enum.append('inline constexpr const char* KERNEL_NAMES[] = {')
     enum.extend(f'    "{name}",' for name in kernel_names)
     enum.append('};\n')
+    enum.append('// how a variant runs its dtype (scripts/config.py MODES)')
+    enum.append('enum class DtypeMode : uint8_t {')
+    enum.extend(f'    {mode.upper()},' for mode in config.MODES)
+    enum.append('    COUNT\n};\n')
     vec_sizes = ', '.join(str(config.vec_size(n)) if n else '1' for n in range(17))
     enum.append('// elements a vectorised kernel handles per thread, indexed by the element size in bytes')
     enum.append(f'inline constexpr int VEC_SIZE_FOR_BYTES[17] = {{ {vec_sizes} }};\n')

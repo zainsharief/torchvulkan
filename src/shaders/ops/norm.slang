@@ -36,16 +36,17 @@ public struct NormPushConstants
     public float momentum;
 }
 
+// statistics of float16 and bfloat16 are float32 (STATS_ACCUM), the others the input's dtype
 T.Accum loadStat<T : ITorchVulkan>(uint64_t address, uint i)
 {
-    if (STATS_ACCUM == 1) return ((T.Accum*)address)[i];
-    return ((T*)address)[i].toAccum();
+    if (STATS_ACCUM == 1) return T.Accum.load(address, i);
+    return T.load(address, i).toAccum();
 }
 
 void storeStat<T : ITorchVulkan>(uint64_t address, uint i, T.Accum v)
 {
-    if (STATS_ACCUM == 1) ((T.Accum*)address)[i] = v;
-    else ((T*)address)[i] = T.fromAccum(v);
+    if (STATS_ACCUM == 1) T.Accum.store(address, i, v);
+    else T.store(address, i, T.fromAccum(v));
 }
 
 T.Accum blockSum<T : ITorchVulkan>(T.Accum v, uint lane, __ref T.Accum smem[NORM_SMEM_SIZE])
@@ -74,8 +75,6 @@ void batchForward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_S
     typealias A = T.Accum;
     if (c >= pcs.channels) return;
 
-    T* x = (T*)pcs.x;
-    T* y = (T*)pcs.y;
     uint count = pcs.outer * pcs.inner;
     A eps = A.castFromF32(pcs.eps);
 
@@ -84,13 +83,13 @@ void batchForward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_S
     {
         A n = A.castFromU64(uint64_t(count));
         A sum = A.ext_zero();
-        for (uint i = lane; i < count; i += WG_x) sum = sum + x[batchIndex(i, c, pcs)].toAccum();
+        for (uint i = lane; i < count; i += WG_x) sum = sum + T.load(pcs.x, batchIndex(i, c, pcs)).toAccum();
         mean = blockSum<T>(sum, lane, smem) / n;
 
         A sq = A.ext_zero();
         for (uint i = lane; i < count; i += WG_x)
         {
-            A d = x[batchIndex(i, c, pcs)].toAccum() - mean;
+            A d = T.load(pcs.x, batchIndex(i, c, pcs)).toAccum() - mean;
             sq = sq + d * d;
         }
         A var = blockSum<T>(sq, lane, smem) / n;
@@ -102,31 +101,29 @@ void batchForward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_S
             storeStat<T>(pcs.rstd, c, invstd);
             if (UPDATE_RUNNING == 1)
             {
-                T* running_mean = (T*)pcs.running_mean;
-                T* running_var = (T*)pcs.running_var;
                 A m = A.castFromF32(pcs.momentum);
                 A keep = A.ext_one() - m;
                 A unbiased = var * n / (n - A.ext_one());
-                running_mean[c] = T.fromAccum(keep * running_mean[c].toAccum() + m * mean);
-                running_var[c] = T.fromAccum(keep * running_var[c].toAccum() + m * unbiased);
+                T.store(pcs.running_mean, c, T.fromAccum(keep * T.load(pcs.running_mean, c).toAccum() + m * mean));
+                T.store(pcs.running_var, c, T.fromAccum(keep * T.load(pcs.running_var, c).toAccum() + m * unbiased));
             }
         }
     }
     else
     {
-        mean = ((T*)pcs.running_mean)[c].toAccum();
-        invstd = A.ext_rsqrt(((T*)pcs.running_var)[c].toAccum() + eps);
+        mean = T.load(pcs.running_mean, c).toAccum();
+        invstd = A.ext_rsqrt(T.load(pcs.running_var, c).toAccum() + eps);
     }
 
     A scale = invstd;
-    if (HAS_WEIGHT == 1) scale = scale * ((T*)pcs.weight)[c].toAccum();
+    if (HAS_WEIGHT == 1) scale = scale * T.load(pcs.weight, c).toAccum();
     A shift = A.ext_zero();
-    if (HAS_BIAS == 1) shift = ((T*)pcs.bias)[c].toAccum();
+    if (HAS_BIAS == 1) shift = T.load(pcs.bias, c).toAccum();
 
     for (uint i = lane; i < count; i += WG_x)
     {
         uint idx = batchIndex(i, c, pcs);
-        y[idx] = T.fromAccum((x[idx].toAccum() - mean) * scale + shift);
+        T.store(pcs.y, idx, T.fromAccum((T.load(pcs.x, idx).toAccum() - mean) * scale + shift));
     }
 }
 
@@ -135,8 +132,6 @@ void batchBackward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_
     typealias A = T.Accum;
     if (c >= pcs.channels) return;
 
-    T* x = (T*)pcs.x;
-    T* dy = (T*)pcs.dy;
     uint count = pcs.outer * pcs.inner;
     A n = A.castFromU64(uint64_t(count));
 
@@ -148,8 +143,8 @@ void batchBackward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_
     }
     else
     {
-        mean = ((T*)pcs.running_mean)[c].toAccum();
-        invstd = A.ext_rsqrt(((T*)pcs.running_var)[c].toAccum() + A.castFromF32(pcs.eps));
+        mean = T.load(pcs.running_mean, c).toAccum();
+        invstd = A.ext_rsqrt(T.load(pcs.running_var, c).toAccum() + A.castFromF32(pcs.eps));
     }
 
     A sum_dy = A.ext_zero();
@@ -159,9 +154,9 @@ void batchBackward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_
         for (uint i = lane; i < count; i += WG_x)
         {
             uint idx = batchIndex(i, c, pcs);
-            A g = dy[idx].toAccum();
+            A g = T.load(pcs.dy, idx).toAccum();
             sum_dy = sum_dy + g;
-            sum_dy_xmu = sum_dy_xmu + g * (x[idx].toAccum() - mean);
+            sum_dy_xmu = sum_dy_xmu + g * (T.load(pcs.x, idx).toAccum() - mean);
         }
         sum_dy = blockSum<T>(sum_dy, lane, smem);
         sum_dy_xmu = blockSum<T>(sum_dy_xmu, lane, smem);
@@ -169,24 +164,23 @@ void batchBackward<T : ITorchVulkan>(uint c, uint lane, __ref T.Accum smem[NORM_
 
     if (lane == 0)
     {
-        if ((OUTPUTS & 2) != 0) ((T*)pcs.grad_weight)[c] = T.fromAccum(sum_dy_xmu * invstd);
-        if ((OUTPUTS & 4) != 0) ((T*)pcs.grad_bias)[c] = T.fromAccum(sum_dy);
+        if ((OUTPUTS & 2) != 0) T.store(pcs.grad_weight, c, T.fromAccum(sum_dy_xmu * invstd));
+        if ((OUTPUTS & 4) != 0) T.store(pcs.grad_bias, c, T.fromAccum(sum_dy));
     }
 
     if ((OUTPUTS & 1) == 0) return;
 
-    T* grad_input = (T*)pcs.y;
     A scale = invstd;
-    if (HAS_WEIGHT == 1) scale = scale * ((T*)pcs.weight)[c].toAccum();
+    if (HAS_WEIGHT == 1) scale = scale * T.load(pcs.weight, c).toAccum();
     A mean_dy = sum_dy / n;
     A proj = sum_dy_xmu / n * invstd * invstd;
 
     for (uint i = lane; i < count; i += WG_x)
     {
         uint idx = batchIndex(i, c, pcs);
-        A g = dy[idx].toAccum();
-        if (TRAINING == 1) g = g - mean_dy - (x[idx].toAccum() - mean) * proj;
-        grad_input[idx] = T.fromAccum(g * scale);
+        A g = T.load(pcs.dy, idx).toAccum();
+        if (TRAINING == 1) g = g - mean_dy - (T.load(pcs.x, idx).toAccum() - mean) * proj;
+        T.store(pcs.y, idx, T.fromAccum(g * scale));
     }
 }
 
@@ -196,22 +190,20 @@ void rowForward<T : ITorchVulkan>(uint row, uint lane, __ref T.Accum smem[NORM_S
     if (row >= pcs.outer) return;
 
     uint size = pcs.channels;
-    T* x = ((T*)pcs.x) + uint64_t(row) * size;
-    T* y = ((T*)pcs.y) + uint64_t(row) * size;
     A n = A.castFromU64(uint64_t(size));
 
     A mean = A.ext_zero();
     if (RMS == 0)
     {
         A sum = A.ext_zero();
-        for (uint j = lane; j < size; j += WG_x) sum = sum + x[min(j, size - 1)].toAccum();
+        for (uint j = lane; j < size; j += WG_x) sum = sum + T.load(pcs.x, uint64_t(row) * size + min(j, size - 1)).toAccum();
         mean = blockSum<T>(sum, lane, smem) / n;
     }
 
     A sq = A.ext_zero();
     for (uint j = lane; j < size; j += WG_x)
     {
-        A d = x[min(j, size - 1)].toAccum() - mean;
+        A d = T.load(pcs.x, uint64_t(row) * size + min(j, size - 1)).toAccum() - mean;
         sq = sq + d * d;
     }
     A rstd = A.ext_rsqrt(blockSum<T>(sq, lane, smem) / n + A.castFromF32(pcs.eps));
@@ -225,10 +217,10 @@ void rowForward<T : ITorchVulkan>(uint row, uint lane, __ref T.Accum smem[NORM_S
     for (uint j = lane; j < size; j += WG_x)
     {
         uint k = min(j, size - 1);
-        A v = (x[k].toAccum() - mean) * rstd;
-        if (HAS_WEIGHT == 1) v = v * ((T*)pcs.weight)[k].toAccum();
-        if (HAS_BIAS == 1) v = v + ((T*)pcs.bias)[k].toAccum();
-        y[k] = T.fromAccum(v);
+        A v = (T.load(pcs.x, uint64_t(row) * size + k).toAccum() - mean) * rstd;
+        if (HAS_WEIGHT == 1) v = v * T.load(pcs.weight, k).toAccum();
+        if (HAS_BIAS == 1) v = v + T.load(pcs.bias, k).toAccum();
+        T.store(pcs.y, uint64_t(row) * size + k, T.fromAccum(v));
     }
 }
 
@@ -238,9 +230,6 @@ void rowBackwardInput<T : ITorchVulkan>(uint row, uint lane, __ref T.Accum smem[
     if (row >= pcs.outer) return;
 
     uint size = pcs.channels;
-    T* x = ((T*)pcs.x) + uint64_t(row) * size;
-    T* dy = ((T*)pcs.dy) + uint64_t(row) * size;
-    T* grad_input = ((T*)pcs.y) + uint64_t(row) * size;
     A n = A.castFromU64(uint64_t(size));
 
     A mean = A.ext_zero();
@@ -252,10 +241,10 @@ void rowBackwardInput<T : ITorchVulkan>(uint row, uint lane, __ref T.Accum smem[
     for (uint j = lane; j < size; j += WG_x)
     {
         uint k = min(j, size - 1);
-        A g = dy[k].toAccum();
-        if (HAS_WEIGHT == 1) g = g * ((T*)pcs.weight)[k].toAccum();
+        A g = T.load(pcs.dy, uint64_t(row) * size + k).toAccum();
+        if (HAS_WEIGHT == 1) g = g * T.load(pcs.weight, k).toAccum();
         sum_g = sum_g + g;
-        sum_g_xhat = sum_g_xhat + g * (x[k].toAccum() - mean) * rstd;
+        sum_g_xhat = sum_g_xhat + g * (T.load(pcs.x, uint64_t(row) * size + k).toAccum() - mean) * rstd;
     }
     A mean_g = A.ext_zero();
     if (RMS == 0) mean_g = blockSum<T>(sum_g, lane, smem) / n;
@@ -264,10 +253,10 @@ void rowBackwardInput<T : ITorchVulkan>(uint row, uint lane, __ref T.Accum smem[
     for (uint j = lane; j < size; j += WG_x)
     {
         uint k = min(j, size - 1);
-        A g = dy[k].toAccum();
-        if (HAS_WEIGHT == 1) g = g * ((T*)pcs.weight)[k].toAccum();
-        A xhat = (x[k].toAccum() - mean) * rstd;
-        grad_input[k] = T.fromAccum(rstd * (g - mean_g - xhat * mean_g_xhat));
+        A g = T.load(pcs.dy, uint64_t(row) * size + k).toAccum();
+        if (HAS_WEIGHT == 1) g = g * T.load(pcs.weight, k).toAccum();
+        A xhat = (T.load(pcs.x, uint64_t(row) * size + k).toAccum() - mean) * rstd;
+        T.store(pcs.y, uint64_t(row) * size + k, T.fromAccum(rstd * (g - mean_g - xhat * mean_g_xhat)));
     }
 }
 
@@ -281,8 +270,6 @@ void rowBackwardParams<T : ITorchVulkan>(uint group, uint lane, __ref T.Accum sm
     uint row_lane = lane / PARAM_COLUMNS;
     uint row_lanes = WG_x / PARAM_COLUMNS;
 
-    T* x = (T*)pcs.x;
-    T* dy = (T*)pcs.dy;
 
     A sum_dy = A.ext_zero();
     A sum_dy_xhat = A.ext_zero();
@@ -293,9 +280,9 @@ void rowBackwardParams<T : ITorchVulkan>(uint group, uint lane, __ref T.Accum sm
         if (RMS == 0) mean = loadStat<T>(pcs.mean, rr);
         A rstd = loadStat<T>(pcs.rstd, rr);
         uint idx = rr * size + k;
-        A g = dy[idx].toAccum();
+        A g = T.load(pcs.dy, idx).toAccum();
         sum_dy = sum_dy + g;
-        sum_dy_xhat = sum_dy_xhat + g * (x[idx].toAccum() - mean) * rstd;
+        sum_dy_xhat = sum_dy_xhat + g * (T.load(pcs.x, idx).toAccum() - mean) * rstd;
     }
 
     for (uint pass = 0; pass < 2; pass++)
@@ -310,8 +297,8 @@ void rowBackwardParams<T : ITorchVulkan>(uint group, uint lane, __ref T.Accum sm
         }
         if (row_lane == 0 && col < size)
         {
-            if (pass == 0 && (OUTPUTS & 2) != 0) ((T*)pcs.grad_weight)[col] = T.fromAccum(smem[lane]);
-            if (pass == 1 && (OUTPUTS & 4) != 0) ((T*)pcs.grad_bias)[col] = T.fromAccum(smem[lane]);
+            if (pass == 0 && (OUTPUTS & 2) != 0) T.store(pcs.grad_weight, col, T.fromAccum(smem[lane]));
+            if (pass == 1 && (OUTPUTS & 4) != 0) T.store(pcs.grad_bias, col, T.fromAccum(smem[lane]));
         }
     }
 }

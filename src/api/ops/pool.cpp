@@ -167,11 +167,10 @@ PoolGeometry window_geometry(
     return g;
 }
 
-// bfloat16 runs in float32: MoltenVK can't build its constants
 at::ScalarType pool_dtype(const at::Tensor& self)
 {
     at::ScalarType dtype = self.scalar_type();
-    return (dtype == at::kBFloat16 || !is_dtype_supported(self, dtype)) ? at::kFloat : dtype;
+    return can_dispatch(get_device_context(self), torchvulkan::Kernel::POOL, dtype) ? dtype : at::kFloat;
 }
 
 // pooling results take the input's layout, as on the CPU and CUDA

@@ -473,7 +473,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor>> fused_forward(Attention a)
 {
     DeviceContext* device = get_device_context(a.q);
     const auto& limits = device->properties.limits;
-    if (!is_dtype_supported(device, a.dtype)) return std::nullopt;
+    if (!can_dispatch(device, torchvulkan::Kernel::ATTENTION_SIMD, a.dtype)) return std::nullopt;
 
     if (a.q.stride(3) != 1) a.q = a.q.contiguous();
     if (a.k.stride(3) != 1) a.k = a.k.contiguous();
@@ -744,7 +744,7 @@ std::optional<std::tuple<at::Tensor, at::Tensor, at::Tensor>> fused_backward(
     const at::Tensor& lse)
 {
     DeviceContext* device = get_device_context(a.q);
-    if (!is_dtype_supported(device, a.dtype)) return std::nullopt;
+    if (!can_dispatch(device, torchvulkan::Kernel::ATTENTION_SIMD_BACKWARD, a.dtype)) return std::nullopt;
 
     a.q = a.q.contiguous();
     a.k = a.k.contiguous();
@@ -779,7 +779,7 @@ int64_t fused_sdp_choice_vulkan(
     if (query.dim() != 4 || key.dim() != 4 || value.dim() != 4) return math;
     at::ScalarType dtype = query.scalar_type();
     if (!is_dtype_float(dtype) || key.scalar_type() != dtype || value.scalar_type() != dtype) return math;
-    if (!is_dtype_supported(query, dtype)) return math;
+    if (!can_dispatch(get_device_context(query), torchvulkan::Kernel::ATTENTION_SIMD, dtype)) return math;
     if (attn_mask.has_value() && attn_mask->defined() && attn_mask->scalar_type() != at::kBool && attn_mask->scalar_type() != dtype) return math;
 
     int64_t heads = query.size(1);

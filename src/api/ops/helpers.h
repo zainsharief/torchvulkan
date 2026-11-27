@@ -56,34 +56,24 @@ inline DeviceContext* get_device_context(const at::Tensor& t)
     return VulkanContext::Instance().GetDeviceContext(t.device().index());
 }
 
-inline bool is_dtype_supported(const DeviceContext* device, at::ScalarType dtype) 
+// whether `kernel` was compiled for a storage kind that holds `dtype` (and `dtype2`, for kernels taking two) on this device
+inline bool can_dispatch(const DeviceContext* device, torchvulkan::Kernel kernel, at::ScalarType dtype, at::ScalarType dtype2 = at::ScalarType::Undefined)
 {
-    switch (dtype) 
-    {
-        case at::kDouble: return device->support_float64;
-        case at::kLong: return device->support_int64;
-        case at::kUInt64: return device->support_int64;
-        
-        case at::kFloat: return device->support_float32;
-        case at::kInt: return device->support_int32;
-        case at::kUInt32: return device->support_int32;
-        
-        case at::kHalf: return device->support_float16;
-        case at::kBFloat16: return device->support_bfloat16;
-        case at::kShort: return device->support_int16;
-        case at::kUInt16: return device->support_int16;
-        
-        case at::kChar: return device->support_int8; 
-        case at::kByte: return device->support_int8; 
-        case at::kBool: return device->support_int8; 
-        
-        default: return false;
-    }
+    return device->shader_manager->canDispatch(ShaderKey{kernel, dtype, dtype2});
 }
 
-inline bool is_dtype_supported(const at::Tensor& on, at::ScalarType dtype)
+// what a cast between two dtypes without a cast variant of their own goes through
+inline at::ScalarType cast_bridge_dtype(at::ScalarType src, at::ScalarType dst)
 {
-    return is_dtype_supported(get_device_context(on), dtype);
+    return at::isIntegralType(src, /*includeBool=*/true) && at::isIntegralType(dst, /*includeBool=*/true) ? at::kLong : at::kFloat;
+}
+
+// whether a cast runs on this device, directly or through cast_bridge_dtype
+inline bool can_cast(const DeviceContext* device, at::ScalarType src, at::ScalarType dst)
+{
+    if (can_dispatch(device, torchvulkan::Kernel::CAST, src, dst)) return true;
+    at::ScalarType mid = cast_bridge_dtype(src, dst);
+    return can_dispatch(device, torchvulkan::Kernel::CAST, src, mid) && can_dispatch(device, torchvulkan::Kernel::CAST, mid, dst);
 }
 
 // the dtype whose byte-width variant moves `dtype`'s elements, for kernels that only copy (copy, index_gather)
@@ -100,10 +90,10 @@ inline c10::ScalarType get_dtype_width_variant(c10::ScalarType dtype)
     }
 }
 
-// copy-only kernels move bytes, so a dtype is usable when its byte-width variant is (complex128 has its own)
-inline bool is_dtype_copyable(const at::Tensor& on, c10::ScalarType dtype)
+// copy-only kernels move bytes, so a dtype is usable when its byte-width variant is
+inline bool is_dtype_copyable(const at::Tensor& on, c10::ScalarType dtype, torchvulkan::Kernel kernel)
 {
-    return c10::elementSize(dtype) == 16 || is_dtype_supported(on, get_dtype_width_variant(dtype));
+    return can_dispatch(get_device_context(on), kernel, get_dtype_width_variant(dtype));
 }
 
 // set by scripts/config.py, which compiles the shaders with the same table
@@ -241,6 +231,11 @@ inline int get_dtype_digits(at::ScalarType dtype)
         case at::kFloat: return std::numeric_limits<float>::digits;
         case at::kHalf: return std::numeric_limits<c10::Half>::digits;
         case at::kBFloat16: return std::numeric_limits<c10::BFloat16>::digits;
+        case at::kFloat8_e4m3fn: return std::numeric_limits<c10::Float8_e4m3fn>::digits;
+        case at::kFloat8_e5m2: return std::numeric_limits<c10::Float8_e5m2>::digits;
+        case at::kFloat8_e4m3fnuz: return std::numeric_limits<c10::Float8_e4m3fnuz>::digits;
+        case at::kFloat8_e5m2fnuz: return std::numeric_limits<c10::Float8_e5m2fnuz>::digits;
+        case at::kFloat8_e8m0fnu: return std::numeric_limits<c10::Float8_e8m0fnu>::digits;
 
         case at::kBool: return std::numeric_limits<bool>::digits;
         case at::kByte: return std::numeric_limits<uint8_t>::digits;
@@ -264,6 +259,11 @@ inline std::pair<double, double> get_dtype_limits(at::ScalarType dtype)
         case at::kFloat: return {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::max()};
         case at::kHalf: return {static_cast<double>(std::numeric_limits<c10::Half>::lowest()), static_cast<double>(std::numeric_limits<c10::Half>::max())};
         case at::kBFloat16: return {static_cast<double>(std::numeric_limits<c10::BFloat16>::lowest()), static_cast<double>(std::numeric_limits<c10::BFloat16>::max())};
+        case at::kFloat8_e4m3fn: return {static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::max())};
+        case at::kFloat8_e5m2: return {static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::max())};
+        case at::kFloat8_e4m3fnuz: return {static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::max())};
+        case at::kFloat8_e5m2fnuz: return {static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::max())};
+        case at::kFloat8_e8m0fnu: return {static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::lowest()), static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::max())};
 
         case at::kBool: return {0, 1};
         case at::kByte: return {std::numeric_limits<uint8_t>::lowest(), std::numeric_limits<uint8_t>::max()};
@@ -286,6 +286,11 @@ inline double get_dtype_epsilon(at::ScalarType dtype)
         case at::kDouble: return std::numeric_limits<double>::epsilon();
         case at::kHalf: return static_cast<double>(std::numeric_limits<c10::Half>::epsilon());
         case at::kBFloat16: return static_cast<double>(std::numeric_limits<c10::BFloat16>::epsilon());
+        case at::kFloat8_e4m3fn: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::epsilon());
+        case at::kFloat8_e5m2: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::epsilon());
+        case at::kFloat8_e4m3fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::epsilon());
+        case at::kFloat8_e5m2fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::epsilon());
+        case at::kFloat8_e8m0fnu: return static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::epsilon());
         default: return std::numeric_limits<float>::epsilon();
     }
 }
@@ -297,6 +302,11 @@ inline double get_dtype_smallest_normal(at::ScalarType dtype)
         case at::kDouble: return std::numeric_limits<double>::min();
         case at::kHalf: return static_cast<double>(std::numeric_limits<c10::Half>::min());
         case at::kBFloat16: return static_cast<double>(std::numeric_limits<c10::BFloat16>::min());
+        case at::kFloat8_e4m3fn: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fn>::min());
+        case at::kFloat8_e5m2: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2>::min());
+        case at::kFloat8_e4m3fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e4m3fnuz>::min());
+        case at::kFloat8_e5m2fnuz: return static_cast<double>(std::numeric_limits<c10::Float8_e5m2fnuz>::min());
+        case at::kFloat8_e8m0fnu: return static_cast<double>(std::numeric_limits<c10::Float8_e8m0fnu>::min());
         default: return std::numeric_limits<float>::min();
     }
 }
@@ -308,6 +318,11 @@ inline int64_t round_to_dtype(int64_t value, at::ScalarType dtype)
         case at::kDouble: return static_cast<int64_t>(static_cast<double>(value));
         case at::kHalf: return static_cast<int64_t>(static_cast<float>(c10::Half(static_cast<float>(value))));
         case at::kBFloat16: return static_cast<int64_t>(static_cast<float>(c10::BFloat16(static_cast<float>(value))));
+        case at::kFloat8_e4m3fn: return static_cast<int64_t>(static_cast<float>(c10::Float8_e4m3fn(static_cast<float>(value))));
+        case at::kFloat8_e5m2: return static_cast<int64_t>(static_cast<float>(c10::Float8_e5m2(static_cast<float>(value))));
+        case at::kFloat8_e4m3fnuz: return static_cast<int64_t>(static_cast<float>(c10::Float8_e4m3fnuz(static_cast<float>(value))));
+        case at::kFloat8_e5m2fnuz: return static_cast<int64_t>(static_cast<float>(c10::Float8_e5m2fnuz(static_cast<float>(value))));
+        case at::kFloat8_e8m0fnu: return static_cast<int64_t>(static_cast<float>(c10::Float8_e8m0fnu(static_cast<float>(value))));
         default: return static_cast<int64_t>(static_cast<float>(value));
     }
 }
@@ -472,11 +487,16 @@ inline c10::ScalarType reduce_compute_dtype(const at::Tensor& self, c10::optiona
     return self.scalar_type();
 }
 
+inline bool is_low_prec(at::ScalarType dtype)
+{
+    return dtype == at::kHalf || dtype == at::kBFloat16 || at::isFloat8Type(dtype);
+}
+
 // the dtype a reduction accumulates in is not always the dtype it returns
 inline c10::ScalarType reduce_accumulate_dtype(c10::ScalarType dtype)
 {
     if (dtype == at::kComplexHalf) return at::kComplexFloat;
-    return (dtype == at::kHalf || dtype == at::kBFloat16) ? at::kFloat : dtype;
+    return is_low_prec(dtype) ? at::kFloat : dtype;
 }
 
 // a result built as a view of a private buffer (view_as_complex of real pairs, a moved or narrowed scratch tensor):
@@ -544,7 +564,8 @@ inline std::vector<uint32_t> subgroup_size_options(const DeviceContext* device)
 inline std::vector<uint32_t> coop_block_sizes(const DeviceContext* device, at::ScalarType dtype, at::ScalarType accumulate)
 {
     std::vector<uint32_t> sizes;
-    if (!device->support_coopmat) return sizes;
+    // the cooperative-matrix kernels take native dtypes only: an emulated one runs the SIMD kernels
+    if (!device->support_coopmat || device->dtype_mode[static_cast<size_t>(dtype)] != torchvulkan::DtypeMode::NATIVE) return sizes;
     for (const CoopMatShape& s : device->coopmat_shapes)
     {
         if (s.a != dtype || s.b != dtype || s.c != accumulate || s.result != accumulate) continue;
@@ -577,11 +598,6 @@ inline bool is_dtype_float(at::ScalarType dtype)
     return dtype == at::kFloat || dtype == at::kHalf || dtype == at::kBFloat16 || dtype == at::kDouble;
 }
 
-inline bool is_low_prec(at::ScalarType dtype)
-{
-    return dtype == at::kHalf || dtype == at::kBFloat16;
-}
-
 // the complex dtype a real one pairs into: complex128 for float64, complex64 otherwise
 inline c10::ScalarType get_dtype_complex(c10::ScalarType real)
 {
@@ -603,10 +619,12 @@ inline std::vector<int64_t> to_ints(c10::SymIntArrayRef sizes)
     return values;
 }
 
-// the dtype a random kernel samples in: float64 for float64 outputs, float32 otherwise (T.Real in philox.slang)
-inline c10::ScalarType random_real_dtype(c10::ScalarType dtype)
+// the dtype a random kernel samples in: float64 for float64 outputs where the device has it, float32 otherwise
+// (T.Real in philox.slang; Float64Emulated samples in float32)
+inline c10::ScalarType random_real_dtype(const DeviceContext* device, c10::ScalarType dtype)
 {
-    return dtype == at::kDouble ? at::kDouble : at::kFloat;
+    bool native = device->dtype_mode[static_cast<size_t>(at::kDouble)] == torchvulkan::DtypeMode::NATIVE;
+    return dtype == at::kDouble && native ? at::kDouble : at::kFloat;
 }
 
 // the dtype a random kernel generates in when the device cannot write `dtype`

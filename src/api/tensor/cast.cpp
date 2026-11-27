@@ -5,7 +5,28 @@
 #include "api/ops/helpers.h"
 #include "api/ops/internal.h"
 
+namespace {
+
+void dispatch_cast_variant(const at::Tensor& src, const at::Tensor& dst);
+
+} // namespace
+
 void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& dst)
+{
+    DeviceContext* device = get_device_context(dst);
+    if (device->shader_manager->canDispatch(ShaderKey{torchvulkan::Kernel::CAST, src.scalar_type(), dst.scalar_type()})) {
+        dispatch_cast_variant(src, dst);
+        return;
+    }
+    // an emulated dtype casts to and from float32 and int64 only, which hold its values exactly
+    at::Tensor mid = at::empty(src.sizes(), src.options().dtype(cast_bridge_dtype(src.scalar_type(), dst.scalar_type())).memory_format(at::MemoryFormat::Contiguous));
+    dispatch_cast_variant(src, mid);
+    dispatch_cast_variant(mid, dst);
+}
+
+namespace {
+
+void dispatch_cast_variant(const at::Tensor& src, const at::Tensor& dst)
 {
     at::TensorIterator iter = at::TensorIteratorConfig()
         .set_check_mem_overlap(true)
@@ -53,3 +74,5 @@ void torchvulkan::dispatch_cast_shader(const at::Tensor& src, const at::Tensor& 
         get_group_count(threads, workgroupSizeX), 1, 1
     );
 }
+
+} // namespace

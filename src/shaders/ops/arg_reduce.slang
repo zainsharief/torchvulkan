@@ -35,7 +35,6 @@ public void argReduceKernel<T : ITorchVulkan>(
     uint idx = flat_thread(gi, WG_x);
     if (idx >= num_lines || reduce_size == 0) return;
 
-    T* tensor_in = (T*)address_in;
     int64_t* tensor_out = (int64_t*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
@@ -46,14 +45,14 @@ public void argReduceKernel<T : ITorchVulkan>(
     var walker = IndexWalker(md.sizes, NDIM, idx);
     for (uint i = 0; i < NDIM; i++) idx_in += walker.next(i) * strides_in[i];
 
-    T best = tensor_in[idx_in];
+    T best = T.load(address_in, idx_in);
     uint best_idx = 0;
 
     for (uint j = 1; j < reduce_size; j++)
     {
         if (T.ext_isnan(best)) break;
 
-        T v = tensor_in[idx_in + j * reduce_stride];
+        T v = T.load(address_in, idx_in + j * reduce_stride);
         bool take;
 
         if (T.ext_isnan(v)) take = true;

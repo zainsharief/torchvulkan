@@ -207,15 +207,6 @@ torch.utils.generate_methods_for_privateuse1_backend(for_tensor=False)
 
 _C._record_storage_slice_deleter(torch.empty(0, dtype=torch.uint8).set_(torch.UntypedStorage(2)[0:1]))
 
-_tensor_totype = torch._tensor_str.tensor_totype
-
-def _vulkan_tensor_totype(t):
-    if t.device.type == "vulkan" and not get_device_properties(t.device).has_fp64:
-        return t.to(dtype=torch.float)
-    return _tensor_totype(t)
-
-torch._tensor_str.tensor_totype = _vulkan_tensor_totype
-
 def _rebuild_vulkan_tensor(cpu, device_index, requires_grad, is_parameter):
     tensor = cpu.to(torch.device("vulkan", device_index))
     if is_parameter:

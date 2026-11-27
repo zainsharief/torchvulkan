@@ -53,8 +53,6 @@ public void baseReduceKernel<T : ITorchVulkan, Op : IReduceOp<T>>(
     uint r_begin = (idx % split) * chunk;
     uint r_end = min(reduce_size, r_begin + chunk);
 
-    T* tensor_in = (T*)address_in;
-    T* tensor_out = (T*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_in = (uint*)md.strides_in;
@@ -64,10 +62,10 @@ public void baseReduceKernel<T : ITorchVulkan, Op : IReduceOp<T>>(
     var walker = IndexWalker(md.sizes, NDIM, out_idx);
     for (uint i = 0; i < NDIM; i++) idx_in += walker.next(i) * strides_in[i];
 
-    T acc = tensor_in[idx_in + r_begin * reduce_stride];
-    for (uint r = r_begin + 1; r < r_end; r++) acc = Op.combine(acc, tensor_in[idx_in + r * reduce_stride]);
+    T acc = T.load(address_in, idx_in + r_begin * reduce_stride);
+    for (uint r = r_begin + 1; r < r_end; r++) acc = Op.combine(acc, T.load(address_in, idx_in + r * reduce_stride));
 
-    tensor_out[idx] = acc;
+    T.store(address_out, idx, acc);
 }
 
 public void dispatchReduce<T : ITorchVulkan>(uint3 gi, ReducePushConstants pcs)

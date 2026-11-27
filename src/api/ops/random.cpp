@@ -99,7 +99,7 @@ void dispatch_random_shader(
 {
     if (self.numel() == 0) return;
 
-    bool supported = is_dtype_supported(self, self.scalar_type());
+    bool supported = can_dispatch(get_device_context(self), torchvulkan::Kernel::RANDOM, self.scalar_type());
     bool too_many_dims = self.dim() > MAX_DIMS || !fits_32bit_indexing({self});
     bool needs_contiguous = op == RandomOp::BERNOULLI_TENSOR && !self.is_contiguous();
     if (!supported || too_many_dims || needs_contiguous)
@@ -127,7 +127,7 @@ void dispatch_random_shader(
     }
 
     DeviceContext* device = get_device_context(self);
-    at::ScalarType real = random_real_dtype(self.scalar_type());
+    at::ScalarType real = random_real_dtype(get_device_context(self), self.scalar_type());
 
     at::TensorIterator iter = at::TensorIterator::borrowing_nullary_op(self);
     uint64_t numel = iter.numel();

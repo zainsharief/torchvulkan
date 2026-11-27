@@ -56,8 +56,6 @@ public void scanArgKernel<T : ITorchVulkan, let SMEM_SIZE : int>(
 {
     if (line >= num_lines || scan_size == 0) return;
 
-    T* tensor_in = (T*)address_in;
-    T* tensor_val = (T*)address_val;
     int64_t* tensor_idx = (int64_t*)address_idx;
 
     Metadata md = *(Metadata*)address_metadata;
@@ -86,7 +84,7 @@ public void scanArgKernel<T : ITorchVulkan, let SMEM_SIZE : int>(
 
         uint j = chunk_start + lane;
         ScanArgPair<T> value;
-        if (j < scan_size) { value.val = tensor_in[base_in + j * scan_stride_in]; value.idx = j; }
+        if (j < scan_size) { value.val = T.load(address_in, base_in + j * scan_stride_in); value.idx = j; }
         else { value.val = carry.val; value.idx = 0; }
         smem_val[lane] = value.val;
         smem_idx[lane] = value.idx;
@@ -112,7 +110,7 @@ public void scanArgKernel<T : ITorchVulkan, let SMEM_SIZE : int>(
             ScanArgPair<T> local;
             local.val = smem_val[lane]; local.idx = smem_idx[lane];
             ScanArgPair<T> result = combinePair<T>(carry, local);
-            tensor_val[base_out + j * scan_stride_out] = result.val;
+            T.store(address_val, base_out + j * scan_stride_out, result.val);
             tensor_idx[base_out + j * scan_stride_out] = int64_t(result.idx);
         }
 

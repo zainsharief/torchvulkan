@@ -53,19 +53,17 @@ public void sortKernel<T : ITorchVulkan>(uint3 gi, SortPushConstants pcs)
     uint idx = flat_thread(gi, WG_x);
     if (uint64_t(idx) >= pcs.threads) return;
 
-    T* keys_out = (T*)pcs.keys_out;
     int64_t* positions_out = (int64_t*)pcs.positions_out;
 
     if (MODE == 0)
     {
         uint line = idx / pcs.padded;
         uint p = idx % pcs.padded;
-        if (p < pcs.n) keys_out[idx] = ((T*)pcs.input)[uint64_t(line) * pcs.n + p];
+        if (p < pcs.n) T.store(pcs.keys_out, idx, T.load(pcs.input, uint64_t(line) * pcs.n + p));
         positions_out[idx] = int64_t(p);
         return;
     }
 
-    T* keys_in = (T*)pcs.keys_in;
     int64_t* positions_in = (int64_t*)pcs.positions_in;
 
     uint half_padded = pcs.padded / 2;
@@ -75,8 +73,8 @@ public void sortKernel<T : ITorchVulkan>(uint3 gi, SortPushConstants pcs)
     uint64_t a = uint64_t(line) * pcs.padded + i;
     uint64_t b = a + pcs.distance;
 
-    T key_a = keys_in[a];
-    T key_b = keys_in[b];
+    T key_a = T.load(pcs.keys_in, a);
+    T key_b = T.load(pcs.keys_in, b);
     int64_t pos_a = positions_in[a];
     int64_t pos_b = positions_in[b];
 
@@ -84,8 +82,8 @@ public void sortKernel<T : ITorchVulkan>(uint3 gi, SortPushConstants pcs)
     bool forwards = (i & pcs.block) == 0;
     bool swap = forwards ? sortsBefore<T>(key_b, pos_b, key_a, pos_a, pcs.n) : sortsBefore<T>(key_a, pos_a, key_b, pos_b, pcs.n);
 
-    keys_out[a] = swap ? key_b : key_a;
-    keys_out[b] = swap ? key_a : key_b;
+    T.store(pcs.keys_out, a, swap ? key_b : key_a);
+    T.store(pcs.keys_out, b, swap ? key_a : key_b);
     positions_out[a] = swap ? pos_b : pos_a;
     positions_out[b] = swap ? pos_a : pos_b;
 }

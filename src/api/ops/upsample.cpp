@@ -84,7 +84,7 @@ bool is_aa(ResampleMode mode) { return mode == ResampleMode::AA_LINEAR || mode =
 
 at::ScalarType compute_dtype(const at::Tensor& self)
 {
-    return (self.scalar_type() == at::kDouble && is_dtype_supported(self, at::kDouble)) ? at::kDouble : at::kFloat;
+    return (self.scalar_type() == at::kDouble && can_dispatch(get_device_context(self), torchvulkan::Kernel::RESAMPLE, at::kDouble)) ? at::kDouble : at::kFloat;
 }
 
 // quantized to int16 as ATen's _compute_index_ranges_int16_weights
@@ -207,7 +207,7 @@ void dispatch_resample_u8_shader(const at::Tensor& input, const at::Tensor& outp
        .push(static_cast<uint32_t>(t.precision));
 
     device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::RESAMPLE_U8, at::kByte},
+        ShaderKey{torchvulkan::Kernel::RESAMPLE_U8, at::kByte, at::kShort},
         device->default_subgroup_size,
         spd.build(),
         pcs.build(),

@@ -66,7 +66,7 @@ std::optional<at::Tensor> dispatch_binary_shader(
     c10::ScalarType promoted_type)
 {
     DeviceContext* device = get_device_context(self);
-    if (!is_dtype_supported(device, promoted_type)) return std::nullopt;
+    if (!can_dispatch(device, torchvulkan::Kernel::BINARY, promoted_type)) return std::nullopt;
 
     bool use_scalar = !other.defined();
     at::Tensor a = self.to(promoted_type);
@@ -135,8 +135,7 @@ bool fits_dtype(const at::Scalar& s, at::ScalarType dtype)
     if (s.isComplex() || !s.isFloatingPoint()) return true;
     double v = s.toDouble();
     if (!std::isfinite(v)) return true;
-    double limit = dtype == at::kHalf ? 65504.0 : 3.3895313892515355e38;
-    return std::abs(v) <= limit;
+    return std::abs(v) <= get_dtype_limits(dtype).second;
 }
 
 torchvulkan::ComplexParts complex_pow(const torchvulkan::ComplexParts& base, const torchvulkan::ComplexParts& exponent)
@@ -712,7 +711,7 @@ std::optional<at::Tensor> dispatch_addc_shader(const at::Tensor& self, const at:
                                                bool divide, at::ScalarType dtype)
 {
     DeviceContext* device = get_device_context(self.is_privateuseone() ? self : tensor1.is_privateuseone() ? tensor1 : tensor2);
-    if (!is_dtype_supported(device, dtype)) return std::nullopt;
+    if (!can_dispatch(device, torchvulkan::Kernel::ADDC, dtype)) return std::nullopt;
     at::Device where = self.is_privateuseone() ? self.device() : tensor1.is_privateuseone() ? tensor1.device() : tensor2.device();
     at::Tensor s = self.to(where, dtype), a = tensor1.to(where, dtype), b = tensor2.to(where, dtype);
     at::Tensor out = at::empty(at::infer_size(at::infer_size(s.sizes(), a.sizes()), b.sizes()), s.options());

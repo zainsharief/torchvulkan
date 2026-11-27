@@ -76,11 +76,6 @@ bool dispatch_compare_shader(
     c10::ScalarType promoted)
 {
     if (at::isComplexType(promoted)) return compare_complex(self, other, scalar_value, out, op, promoted);
-    // float8 values compare as float32, which holds them exactly
-    if (c10::isFloat8Type(promoted)) {
-        at::Tensor rhs = other == nullptr ? at::Tensor() : other->to(at::kFloat);
-        return dispatch_compare_shader(self.to(at::kFloat), other == nullptr ? nullptr : &rhs, scalar_value, out, op, at::kFloat);
-    }
     // bools compare as 0/1 whatever their bytes (the logical ops already test for nonzero)
     if (promoted == at::kBool && op != CompareOp::LAND && op != CompareOp::LOR && op != CompareOp::LXOR) {
         auto as_bits = [](const at::Tensor& t) { return t.scalar_type() == at::kBool && t.is_privateuseone() ? normalize_bool(t).view(at::kByte) : t.to(at::kByte); };
@@ -95,7 +90,7 @@ bool dispatch_compare_shader(
         return dispatch_compare_shader(self.view(at::kByte), &rhs, scalar_value, out, op, at::kByte);
     }
     DeviceContext* device = get_device_context(self);
-    if (!is_dtype_supported(device, promoted)) return false;
+    if (!can_dispatch(device, torchvulkan::Kernel::COMPARE, promoted, at::kBool)) return false;
     bool use_scalar = (other == nullptr);
 
     at::Tensor a = self.to(promoted);
@@ -138,7 +133,7 @@ bool dispatch_compare_shader(
 
     uint64_t threads = contiguous ? (numel + (vecSize - 1)) / vecSize : numel;
     device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::COMPARE, promoted},
+        ShaderKey{torchvulkan::Kernel::COMPARE, promoted, at::kBool},
         device->default_subgroup_size,
         spd.build(),
         pcs.build(),
@@ -188,7 +183,7 @@ at::Tensor where_vulkan(
 
     DeviceContext* context = get_device_context(out);
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
-    if (!is_dtype_supported(context, promoted) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
+    if (!can_dispatch(context, torchvulkan::Kernel::WHERE, promoted, at::kBool) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
         TORCHVULKAN_FALLBACK("A where on ", promoted, " can't run on the Vulkan device. Falling back to CPU.");
         return at::where(c.cpu(), a.cpu(), b.cpu()).to(device);
     }
@@ -213,7 +208,7 @@ at::Tensor where_vulkan(
        .push(numel);
 
     context->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::WHERE, promoted},
+        ShaderKey{torchvulkan::Kernel::WHERE, promoted, at::kBool},
         context->default_subgroup_size,
         spd.build(),
         pcs.build(),

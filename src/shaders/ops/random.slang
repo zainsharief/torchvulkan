@@ -139,7 +139,6 @@ public void baseRandomKernel<T : IRandomDtype, Op : IRandomOp<T>, let VEC_SIZE :
     if (first >= pcs.numel) return;
 
     var stream = RandomStream<T.Real>(pcs.seed, pcs.offset, stream_id);
-    T* tensor = (T*)pcs.tensor;
 
     for (int k = 0; k < VEC_SIZE; k++)
     {
@@ -150,7 +149,7 @@ public void baseRandomKernel<T : IRandomDtype, Op : IRandomOp<T>, let VEC_SIZE :
 
         if (IS_CONTIG != 0)
         {
-            tensor[element] = value;
+            T.store(pcs.tensor, element, value);
             continue;
         }
 
@@ -159,7 +158,7 @@ public void baseRandomKernel<T : IRandomDtype, Op : IRandomOp<T>, let VEC_SIZE :
         uint index = 0;
         var walker = IndexWalker(md.sizes, NDIM, element);
         for (uint i = 0; i < NDIM; i++) index += walker.next(i) * strides[i];
-        tensor[index] = value;
+        T.store(pcs.tensor, index, value);
     }
 }
 

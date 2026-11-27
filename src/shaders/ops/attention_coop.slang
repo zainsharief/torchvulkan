@@ -56,7 +56,7 @@ bool isMasked(uint row, uint key, uint L, uint S)
 }
 
 void loadBlock<T : ITorchVulkan & ICoopElement>(
-    uint t, T* src, uint base, uint row_stride, uint r0, uint rows, uint count, uint width, uint padded, uint off, uint stride)
+    uint t, T* src, uint base, uint row_stride, uint r0, uint rows, uint count, uint width, uint padded, uint off, uint stride) where T.Accum : __BuiltinArithmeticType
 {
     for (uint i = t; i < count * padded; i += WG)
     {
@@ -68,7 +68,7 @@ void loadBlock<T : ITorchVulkan & ICoopElement>(
     }
 }
 
-void attentionCoop<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionPushConstants pcs)
+void attentionCoop<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
 
@@ -252,7 +252,7 @@ BackwardLayout backwardLayout()
     return m;
 }
 
-void scoreProducts<T : ITorchVulkan & ICoopElement>(uint warp, BackwardLayout m)
+void scoreProducts<T : ITorchVulkan & ICoopElement>(uint warp, BackwardLayout m) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     uint blocks_c = BC / BLOCK_SIZE;
@@ -280,7 +280,7 @@ void scoreProducts<T : ITorchVulkan & ICoopElement>(uint warp, BackwardLayout m)
     }
 }
 
-void scoreGradients<T : ITorchVulkan & ICoopElement>(uint t, uint b, uint h, uint r0, uint c0, AttentionBackwardPushConstants pcs, BackwardLayout m)
+void scoreGradients<T : ITorchVulkan & ICoopElement>(uint t, uint b, uint h, uint r0, uint c0, AttentionBackwardPushConstants pcs, BackwardLayout m) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     A scale = A.castFromF32(pcs.scale);
@@ -305,7 +305,7 @@ void scoreGradients<T : ITorchVulkan & ICoopElement>(uint t, uint b, uint h, uin
     }
 }
 
-void loadRowStats<T : ITorchVulkan & ICoopElement>(uint t, uint base, uint r0, AttentionBackwardPushConstants pcs, BackwardLayout m)
+void loadRowStats<T : ITorchVulkan & ICoopElement>(uint t, uint base, uint r0, AttentionBackwardPushConstants pcs, BackwardLayout m) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     for (uint r = t; r < BR; r += WG)
@@ -318,7 +318,7 @@ void loadRowStats<T : ITorchVulkan & ICoopElement>(uint t, uint base, uint r0, A
 
 void storeGradient<T : ITorchVulkan & ICoopElement>(
     bool live, uint lane, uint warp, Accumulator<T.Accum> acc, T* dst, uint base, uint row0, uint rows, uint col0, uint width, T.Accum scale,
-    BackwardLayout m)
+    BackwardLayout m) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     uint scratch = m.scratch_off + warp * BLOCK_SIZE * BLOCK_SIZE;
@@ -333,7 +333,7 @@ void storeGradient<T : ITorchVulkan & ICoopElement>(
     GroupMemoryBarrierWithWaveSync();
 }
 
-void attentionCoopBackwardKV<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionBackwardPushConstants pcs)
+void attentionCoopBackwardKV<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionBackwardPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     BackwardLayout m = backwardLayout();
@@ -418,7 +418,7 @@ void attentionCoopBackwardKV<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, 
     }
 }
 
-void attentionCoopBackwardQ<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionBackwardPushConstants pcs)
+void attentionCoopBackwardQ<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, AttentionBackwardPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     BackwardLayout m = backwardLayout();
@@ -489,7 +489,7 @@ void attentionCoopBackwardQ<T : ITorchVulkan & ICoopElement>(uint3 wg, uint t, A
 void attention_coop_backward_main<T : ITorchVulkan & ICoopElement>(
     uint3 wg : SV_GroupID,
     uint t : SV_GroupIndex,
-    uniform AttentionBackwardPushConstants pcs)
+    uniform AttentionBackwardPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     if (MODE == 1) attentionCoopBackwardKV<T>(wg, t, pcs);
     else attentionCoopBackwardQ<T>(wg, t, pcs);
@@ -500,7 +500,7 @@ void attention_coop_backward_main<T : ITorchVulkan & ICoopElement>(
 void attention_coop_main<T : ITorchVulkan & ICoopElement>(
     uint3 wg : SV_GroupID,
     uint t : SV_GroupIndex,
-    uniform AttentionPushConstants pcs)
+    uniform AttentionPushConstants pcs) where T.Accum : __BuiltinArithmeticType
 {
     attentionCoop<T>(wg, t, pcs);
 }

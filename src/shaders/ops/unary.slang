@@ -36,26 +36,22 @@ public void baseUnaryKernel<T : ITorchVulkan, Op : IUnaryOp<T>, let VEC_SIZE : i
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        T* tensor_in = (T*)address_in;
-        T* tensor_out = (T*)address_out;
 
         T v[VEC_SIZE];
-        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) v[k] = tensor_in[idx * VEC_SIZE + k];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) v[k] = T.load(address_in, idx * VEC_SIZE + k);
 
         T res[VEC_SIZE];
         [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) res[k] = Op.eval(v[k]);
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
-        for (uint i = 0; i < count; i++) tensor_out[idx * VEC_SIZE + i] = res[i];
+        uint count = (remainder >= VEC_SIZE) ? VEC_SIZE : uint(remainder);
+        T.storeVec<VEC_SIZE>(address_out, idx * VEC_SIZE, res, count);
 
         return;
     }
 
     if (idx >= numel) return;
 
-    T* tensor_in = (T*)address_in;
-    T* tensor_out = (T*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_in = (uint*)md.strides_in;
@@ -72,7 +68,7 @@ public void baseUnaryKernel<T : ITorchVulkan, Op : IUnaryOp<T>, let VEC_SIZE : i
         idx_out += coord * strides_out[i];
     }
 
-    tensor_out[idx_out] = Op.eval(tensor_in[idx_in]);
+    T.store(address_out, idx_out, Op.eval(T.load(address_in, idx_in)));
 }
 
 public void dispatchUnary<T : ITorchVulkan, let VEC_SIZE : int>(uint3 gi, UnaryPushConstants pcs)
