@@ -264,6 +264,9 @@ KERNELS = [
     Kernel('attention_coop', 'ops/attention_coop.slang', [
         Entry('attention_coop_main', FLOATS),
     ], coop_dims=(11, 1009)), # BLOCK_SIZE, COOP_DIM in attention_coop.slang
+    Kernel('attention_warp', 'ops/attention_warp.slang', [
+        Entry('attention_warp_main', FLOATS),
+    ], coop_dims=(10, 1009)), # BLOCK_SIZE, COOP_DIM in attention_warp.slang
     Kernel('attention_coop_backward', 'ops/attention_coop.slang', [
         Entry('attention_coop_backward_main', FLOATS),
     ], coop_dims=(11, 1009)),
