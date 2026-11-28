@@ -60,7 +60,8 @@ enum class UnaryOp {
     I0E = 45,
     I1E = 46,
     GELU = 47,
-    GELU_TANH = 48
+    GELU_TANH = 48,
+    SILU = 49
 };
 
 enum class ComplexArcOp : uint32_t
@@ -228,6 +229,12 @@ at::Tensor gelu_vulkan(const at::Tensor& self, c10::string_view approximate)
     auto fallback = [approximate](const at::Tensor& a) { return at::gelu(a, approximate); };
     if (!self.is_floating_point() || (approximate != "none" && approximate != "tanh")) return fallback(self.cpu()).to(self.device());
     return unary_op_vulkan(self, approximate == "tanh" ? UnaryOp::GELU_TANH : UnaryOp::GELU, fallback);
+}
+
+at::Tensor silu_vulkan(const at::Tensor& self)
+{
+    if (!self.is_floating_point()) return at::mul(self, at::sigmoid(self));
+    return unary_op_vulkan(self, UnaryOp::SILU, [](const at::Tensor& a) { return at::silu(a); });
 }
 
 at::Tensor relu_vulkan(const at::Tensor& self)
@@ -561,6 +568,7 @@ at::Tensor& log_ndtr_out_vulkan(const at::Tensor& self, at::Tensor& out) { retur
 at::Tensor& i0e_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, [&] { return i0e_vulkan(self); }); }
 at::Tensor& i1e_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, [&] { return i1e_vulkan(self); }); }
 at::Tensor& gelu_out_vulkan(const at::Tensor& self, c10::string_view approximate, at::Tensor& out) { return fill_out(out, [&] { return gelu_vulkan(self, approximate); }); }
+at::Tensor& silu_out_vulkan(const at::Tensor& self, at::Tensor& out) { return fill_out(out, [&] { return silu_vulkan(self); }); }
 
 } // namespace
 
@@ -568,6 +576,8 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("relu", &relu_vulkan);
     m.impl("gelu", &gelu_vulkan);
     m.impl("gelu.out", &gelu_out_vulkan);
+    m.impl("silu", &silu_vulkan);
+    m.impl("silu.out", &silu_out_vulkan);
     m.impl("exp", &exp_vulkan);
     m.impl("log", &log_vulkan);
     m.impl("sqrt", &sqrt_vulkan);

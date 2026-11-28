@@ -124,6 +124,7 @@ public void dispatchUnary<T : ITorchVulkan, let VEC_SIZE : int>(uint3 gi, UnaryP
     case 46: baseUnaryKernel<T, I1eOp<T>, VEC_SIZE>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel); break;
     case 47: baseUnaryKernel<T, GeluOp<T>, VEC_SIZE>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel); break;
     case 48: baseUnaryKernel<T, GeluTanhOp<T>, VEC_SIZE>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel); break;
+    case 49: baseUnaryKernel<T, SiluOp<T>, VEC_SIZE>(gi, pcs.tensor_in, pcs.tensor_out, pcs.metadata, pcs.numel); break;
     default: break;
     }
 }

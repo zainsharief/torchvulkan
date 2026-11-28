@@ -436,12 +436,6 @@ at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntAr
     return result.is_same(self) ? self.clone() : result;
 }
 
-at::Tensor silu_vulkan(const at::Tensor& self)
-{
-    if (is_low_prec(self.scalar_type())) return silu_vulkan(self.to(at::kFloat)).to(self.scalar_type());
-    return at::mul(self, at::sigmoid(self));
-}
-
 at::Tensor hardtanh_vulkan(const at::Tensor& self, const at::Scalar& min_val, const at::Scalar& max_val)
 {
     // keeps an integer dtype: the bounds truncate to integers
@@ -1262,11 +1256,6 @@ at::Tensor& mish_out_vulkan(const at::Tensor& self, at::Tensor& out)
     return fill_out(out, mish_vulkan(self));
 }
 
-at::Tensor& silu_out_vulkan(const at::Tensor& self, at::Tensor& out)
-{
-    return fill_out(out, silu_vulkan(self));
-}
-
 at::Tensor& softplus_out_vulkan(const at::Tensor& self, const at::Scalar& beta, const at::Scalar& threshold, at::Tensor& out)
 {
     return fill_out(out, softplus_vulkan(self, beta, threshold));
@@ -1525,7 +1514,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("tril_indices", &tril_indices_vulkan);
     m.impl("triu_indices", &triu_indices_vulkan);
     m.impl("logit", &logit_vulkan);
-    m.impl("silu", &silu_vulkan);
     m.impl("hardtanh", &hardtanh_vulkan);
     m.impl("hardsigmoid", &hardsigmoid_vulkan);
     m.impl("hardswish", &hardswish_vulkan);
@@ -1621,7 +1609,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("logit.out", &logit_out_vulkan);
     m.impl("logit_", &logit_vulkan_);
     m.impl("mish.out", &mish_out_vulkan);
-    m.impl("silu.out", &silu_out_vulkan);
     m.impl("softplus.out", &softplus_out_vulkan);
     m.impl("norm.dtype_out", &norm_dtype_out_vulkan);
     m.impl("var.correction_out", &var_correction_out_vulkan);
