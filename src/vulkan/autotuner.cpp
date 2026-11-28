@@ -174,21 +174,20 @@ size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vec
     {
         double ms = std::numeric_limits<double>::infinity();
         try {
-            auto warm = std::chrono::steady_clock::now();
+            // the first run compiles the path's pipelines and tunes its own kernels (a float32 path tunes float32's), so
+            // it isn't timed; the second is, and a path far behind the best so far stops there
             paths[i].run();
             device->flush();
-            double warm_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - warm).count();
-            // a path whose first run (with its compiles and its own tuning) is far behind the best isn't timed further
-            if (warm_ms > FULL_TIMING_FACTOR * best_ms) {
-                if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " dropped after one run, " << warm_ms << " ms\n";
-                continue;
-            }
             for (int r = 0; r < 3; r++)
             {
                 const auto start = std::chrono::steady_clock::now();
                 paths[i].run();
                 device->flush();
                 ms = std::min(ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+                if (r == 0 && ms > FULL_TIMING_FACTOR * best_ms) {
+                    if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " dropped after one timed run, " << ms << " ms\n";
+                    break;
+                }
             }
         } catch (const c10::Error& e) {
             // a path that can't run this shape (a limit, out of memory) drops out of the choice
@@ -196,7 +195,7 @@ size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vec
             if (!failure) failure = e;
             continue;
         }
-        if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " " << ms << " ms\n";
+        if (log_ && std::isfinite(ms)) std::cerr << "torchvulkan tune: path " << paths[i].name << " " << ms << " ms\n";
         if (ms < best_ms) { best_ms = ms; best = i; }
     }
     if (!std::isfinite(best_ms)) throw *failure;
