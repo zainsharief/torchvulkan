@@ -3,10 +3,14 @@
 #include <c10/util/accumulate.h>
 #include <algorithm>
 #include <array>
+#include <limits>
+#include <cstring>
+#include <functional>
 #include <tuple>
 #include <vector>
 #include "vulkan/vulkan_context.h"
 #include "api/ops/helpers.h"
+#include "vulkan/autotuner.h"
 
 namespace {
 
@@ -1085,6 +1089,99 @@ at::MemoryFormat conv_memory_format(const at::Tensor& input, const at::Tensor& w
     return at::MemoryFormat::Contiguous;
 }
 
+// Path choice: a convolution can run on its dtype's direct kernel, on the matmul composites, or, for a 16-bit float,
+// as float32 (whose direct kernel exists where the 16-bit type's doesn't, e.g. bfloat16 emulated on RDNA3). The
+// tuner times the candidates once per shape and keeps the fastest.
+
+// Timing a path runs it four times, so a large alternative is only worth offering where it can win: the composites on
+// small unfolds (1x1 kernels, small images), float32 on small operands. Big layers keep their direct kernel.
+constexpr uint64_t COMPOSITE_ALTERNATIVE_BYTES = 256ull << 20;
+constexpr uint64_t FLOAT32_ALTERNATIVE_BYTES = 64ull << 20;
+
+// device memory a path can still allocate: free, plus what the allocator caches but nothing uses
+uint64_t available_memory(DeviceContext* device)
+{
+    uint64_t reserved = device->reservedBytes();
+    uint64_t allocated = device->allocated_bytes.load();
+    return device->memoryFree() + (reserved > allocated ? reserved - allocated : 0);
+}
+
+// float32 copies of the operands (and roughly as much again for the result) should fit in available memory; where
+// nothing else can run the op (no direct kernel, composites past their limits) it is offered regardless
+bool float32_path_fits(DeviceContext* device, at::ScalarType dtype, std::initializer_list<at::Tensor> operands, bool only_way)
+{
+    if (!is_low_prec(dtype) || !can_dispatch(device, torchvulkan::Kernel::CONV_SIMD, at::kFloat)) return false;
+    if (only_way) return true;
+    uint64_t bytes = 0;
+    for (const at::Tensor& t : operands) bytes += static_cast<uint64_t>(t.numel()) * sizeof(float);
+    // next to the dtype's own direct kernel only small operands are worth timing
+    bool own_direct = can_dispatch(device, torchvulkan::Kernel::CONV_SIMD, dtype);
+    if (own_direct && bytes > FLOAT32_ALTERNATIVE_BYTES) return false;
+    return 2 * bytes < available_memory(device);
+}
+
+// The composites unfold the input (im2col) or the columns of the output (col2im): input or output positions times
+// channels times kernel taps, in float32 for 16-bit floats. Offered next to a direct kernel only when that fits the
+// copy shader's 32-bit indexing and, twice over, free device memory (a VAE's large layers would not).
+bool composite_fits(DeviceContext* device, const at::Tensor& input, const at::Tensor& weight, const ConvGeometry& g, bool transposed, int64_t groups)
+{
+    int64_t taps = 1;
+    for (int64_t k : g.kernel) taps *= k;
+    int64_t positions = 1;
+    for (int64_t d = 2; d < input.dim(); d++) positions *= input.size(d);
+    // the output has about as many positions as the input divided by the stride's product (times it, transposed)
+    int64_t stride = 1;
+    for (int64_t s : g.stride) stride *= s;
+    int64_t channels = transposed ? weight.size(1) * groups : input.size(1);
+    int64_t cols_positions = transposed ? positions : std::max<int64_t>(positions / std::max<int64_t>(stride, 1), 1);
+    uint64_t elements = static_cast<uint64_t>(input.size(0)) * channels * taps * cols_positions;
+    if (transposed) elements *= static_cast<uint64_t>(std::max<int64_t>(stride, 1));
+    if (elements > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) return false;
+    return 2 * elements * sizeof(float) < available_memory(device);
+}
+
+uint64_t unfold_bytes(const at::Tensor& input, const at::Tensor& weight, const ConvGeometry& g, bool transposed, int64_t groups)
+{
+    int64_t taps = 1;
+    for (int64_t k : g.kernel) taps *= k;
+    int64_t positions = 1;
+    for (int64_t d = 2; d < input.dim(); d++) positions *= input.size(d);
+    int64_t stride = 1;
+    for (int64_t s : g.stride) stride *= s;
+    int64_t channels = transposed ? weight.size(1) * groups : input.size(1);
+    uint64_t cols = transposed ? static_cast<uint64_t>(positions) * std::max<int64_t>(stride, 1)
+                               : static_cast<uint64_t>(std::max<int64_t>(positions / std::max<int64_t>(stride, 1), 1));
+    return static_cast<uint64_t>(input.size(0)) * channels * taps * cols * sizeof(float);
+}
+
+// the shader whose binary keys a path choice, so a rebuilt kernel times the choice again
+ShaderKey conv_path_shader(DeviceContext* device, at::ScalarType dtype)
+{
+    bool own = can_dispatch(device, torchvulkan::Kernel::CONV_SIMD, dtype);
+    return ShaderKey{torchvulkan::Kernel::CONV_SIMD, own ? dtype : at::kFloat};
+}
+
+uint64_t conv_path_key(uint64_t mode, const at::Tensor& input, const at::Tensor& weight, bool has_bias, const std::vector<int64_t>& stride,
+    const std::vector<int64_t>& padding, const std::vector<int64_t>& dilation, bool transposed, const std::vector<int64_t>& output_padding,
+    int64_t groups, size_t candidates)
+{
+    // FNV-1a over everything that changes the work
+    uint64_t h = 0xcbf29ce484222325ull;
+    auto mix = [&](int64_t v) { for (int i = 0; i < 8; i++) { h ^= static_cast<uint64_t>(v >> (8 * i)) & 0xff; h *= 0x100000001b3ull; } };
+    mix(static_cast<int64_t>(mode));
+    for (int64_t v : input.sizes()) mix(v);
+    mix(-1);
+    for (int64_t v : weight.sizes()) mix(v);
+    for (const std::vector<int64_t>* list : {&stride, &padding, &dilation, &output_padding}) { mix(-2); for (int64_t v : *list) mix(v); }
+    mix(groups);
+    mix(transposed);
+    mix(has_bias);
+    mix(static_cast<int64_t>(weight.scalar_type()));
+    mix(static_cast<int64_t>(input.scalar_type()));
+    mix(static_cast<int64_t>(candidates));
+    return h;
+}
+
 at::Tensor convolution_vulkan(
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -1108,21 +1205,52 @@ at::Tensor convolution_vulkan(
     at::Tensor b = bias.has_value() && bias->defined() ? bias->to(x.scalar_type()).contiguous() : at::Tensor();
     ConvProblem p = transposed ? transposed_problem(xc, w, g, groups, output_size) : forward_problem(xc, w, g, groups);
     at::MemoryFormat format = conv_memory_format(input, weight);
-    if (implicit_gemm_supported(p, {xc, w, b})) {
-        return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format);
-    }
-
-    // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
     at::ScalarType dtype = x.scalar_type();
-    bool upcast = is_low_prec(dtype);
-    at::Tensor xa = upcast ? x.to(at::kFloat) : x;
-    at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
-    c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
-    at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
-    return add_bias(output, ba).to(dtype).contiguous(format);
+    DeviceContext* device = get_device_context(weight);
+
+    std::vector<std::function<at::Tensor()>> runs;
+    std::vector<const char*> names;
+    if (implicit_gemm_supported(p, {xc, w, b})) {
+        names.push_back("direct");
+        runs.push_back([&]() { return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format); });
+    }
+    bool composite_ok = composite_fits(device, x, weight, g, transposed, groups) &&
+        (runs.empty() || unfold_bytes(x, weight, g, transposed, groups) <= COMPOSITE_ALTERNATIVE_BYTES);
+    bool float32_ok = float32_path_fits(device, dtype, {x, weight}, runs.empty() && !composite_ok);
+    if (composite_ok || (runs.empty() && !float32_ok)) {
+        names.push_back("composite");
+        runs.push_back([&]() {
+            // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
+            bool upcast = is_low_prec(dtype);
+            at::Tensor xa = upcast ? x.to(at::kFloat) : x;
+            at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
+            c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
+            at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
+            return add_bias(output, ba).to(dtype).contiguous(format);
+        });
+    }
+    if (float32_ok) {
+        // float32's own paths (its direct kernel where the 16-bit type has none), rounded once at the end
+        names.push_back("float32");
+        runs.push_back([&]() {
+            c10::optional<at::Tensor> b32 = b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : c10::optional<at::Tensor>();
+            return convolution_vulkan(x.to(at::kFloat), weight.to(at::kFloat), b32, stride_, padding_, dilation_, transposed,
+                output_padding_, groups_).to(dtype).contiguous(format);
+        });
+    }
+    if (runs.size() == 1) return runs[0]();
+
+    at::Tensor out;
+    std::vector<TunePath> paths;
+    for (size_t i = 0; i < runs.size(); i++) paths.push_back({names[i], [&, i]() { out = runs[i](); }});
+    uint64_t key = conv_path_key(0, input, weight, b.defined(), to_ints(stride_), to_ints(padding_), to_ints(dilation_), transposed,
+        to_ints(output_padding_), groups, names.size());
+    size_t chosen = device->tuner->choosePath(conv_path_shader(device, dtype), key, paths);
+    return runs[chosen]();
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
+// the backward through the direct (implicit GEMM) kernels where they apply and `allow_direct`, the composites otherwise
+std::tuple<at::Tensor, at::Tensor, at::Tensor> conv_backward_paths(
     const at::Tensor& grad_output,
     const at::Tensor& input,
     const at::Tensor& weight,
@@ -1132,7 +1260,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
     bool transposed,
     c10::SymIntArrayRef output_padding_,
     c10::SymInt groups_,
-    std::array<bool, 3> output_mask)
+    std::array<bool, 3> output_mask,
+    bool allow_direct)
 {
     int64_t groups = groups_.guard_int(__FILE__, __LINE__);
     std::vector<int64_t> kernel = spatial_kernel(weight);
@@ -1150,7 +1279,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
     ConvProblem p = transposed ? transposed_problem(in, w, g, groups, grad_spatial) : forward_problem(in, w, g, groups, grad_spatial);
     const at::Tensor& x = transposed ? go : in;
     const at::Tensor& y = transposed ? in : go;
-    if (implicit_gemm_supported(p, {x, w, y})) {
+    if (allow_direct && implicit_gemm_supported(p, {x, w, y})) {
         if (output_mask[0]) grad_input = transposed ? implicit_forward(p, go, w, at::Tensor()) : implicit_grad_input(p, go, w, at::Tensor());
         if (output_mask[1]) grad_weight = implicit_grad_weight(p, x, y, weight.sizes());
     }
@@ -1175,6 +1304,70 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
     if (grad_input.defined()) grad_input = grad_input.contiguous(format);
     if (grad_weight.defined()) grad_weight = grad_weight.contiguous(format);
     return std::make_tuple(grad_input, grad_weight, grad_bias);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
+    const at::Tensor& grad_output,
+    const at::Tensor& input,
+    const at::Tensor& weight,
+    c10::SymIntArrayRef stride_,
+    c10::SymIntArrayRef padding_,
+    c10::SymIntArrayRef dilation_,
+    bool transposed,
+    c10::SymIntArrayRef output_padding_,
+    c10::SymInt groups_,
+    std::array<bool, 3> output_mask)
+{
+    int64_t groups = groups_.guard_int(__FILE__, __LINE__);
+    std::vector<int64_t> kernel = spatial_kernel(weight);
+    ConvGeometry g = make_geometry(kernel, to_ints(stride_), to_ints(padding_), to_ints(dilation_));
+    at::Tensor go = grad_output.contiguous();
+    at::Tensor in = input.contiguous();
+    at::Tensor w = weight.contiguous();
+    std::vector<int64_t> grad_spatial(go.sizes().begin() + 2, go.sizes().end());
+    ConvProblem p = transposed ? transposed_problem(in, w, g, groups, grad_spatial) : forward_problem(in, w, g, groups, grad_spatial);
+    at::ScalarType dtype = weight.scalar_type();
+    DeviceContext* device = get_device_context(weight);
+    using Grads = std::tuple<at::Tensor, at::Tensor, at::Tensor>;
+    auto backward = [&](bool allow_direct) {
+        return conv_backward_paths(grad_output, input, weight, stride_, padding_, dilation_, transposed, output_padding_, groups_,
+            output_mask, allow_direct);
+    };
+
+    std::vector<std::function<Grads()>> runs;
+    std::vector<const char*> names;
+    if (implicit_gemm_supported(p, {transposed ? go : in, w, transposed ? in : go})) {
+        names.push_back("direct");
+        runs.push_back([&]() { return backward(true); });
+    }
+    bool composite_ok = composite_fits(device, input, weight, g, transposed, groups) &&
+        (runs.empty() || unfold_bytes(input, weight, g, transposed, groups) <= COMPOSITE_ALTERNATIVE_BYTES);
+    bool float32_ok = float32_path_fits(device, dtype, {grad_output, input, weight}, runs.empty() && !composite_ok);
+    if (composite_ok || (runs.empty() && !float32_ok)) {
+        names.push_back("composite");
+        runs.push_back([&]() { return backward(false); });
+    }
+    if (float32_ok) {
+        names.push_back("float32");
+        runs.push_back([&]() {
+            auto [gi, gw, gb] = convolution_backward_vulkan(grad_output.to(at::kFloat), input.to(at::kFloat), weight.to(at::kFloat),
+                stride_, padding_, dilation_, transposed, output_padding_, groups_, output_mask);
+            if (gi.defined()) gi = gi.to(input.scalar_type());
+            if (gw.defined()) gw = gw.to(weight.scalar_type());
+            if (gb.defined()) gb = gb.to(grad_output.scalar_type());
+            return Grads{gi, gw, gb};
+        });
+    }
+    if (runs.size() == 1) return runs[0]();
+
+    Grads out;
+    std::vector<TunePath> paths;
+    for (size_t i = 0; i < runs.size(); i++) paths.push_back({names[i], [&, i]() { out = runs[i](); }});
+    uint64_t mode = 1 | (uint64_t(output_mask[0]) << 1) | (uint64_t(output_mask[1]) << 2) | (uint64_t(output_mask[2]) << 3);
+    uint64_t key = conv_path_key(mode, input, weight, false, to_ints(stride_), to_ints(padding_), to_ints(dilation_), transposed,
+        to_ints(output_padding_), groups, names.size());
+    size_t chosen = device->tuner->choosePath(conv_path_shader(device, dtype), key, paths);
+    return runs[chosen]();
 }
 
 // the direct slow/depthwise convolution ops, with the CPU's kernel_size check

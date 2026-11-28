@@ -235,3 +235,5 @@ def _register_multiprocessing_reducer():
         ForkingPickler.register(cls, reduce_tensor)
 
 _register_multiprocessing_reducer()
+
+from . import tuning  # noqa: E402  (torchvulkan.tuning: re-time or forget the autotuner's cached results)
