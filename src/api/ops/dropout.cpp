@@ -51,7 +51,7 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
         .push(seed)
         .push(offset)
         .push(random_real_bits(keep_prob, real))
-        .push(random_real_bits(scale, real));
+        .push_scalar(scale, reduce_accumulate_dtype(src.scalar_type()));
     PushConstants pushConstants = pcs.build();
 
     uint64_t threads = (numel + vecSize - 1) / vecSize;
