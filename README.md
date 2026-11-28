@@ -186,6 +186,7 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | `TORCHVULKAN_CACHE_DIR` | Directory for the pipeline cache. |
 | `TORCHVULKAN_TUNE_BUDGET_S` | Seconds the autotuner may spend searching for one operation's fastest kernel configuration before it settles for the best found so far (default `20`; `0` for no limit). |
 | `TORCHVULKAN_TUNE_LOG=1` | Print each configuration the autotuner times and the one it chooses. |
+| `TORCHVULKAN_EMULATE=1` | Run every dtype the device supports natively but torchvulkan can also emulate (`float16`, `bfloat16`, the 8- and 16-bit integers and `bool`) as its emulated type, as on devices without them. For testing. |
 
 ## Limitations
 

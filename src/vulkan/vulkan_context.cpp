@@ -87,14 +87,17 @@ static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
     }
 }
 
-// A dtype the device can't run natively runs as its emulated type.
+// A dtype the device can't run natively runs as its emulated type. TORCHVULKAN_EMULATE=1 emulates every dtype that
+// has one, to test those paths on devices that run them all natively. float64 has none: without shaderFloat64 no
+// variant matches, so it falls back to the CPU.
 static void chooseModes(DeviceContext& device)
 {
     using Mode = torchvulkan::DtypeMode;
-    auto set = [&](c10::ScalarType dtype, bool native) { device.dtype_mode[static_cast<size_t>(dtype)] = native ? Mode::NATIVE : Mode::EMULATED; };
+    bool force = isEnvSet("TORCHVULKAN_EMULATE");
+    auto set = [&](c10::ScalarType dtype, bool native) { device.dtype_mode[static_cast<size_t>(dtype)] = native && !force ? Mode::NATIVE : Mode::EMULATED; };
 
     device.dtype_mode.fill(Mode::NATIVE);
-    set(c10::ScalarType::Double, device.support_float64);
+    device.dtype_mode[static_cast<size_t>(c10::ScalarType::Double)] = device.support_float64 ? Mode::NATIVE : Mode::EMULATED;
     set(c10::ScalarType::Half, device.support_float16);
     set(c10::ScalarType::BFloat16, device.support_bfloat16);
     for (c10::ScalarType f8 : {c10::ScalarType::Float8_e4m3fn, c10::ScalarType::Float8_e5m2, c10::ScalarType::Float8_e4m3fnuz,
