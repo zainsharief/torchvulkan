@@ -122,7 +122,7 @@ public extension half : IDtypeOps
     public static bool ext_le(half a, half b) { return a <= b; }
     public static bool ext_gt(half a, half b) { return a > b; }
     public static bool ext_ge(half a, half b) { return a >= b; }
-    public static bool ext_nonzero(half a) { return a != half(0.0f); }
+    public static bool ext_nonzero(half a) { return (bit_cast<uint16_t>(a) & uint16_t(0x7FFF)) != 0; }
     public static bool ext_isnan(half a) { return isnan(a); }
     public static half ext_atan2(half a, half b) { return halfFromFloat(float.ext_atan2(float(a), float(b))); }
     public static half ext_exp(half a) { return halfFromFloat(float.ext_exp(float(a))); }

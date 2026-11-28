@@ -553,6 +553,13 @@ inline at::Tensor normalize_bool(const at::Tensor& t)
     return at::ne(t.view(at::kByte), 0);
 }
 
+// bool(x), as count_nonzero, any, all, nonzero and logical_not test it: a float goes through the cast to bool, which
+// reads its bits (a compare with 0 sees a subnormal as zero on GPUs that flush them, Apple's)
+inline at::Tensor nonzero_mask(const at::Tensor& t)
+{
+    return at::isFloatingType(t.scalar_type()) ? t.to(at::kBool) : at::ne(t, 0);
+}
+
 // the subgroup sizes a kernel can be pinned to: a tuner axis
 inline std::vector<uint32_t> subgroup_size_options(const DeviceContext* device)
 {

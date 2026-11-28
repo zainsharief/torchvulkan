@@ -253,7 +253,13 @@ public extension<T : __BuiltinFloatingPointType> T : IDtypeOps
     public static bool ext_le(T a, T b) { return a <= b; }
     public static bool ext_gt(T a, T b) { return a > b; }
     public static bool ext_ge(T a, T b) { return a >= b; }
-    public static bool ext_nonzero(T a) { return a != T(0); }
+    // by its bits: GPUs that flush subnormals (Apple's) would read them as zero, which torch doesn't
+    public static bool ext_nonzero(T a)
+    {
+        if (sizeof(T) == 8) return (bit_cast<uint64_t>(a) & 0x7FFFFFFFFFFFFFFFull) != 0;
+        if (sizeof(T) == 2) return (bit_cast<uint16_t>(a) & uint16_t(0x7FFF)) != 0;
+        return (bit_cast<uint>(a) & 0x7FFFFFFFu) != 0;
+    }
     public static bool ext_isnan(T a) { return isnan(a); }
 
     public static T ext_atan2(T a, T b)

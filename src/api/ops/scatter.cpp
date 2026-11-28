@@ -589,7 +589,7 @@ at::Tensor& masked_scatter_vulkan_(at::Tensor& self, const at::Tensor& mask, con
 at::Tensor nonzero_vulkan(const at::Tensor& self)
 {
     int64_t ndim = self.dim();
-    auto [keys, count] = compaction_keys(at::ne(self, 0));
+    auto [keys, count] = compaction_keys(nonzero_mask(self));
     at::Tensor positions = at::arange(self.numel(), self.options().dtype(at::kLong));
     at::Tensor linear = scatter_into(at::empty({count}, positions.options()), keys, positions, ScatterMode::DIRECT, false);
     if (count == 0) return at::empty({0, ndim}, linear.options());

@@ -62,7 +62,7 @@ public extension BFloat16 : IDtypeOps
     public static bool ext_le(BFloat16 a, BFloat16 b) { return float(a) <= float(b); }
     public static bool ext_gt(BFloat16 a, BFloat16 b) { return float(a) > float(b); }
     public static bool ext_ge(BFloat16 a, BFloat16 b) { return float(a) >= float(b); }
-    public static bool ext_nonzero(BFloat16 a) { return float(a) != 0.0f; }
+    public static bool ext_nonzero(BFloat16 a) { return (bit_cast<uint16_t>(a) & uint16_t(0x7FFF)) != 0; }
     public static bool ext_isnan(BFloat16 a) { return isnan(float(a)); }
     public static BFloat16 ext_atan2(BFloat16 a, BFloat16 b) { return bf16FromFloat(float.ext_atan2(float(a), float(b))); }
     public static BFloat16 ext_exp(BFloat16 a) { return bf16FromFloat(float.ext_exp(float(a))); }

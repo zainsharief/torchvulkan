@@ -322,7 +322,10 @@ at::Tensor& logical_or_out_vulkan(const at::Tensor& self, const at::Tensor& othe
 
 at::Tensor& logical_xor_out_vulkan(const at::Tensor& self, const at::Tensor& other, at::Tensor& out) { return compare_out_vulkan(self, other, out, CompareOp::LXOR); }
 
-at::Tensor& logical_not_out_vulkan(const at::Tensor& self, at::Tensor& out) { return compare_scalar_out_vulkan(self, at::Scalar(0), out, CompareOp::EQ); }
+at::Tensor& logical_not_out_vulkan(const at::Tensor& self, at::Tensor& out)
+{
+    return compare_scalar_out_vulkan(at::isFloatingType(self.scalar_type()) ? nonzero_mask(self) : self, at::Scalar(0), out, CompareOp::EQ);
+}
 
 at::Tensor& where_out_vulkan(const at::Tensor& condition, const at::Tensor& self, const at::Tensor& other, at::Tensor& out)
 {

@@ -524,7 +524,7 @@ at::Tensor& argmin_out_vulkan(
 // NaN counts as nonzero
 at::Tensor count_nonzero_along(const at::Tensor& self, at::OptionalIntArrayRef dim, bool keepdim)
 {
-    return sum_dim_vulkan(at::ne(self, 0), dim, keepdim, at::kLong);
+    return sum_dim_vulkan(nonzero_mask(self), dim, keepdim, at::kLong);
 }
 
 void check_bool_result(const char* name, const at::Tensor& self, const at::Tensor& out)
@@ -552,13 +552,13 @@ at::Tensor& any_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 at::Tensor& all_out_vulkan(const at::Tensor& self, int64_t dim, bool keepdim, at::Tensor& out)
 {
     check_bool_result("all", self, out);
-    return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::IntArrayRef{dim}, keepdim, at::kLong), 0));
+    return fill_out(out, at::eq(sum_dim_vulkan(at::logical_not(self), at::IntArrayRef{dim}, keepdim, at::kLong), 0));
 }
 
 at::Tensor& all_all_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     check_bool_result("all", self, out);
-    return fill_out(out, at::eq(sum_dim_vulkan(at::eq(self, 0), at::OptionalIntArrayRef(), false, at::kLong), 0));
+    return fill_out(out, at::eq(sum_dim_vulkan(at::logical_not(self), at::OptionalIntArrayRef(), false, at::kLong), 0));
 }
 
 at::Tensor count_nonzero_vulkan(const at::Tensor& self, at::IntArrayRef dim)
