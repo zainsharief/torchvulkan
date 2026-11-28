@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -168,21 +169,30 @@ size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vec
     // each path once to compile its pipelines and tune its own kernels, then the best of three
     size_t best = 0;
     double best_ms = std::numeric_limits<double>::infinity();
+    std::optional<c10::Error> failure;
     for (size_t i = 0; i < paths.size(); i++)
     {
-        paths[i].run();
-        device->flush();
         double ms = std::numeric_limits<double>::infinity();
-        for (int r = 0; r < 3; r++)
-        {
-            const auto start = std::chrono::steady_clock::now();
+        try {
             paths[i].run();
             device->flush();
-            ms = std::min(ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            for (int r = 0; r < 3; r++)
+            {
+                const auto start = std::chrono::steady_clock::now();
+                paths[i].run();
+                device->flush();
+                ms = std::min(ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+            }
+        } catch (const c10::Error& e) {
+            // a path that can't run this shape (a limit, out of memory) drops out of the choice
+            if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " failed: " << e.what_without_backtrace() << "\n";
+            if (!failure) failure = e;
+            continue;
         }
         if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " " << ms << " ms\n";
         if (ms < best_ms) { best_ms = ms; best = i; }
     }
+    if (!std::isfinite(best_ms)) throw *failure;
     if (log_) std::cerr << "torchvulkan tune: chose path " << paths[best].name << "\n";
     TuneConfig config;
     config.values = {static_cast<uint32_t>(best)};

@@ -3,6 +3,8 @@
 #include <c10/util/accumulate.h>
 #include <algorithm>
 #include <array>
+#include <limits>
+#include <cstring>
 #include <functional>
 #include <tuple>
 #include <vector>
@@ -1100,6 +1102,26 @@ bool float32_path_fits(DeviceContext* device, at::ScalarType dtype, std::initial
     return 2 * bytes < device->memoryFree();
 }
 
+// The composites unfold the input (im2col) or the columns of the output (col2im): input or output positions times
+// channels times kernel taps, in float32 for 16-bit floats. Offered next to a direct kernel only when that fits the
+// copy shader's 32-bit indexing and, twice over, free device memory (a VAE's large layers would not).
+bool composite_fits(DeviceContext* device, const at::Tensor& input, const at::Tensor& weight, const ConvGeometry& g, bool transposed, int64_t groups)
+{
+    int64_t taps = 1;
+    for (int64_t k : g.kernel) taps *= k;
+    int64_t positions = 1;
+    for (int64_t d = 2; d < input.dim(); d++) positions *= input.size(d);
+    // the output has about as many positions as the input divided by the stride's product (times it, transposed)
+    int64_t stride = 1;
+    for (int64_t s : g.stride) stride *= s;
+    int64_t channels = transposed ? weight.size(1) * groups : input.size(1);
+    int64_t cols_positions = transposed ? positions : std::max<int64_t>(positions / std::max<int64_t>(stride, 1), 1);
+    uint64_t elements = static_cast<uint64_t>(input.size(0)) * channels * taps * cols_positions;
+    if (transposed) elements *= static_cast<uint64_t>(std::max<int64_t>(stride, 1));
+    if (elements > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) return false;
+    return 2 * elements * sizeof(float) < device->memoryFree();
+}
+
 // the shader whose binary keys a path choice, so a rebuilt kernel times the choice again
 ShaderKey conv_path_shader(DeviceContext* device, at::ScalarType dtype)
 {
@@ -1160,16 +1182,18 @@ at::Tensor convolution_vulkan(
         names.push_back("direct");
         runs.push_back([&]() { return (transposed ? implicit_grad_input(p, xc, w, b) : implicit_forward(p, xc, w, b)).contiguous(format); });
     }
-    names.push_back("composite");
-    runs.push_back([&]() {
-        // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
-        bool upcast = is_low_prec(dtype);
-        at::Tensor xa = upcast ? x.to(at::kFloat) : x;
-        at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
-        c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
-        at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
-        return add_bias(output, ba).to(dtype).contiguous(format);
-    });
+    if (runs.empty() || composite_fits(device, x, weight, g, transposed, groups)) {
+        names.push_back("composite");
+        runs.push_back([&]() {
+            // the composites round every matmul, col2im sum and the bias, so 16-bit floats run them in float32 and round once
+            bool upcast = is_low_prec(dtype);
+            at::Tensor xa = upcast ? x.to(at::kFloat) : x;
+            at::Tensor wa = upcast ? weight.to(at::kFloat) : weight;
+            c10::optional<at::Tensor> ba = upcast && b.defined() ? c10::optional<at::Tensor>(b.to(at::kFloat)) : bias;
+            at::Tensor output = transposed ? conv_transpose_forward(xa, wa, g, groups, output_size) : conv_forward(xa, wa, g, groups);
+            return add_bias(output, ba).to(dtype).contiguous(format);
+        });
+    }
     if (float32_path_fits(device, dtype, {x, weight})) {
         // float32's own paths (its direct kernel where the 16-bit type has none), rounded once at the end
         names.push_back("float32");
@@ -1281,8 +1305,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> convolution_backward_vulkan(
         names.push_back("direct");
         runs.push_back([&]() { return backward(true); });
     }
-    names.push_back("composite");
-    runs.push_back([&]() { return backward(false); });
+    if (runs.empty() || composite_fits(device, input, weight, g, transposed, groups)) {
+        names.push_back("composite");
+        runs.push_back([&]() { return backward(false); });
+    }
     if (float32_path_fits(device, dtype, {grad_output, input, weight})) {
         names.push_back("float32");
         runs.push_back([&]() {
