@@ -83,6 +83,8 @@ Autotuner::Autotuner(DeviceContext* device)
       log_(env_number("TORCHVULKAN_TUNE_LOG", 0) != 0),
       threads_(std::clamp<unsigned>(std::thread::hardware_concurrency() / 2, 1u, 8u))
 {
+    // TORCHVULKAN_RETUNE=1: this process times every key again on its first use and stores the new results
+    if (env_number("TORCHVULKAN_RETUNE", 0) != 0) retune_depth_ = 1;
 }
 
 std::vector<TuneConfig> TuneSpace::configs() const
@@ -109,6 +111,31 @@ std::vector<TuneConfig> TuneSpace::configs() const
     }
 }
 
+const TuneConfig* Autotuner::cached(
+    const std::pair<uint32_t, uint64_t>& key, uint64_t hash, const std::function<bool(const TuneConfig&)>& usable)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retune_depth_ > 0 && retuned_.count(key) == 0) return nullptr;
+    auto it = results_.find(key);
+    if (it != results_.end()) return &it->second;
+    if (retune_depth_ > 0) return nullptr;
+    if (!loaded_) load();
+    auto stored = stored_.find({hash, key.second});
+    if (stored != stored_.end() && usable(stored->second)) return &results_.emplace(key, stored->second).first->second;
+    return nullptr;
+}
+
+const TuneConfig& Autotuner::remember(const std::pair<uint32_t, uint64_t>& key, uint64_t hash, TuneConfig config)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!loaded_) load();
+    if (retune_depth_ > 0) retuned_.insert(key);
+    TuneConfig& slot = results_[key];
+    slot = std::move(config);
+    if (!slot.empty()) save(hash, key.second, slot);
+    return slot;
+}
+
 const TuneConfig& Autotuner::select(
     ShaderKey shader,
     uint64_t tuned_id,
@@ -117,26 +144,86 @@ const TuneConfig& Autotuner::select(
 {
     const uint32_t binary = device->shader_manager->resolveBinary(shader);
     const std::pair<uint32_t, uint64_t> key{binary, tuned_id};
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = results_.find(key);
-        if (it != results_.end()) return it->second;
-    }
-
     const uint64_t hash = torchvulkan::SHADER_BINARIES[binary].hash;
+    if (const TuneConfig* hit = cached(key, hash, [&](const TuneConfig& c) { return in_space(space, c); })) return *hit;
+    return remember(key, hash, fastest(space, build));
+}
+
+size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vector<TunePath>& paths)
+{
+    TORCH_CHECK(!paths.empty(), "torchvulkan [ERROR]: choosePath needs at least one path");
+    if (paths.size() == 1) return 0;
+    const uint32_t binary = device->shader_manager->resolveBinary(shader);
+    // a bit of its own keeps path choices apart from the kernel configs of the same shader
+    const std::pair<uint32_t, uint64_t> key{binary, tuned_id ^ 0x9e3779b97f4a7c15ull};
+    const uint64_t hash = torchvulkan::SHADER_BINARIES[binary].hash;
+    auto usable = [&](const TuneConfig& c) { return c.values.size() == 1 && c[0] < paths.size(); };
+    if (const TuneConfig* hit = cached(key, hash, usable)) return (*hit)[0];
+
+    // each path once to compile its pipelines and tune its own kernels, then the best of three
+    size_t best = 0;
+    double best_ms = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < paths.size(); i++)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!loaded_) load();
-        auto stored = stored_.find({hash, tuned_id});
-        if (stored != stored_.end() && in_space(space, stored->second)) return results_.emplace(key, stored->second).first->second;
+        paths[i].run();
+        device->flush();
+        double ms = std::numeric_limits<double>::infinity();
+        for (int r = 0; r < 3; r++)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            paths[i].run();
+            device->flush();
+            ms = std::min(ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+        if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " " << ms << " ms\n";
+        if (ms < best_ms) { best_ms = ms; best = i; }
     }
+    if (log_) std::cerr << "torchvulkan tune: chose path " << paths[best].name << "\n";
+    TuneConfig config;
+    config.values = {static_cast<uint32_t>(best)};
+    remember(key, hash, std::move(config));
+    return best;
+}
 
-    TuneConfig best = fastest(space, build);
-
+void Autotuner::clear(bool persistent)
+{
     std::lock_guard<std::mutex> lock(mutex_);
-    auto [it, inserted] = results_.emplace(key, std::move(best));
-    if (inserted && !it->second.empty()) save(hash, tuned_id, it->second);
-    return it->second;
+    results_.clear();
+    stored_.clear();
+    retuned_.clear();
+    // stored lines stay out of this process; new timings still append to the file
+    loaded_ = true;
+    if (path_.empty()) path_ = device->cache.cachePath("tuning", "txt");
+    if (persistent && !path_.empty()) std::ofstream(path_, std::ios::trunc).flush();
+}
+
+void Autotuner::beginRetune()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retune_depth_++ == 0) retuned_.clear();
+}
+
+void Autotuner::endRetune()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retune_depth_ > 0 && --retune_depth_ == 0) retuned_.clear();
+}
+
+size_t Autotuner::entries()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!loaded_) load();
+    std::set<std::pair<uint64_t, uint64_t>> keys;
+    for (const auto& [k, v] : stored_) keys.insert(k);
+    for (const auto& [k, v] : results_) keys.insert({torchvulkan::SHADER_BINARIES[k.first].hash, k.second});
+    return keys.size();
+}
+
+std::string Autotuner::cacheFile()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (path_.empty()) path_ = device->cache.cachePath("tuning", "txt");
+    return path_;
 }
 
 void Autotuner::load()

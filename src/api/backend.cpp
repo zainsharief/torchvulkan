@@ -5,6 +5,7 @@
 #include "vulkan/allocator.h"
 #include "vulkan/generator.h"
 #include "vulkan/shader.h"
+#include "vulkan/autotuner.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "torchvulkan backend";
@@ -78,6 +79,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("_memory_reserved", [](int64_t device_index) -> uint64_t {
         return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->reservedBytes();
     });
+
+    // torchvulkan.tuning: the autotuner's cached results
+    auto tuner_of = [](int64_t device_index) {
+        return VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index))->tuner;
+    };
+    m.def("_tuning_clear", [tuner_of](int64_t device_index, bool persistent) { tuner_of(device_index)->clear(persistent); });
+    m.def("_tuning_retune", [tuner_of](int64_t device_index, bool begin) {
+        if (begin) tuner_of(device_index)->beginRetune();
+        else tuner_of(device_index)->endRetune();
+    });
+    m.def("_tuning_entries", [tuner_of](int64_t device_index) -> uint64_t { return tuner_of(device_index)->entries(); });
+    m.def("_tuning_cache_file", [tuner_of](int64_t device_index) -> std::string { return tuner_of(device_index)->cacheFile(); });
 
     m.def("_mem_get_info", [](int64_t device_index) -> std::pair<uint64_t, uint64_t> {
         DeviceContext* device = VulkanContext::Instance().GetDeviceContext(static_cast<c10::DeviceIndex>(device_index));
