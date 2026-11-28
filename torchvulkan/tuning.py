@@ -10,7 +10,8 @@ cache directory, so later processes reuse them. These functions re-time or forge
     torchvulkan.tuning.clear()                 # forget this process's results; each is timed again on next use
     torchvulkan.tuning.clear(persistent=True)  # and empty the tuning file
 
-TORCHVULKAN_RETUNE=1 retunes a whole process, TORCHVULKAN_TUNE_LOG=1 prints what is timed and chosen.
+TORCHVULKAN_RETUNE=1 retunes a whole process, TORCHVULKAN_TUNE_LOG=1 prints what is timed and chosen, and
+TORCHVULKAN_TUNE_PATH=<name> (direct, composite, float32) runs that path wherever an op offers it.
 """
 import contextlib
 

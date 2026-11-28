@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -153,6 +154,10 @@ size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vec
 {
     TORCH_CHECK(!paths.empty(), "torchvulkan [ERROR]: choosePath needs at least one path");
     if (paths.size() == 1) return 0;
+    // TORCHVULKAN_TUNE_PATH=<name> runs that path wherever an op offers it, to compare the tuner's choice by hand
+    if (const char* forced = std::getenv("TORCHVULKAN_TUNE_PATH")) {
+        for (size_t i = 0; i < paths.size(); i++) if (std::strcmp(paths[i].name, forced) == 0) return i;
+    }
     const uint32_t binary = device->shader_manager->resolveBinary(shader);
     // a bit of its own keeps path choices apart from the kernel configs of the same shader
     const std::pair<uint32_t, uint64_t> key{binary, tuned_id ^ 0x9e3779b97f4a7c15ull};
