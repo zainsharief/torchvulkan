@@ -270,9 +270,15 @@ at::Tensor& compare_out_vulkan(const at::Tensor& self, const at::Tensor& other, 
     return out;
 }
 
+// float8 formats other than e5m2 have no inf: a scalar inf rounds to their max or nan, which isinf mustn't match
+bool has_infinity(at::ScalarType dtype)
+{
+    return at::isFloatingType(dtype) && (!c10::isFloat8Type(dtype) || dtype == at::ScalarType::Float8_e5m2);
+}
+
 at::Tensor& isinf_out_vulkan(const at::Tensor& self, at::Tensor& out) 
 {
-    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
+    if (!has_infinity(self.scalar_type())) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(at::abs(self), std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
@@ -280,7 +286,7 @@ at::Tensor& isposinf_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     TORCH_CHECK(!self.is_complex(), "isposinf does not support complex inputs.");
     TORCH_CHECK(out.scalar_type() == at::kBool, "isposinf does not support non-boolean outputs.");
-    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
+    if (!has_infinity(self.scalar_type())) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
@@ -288,7 +294,7 @@ at::Tensor& isneginf_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     TORCH_CHECK(!self.is_complex(), "isneginf does not support complex inputs.");
     TORCH_CHECK(out.scalar_type() == at::kBool, "isneginf does not support non-boolean outputs.");
-    if (!self.is_floating_point()) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
+    if (!has_infinity(self.scalar_type())) { at::native::resize_output(out, self.sizes()); out.fill_(false); return out; }
     return compare_scalar_out_vulkan(self, -std::numeric_limits<double>::infinity(), out, CompareOp::EQ);
 }
 
