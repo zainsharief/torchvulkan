@@ -118,7 +118,7 @@ public:
     // 8- and 16-bit scalars are pushed widened to 32 bits, matching T.PushScalar in core/dtype.slang (float8 as the
     // float32 its value is, as a SmallFloat computes):
     // storagePushConstant8/16 are optional and AMD's Windows driver for RDNA2 supports neither.
-    // Half and bfloat16 are rounded to their own type first, so the shader sees the same value.
+    // Half, bfloat16 and float8 are rounded to their own type first, so the shader sees the same value.
     // floating dtypes cast as the CPU's TensorIterator casts a wrapped double: out of range is inf, not an error
     PushConstantBuilder& push_scalar(const at::Scalar& value, at::ScalarType dtype)
     {
@@ -137,11 +137,11 @@ public:
             case at::ScalarType::UInt64: push(value.to<uint64_t>()); break;
             case at::kDouble: push(value.to<double>()); break;
             case at::kFloat: push(real_float ? static_cast<float>(value.toDouble()) : value.to<float>()); break;
-            case at::ScalarType::Float8_e4m3fn: push(static_cast<float>(value.to<c10::Float8_e4m3fn>())); break;
-            case at::ScalarType::Float8_e5m2: push(static_cast<float>(value.to<c10::Float8_e5m2>())); break;
-            case at::ScalarType::Float8_e4m3fnuz: push(static_cast<float>(value.to<c10::Float8_e4m3fnuz>())); break;
-            case at::ScalarType::Float8_e5m2fnuz: push(static_cast<float>(value.to<c10::Float8_e5m2fnuz>())); break;
-            case at::ScalarType::Float8_e8m0fnu: push(static_cast<float>(value.to<c10::Float8_e8m0fnu>())); break;
+            case at::ScalarType::Float8_e4m3fn: push(static_cast<float>(real_float ? c10::Float8_e4m3fn(static_cast<float>(value.toDouble())) : value.to<c10::Float8_e4m3fn>())); break;
+            case at::ScalarType::Float8_e5m2: push(static_cast<float>(real_float ? c10::Float8_e5m2(static_cast<float>(value.toDouble())) : value.to<c10::Float8_e5m2>())); break;
+            case at::ScalarType::Float8_e4m3fnuz: push(static_cast<float>(real_float ? c10::Float8_e4m3fnuz(static_cast<float>(value.toDouble())) : value.to<c10::Float8_e4m3fnuz>())); break;
+            case at::ScalarType::Float8_e5m2fnuz: push(static_cast<float>(real_float ? c10::Float8_e5m2fnuz(static_cast<float>(value.toDouble())) : value.to<c10::Float8_e5m2fnuz>())); break;
+            case at::ScalarType::Float8_e8m0fnu: push(static_cast<float>(real_float ? c10::Float8_e8m0fnu(static_cast<float>(value.toDouble())) : value.to<c10::Float8_e8m0fnu>())); break;
             default: TORCH_CHECK(false, "torchvulkan [ERROR]: Unsupported dtype for scalar value."); break;
         }
 
