@@ -174,8 +174,15 @@ size_t Autotuner::choosePath(ShaderKey shader, uint64_t tuned_id, const std::vec
     {
         double ms = std::numeric_limits<double>::infinity();
         try {
+            auto warm = std::chrono::steady_clock::now();
             paths[i].run();
             device->flush();
+            double warm_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - warm).count();
+            // a path whose first run (with its compiles and its own tuning) is far behind the best isn't timed further
+            if (warm_ms > FULL_TIMING_FACTOR * best_ms) {
+                if (log_) std::cerr << "torchvulkan tune: path " << paths[i].name << " dropped after one run, " << warm_ms << " ms\n";
+                continue;
+            }
             for (int r = 0; r < 3; r++)
             {
                 const auto start = std::chrono::steady_clock::now();
