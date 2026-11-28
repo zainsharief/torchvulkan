@@ -15,7 +15,7 @@ void dispatch_multinomial_shader(
     const std::optional<at::Generator>& generator,
     at::Tensor& result)
 {
-    at::ScalarType real = random_real_dtype(get_device_context(self), self.scalar_type());
+    at::ScalarType real = random_real_dtype(self.scalar_type());
     if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::MULTINOMIAL, real)) real = at::kFloat;
 
     int64_t n_categories = self.size(-1);

@@ -22,7 +22,6 @@ Each dtype has a file in src/shaders/dtype/ with its conformance, load and store
 Kernels only reach memory through T.load, T.store and T.storeVec, so a dtype the
 device can't run natively runs as an emulated type of its own (dtype/emulated.slang):
 it computes in float32 or int32 and keeps its elements in whole 32-bit words.
-float64 without shaderFloat64 is Float64Emulated (dtype/float64.slang).
 
 To add a dtype, give it a file there with an IDtypeOps and an ITorchVulkan
 conformance, or a codec for EmulatedFloat or EmulatedInt.

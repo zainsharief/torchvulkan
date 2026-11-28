@@ -22,7 +22,6 @@ public extension uint16_t : ITorchVulkan
     public static uint16_t castFromU64(uint64_t v) { return uint16_t(v); }
     public static uint16_t castFromF32(float v) { return uint16_t(int64_t(v)); }
     public static uint16_t castFromF64(double v) { return uint16_t(int64_t(v)); }
-    public static uint16_t castFromEmulatedF64(Float64Emulated v) { return uint16_t(f64ToU64(v.bits)); }
 }
 
 // uint16 without shaderInt16 and 16-bit storage: computes in int32, kept as 16-bit values in whole words

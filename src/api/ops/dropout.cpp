@@ -27,7 +27,7 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
     }
 
     DeviceContext* device = get_device_context(input);
-    at::ScalarType real = random_real_dtype(get_device_context(input), input.scalar_type());
+    at::ScalarType real = random_real_dtype(input.scalar_type());
 
     // elementwise, so it runs over any dense layout as it is; the output and mask keep the input's (as empty_like does)
     at::Tensor src = input.is_non_overlapping_and_dense() ? input : at::empty_like(input).copy_(input);

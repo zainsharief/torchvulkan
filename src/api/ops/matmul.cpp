@@ -304,18 +304,6 @@ at::Tensor dispatch_matmul_simd_shader(
     auto make_dispatch = [&](const TuneConfig& config, int64_t b0, int64_t batch) {
         return matmul_simd_dispatch(ops, out, has_bias, activation, alpha, beta, config[0], config[1], b0, batch);
     };
-    const int64_t max_batch = limits.maxComputeWorkGroupCount[2];
-
-    if (result_dtype == at::kDouble && device->dtype_mode[static_cast<size_t>(at::kDouble)] == torchvulkan::DtypeMode::EMULATED) {
-        for (int64_t b0 = 0; b0 < B; b0 += max_batch)
-        {
-            TuneDispatch d = make_dispatch(TuneConfig{{MATMUL_TILE_N, device->default_subgroup_size}}, b0, std::min(max_batch, B - b0));
-            d.groupX = static_cast<uint32_t>(ceil_div(N, MATMUL_WG));
-            d.groupY = static_cast<uint32_t>(ceil_div(M, MATMUL_WG));
-            dispatch_tuned_shader(device, d);
-        }
-        return finish_matmul_output(out, shape);
-    }
 
     TuneSpace space;
     space.params = {
@@ -324,6 +312,7 @@ at::Tensor dispatch_matmul_simd_shader(
     };
     space.valid = [&](const TuneConfig& config) { return matmul_simd_fits(device, compute_type, config[0], config[1], M, N); };
 
+    const int64_t max_batch = limits.maxComputeWorkGroupCount[2];
     const TuneConfig& config = device->tuner->select(
         ShaderKey{torchvulkan::Kernel::MATMUL_SIMD, result_dtype},
         matmul_tune_key(ops, M, N, K, B),

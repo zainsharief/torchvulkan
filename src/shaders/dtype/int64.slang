@@ -22,5 +22,4 @@ public extension int64_t : ITorchVulkan
     public static int64_t castFromU64(uint64_t v) { return int64_t(v); }
     public static int64_t castFromF32(float v) { return int64_t(v); }
     public static int64_t castFromF64(double v) { return int64_t(v); }
-    public static int64_t castFromEmulatedF64(Float64Emulated v) { return f64ToI64(v.bits); }
 }

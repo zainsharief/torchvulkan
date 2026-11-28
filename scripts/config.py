@@ -60,7 +60,6 @@ MODES = ['native', 'emulated']
 
 F16_EMULATED = DType('f16_emulated', 'Float16Emulated', 2, ('Half',), 'emulated')
 BF16_EMULATED = DType('bf16_emulated', 'BFloat16Emulated', 2, ('BFloat16',), 'emulated')
-F64_EMULATED = DType('f64_emulated', 'Float64Emulated', 8, ('Double',), 'emulated')
 EMULATED_FLOATS = [F16_EMULATED, BF16_EMULATED]
 
 FLOAT8 = [DType(name.lower(), name, 1, (aten,), 'emulated')
@@ -74,20 +73,21 @@ I16_EMULATED = DType('i16_emulated', 'Int16Emulated', 2, ('Short',), 'emulated')
 U16_EMULATED = DType('u16_emulated', 'UInt16Emulated', 2, ('UInt16',), 'emulated')
 EMULATED_INTEGERS = [I8_EMULATED, U8_EMULATED, BOOL_EMULATED, I16_EMULATED, U16_EMULATED]
 
-ALL_DTYPES = DTYPES + EMULATED_FLOATS + EMULATED_INTEGERS + [F64_EMULATED] + FLOAT8
-ALL_FLOATS = FLOATS + EMULATED_FLOATS + [F64_EMULATED] + FLOAT8
+ALL_DTYPES = DTYPES + EMULATED_FLOATS + EMULATED_INTEGERS + FLOAT8
+ALL_FLOATS = FLOATS + EMULATED_FLOATS + FLOAT8
 ALL_INTEGERS = INTEGERS + EMULATED_INTEGERS
 BOOLS = [U8, BOOL_EMULATED] # a bool operand of a kernel computing in another dtype
 
 # casts: every native pair; an emulated dtype to and from float32 and int64 (which hold its values exactly) and
 # itself; float8 to and from the 16-bit floats (fp8 weights are decoded into the compute dtype every step); float64
-# emulated to and from every native dtype. The host routes any other pair through float32 or int64
+# to the emulated integers and bool (through float32, 2^24 + 1 and 1e-50 would be lost). The host routes any other
+# pair through float32 or int64
 EMULATED = EMULATED_FLOATS + FLOAT8 + EMULATED_INTEGERS
 CAST_PAIRS = ([(s, d) for s in DTYPES for d in DTYPES] +
               [p for e in EMULATED for b in (F32, I64) for p in ((e, b), (b, e))] +
               [p for f in FLOAT8 for h in (F16, BF16, F16_EMULATED, BF16_EMULATED) for p in ((f, h), (h, f))] +
               [(e, e) for e in EMULATED] +
-              [p for n in DTYPES for p in ((F64_EMULATED, n), (n, F64_EMULATED))] + [(F64_EMULATED, F64_EMULATED)])
+              [(F64, e) for e in EMULATED_INTEGERS])
 
 
 def vec_size(nbytes):
@@ -244,7 +244,6 @@ KERNELS = [
     ]),
     Kernel('matmul_simd', 'ops/matmul_simd.slang', [
         Entry('matmul_simd_main', DTYPES + EMULATED_FLOATS + EMULATED_INTEGERS + FLOAT8, ('vec',)),
-        Entry('matmul_soft_main', [F64_EMULATED]),
     ]),
     Kernel('conv_simd', 'ops/conv_simd.slang', [
         Entry('conv_simd_main', FLOATS, ('vec',)),

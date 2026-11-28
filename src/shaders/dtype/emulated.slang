@@ -158,7 +158,6 @@ public struct EmulatedFloat<C : IFloatCodec> : ITorchVulkan
     public static This castFromU64(uint64_t a) { return rounded(float(a)); }
     public static This castFromF32(float a) { return rounded(a); }
     public static This castFromF64(double a) { return rounded(float(a)); }
-    public static This castFromEmulatedF64(Float64Emulated a) { return rounded(a.toF32()); }
 
     public static This ext_pow(This a, This b) { return rounded(float.ext_pow(a.v, b.v)); }
     public static This ext_max(This a, This b) { return rounded(float.ext_max(a.v, b.v)); }
@@ -279,7 +278,6 @@ public struct EmulatedInt<C : IIntCodec> : ITorchVulkan
     public static This castFromU64(uint64_t a) { return wrapped(int(a)); }
     public static This castFromF32(float a) { return wrapped(int(int64_t(a))); }
     public static This castFromF64(double a) { return wrapped(int(int64_t(a))); }
-    public static This castFromEmulatedF64(Float64Emulated a) { return wrapped(int(a.toI64())); }
 
     public static This ext_pow(This a, This b) { return wrapped(int32_t.ext_pow(a.v, b.v)); }
     public static This ext_max(This a, This b) { return wrapped(int32_t.ext_max(a.v, b.v)); }

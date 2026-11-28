@@ -22,7 +22,6 @@ public extension uint8_t : ITorchVulkan
     public static uint8_t castFromU64(uint64_t v) { return uint8_t(v); }
     public static uint8_t castFromF32(float v) { return uint8_t(int64_t(v)); }
     public static uint8_t castFromF64(double v) { return uint8_t(int64_t(v)); }
-    public static uint8_t castFromEmulatedF64(Float64Emulated v) { return uint8_t(f64ToU64(v.bits)); }
 }
 
 // uint8 without shaderInt8 and 8-bit storage: computes in int32, kept as 8-bit values in whole words

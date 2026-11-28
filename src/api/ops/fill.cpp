@@ -43,6 +43,16 @@ at::Tensor& fill_scalar_vulkan(
         return self;
     }
 
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::FILL, self.scalar_type()) && value.equal(0) && !self.is_complex())
+    {
+        at::ScalarType bits = c10::elementSize(self.scalar_type()) == 1 ? at::kByte
+                            : c10::elementSize(self.scalar_type()) == 2 ? at::kShort
+                            : c10::elementSize(self.scalar_type()) == 4 ? at::kInt : at::kLong;
+        at::Tensor raw = self.view(bits);
+        fill_scalar_vulkan(raw, 0);
+        return self;
+    }
+
     at::TensorIterator iter = at::TensorIterator::borrowing_nullary_op(self);
 
     uint64_t numel = iter.numel();

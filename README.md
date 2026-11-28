@@ -191,6 +191,7 @@ TORCHVULKAN_STRICT=1 python your_script.py
 
 - `torch.compile` with the default Inductor backend doesn't support the `vulkan` device. Run eagerly, or use `torch.compile(model, backend="aot_eager")`.
 - Optimizers created with `fused=True` (such as `torch.optim.AdamW(..., fused=True)`) run their update on the CPU. The default (foreach) implementation runs on the GPU.
+- `float64` runs on the GPU only on devices with `shaderFloat64`; elsewhere it falls back to the CPU. Transcendental functions such as `exp`, `sin` and `tanh` are computed in `float32` precision for `float64` tensors.
 - Complex tensors can live on the device and FFTs run on the GPU, but most complex arithmetic falls back to the CPU.
 - APIs and coverage may change before `1.0.0`.
 

@@ -127,7 +127,7 @@ void dispatch_random_shader(
     }
 
     DeviceContext* device = get_device_context(self);
-    at::ScalarType real = random_real_dtype(get_device_context(self), self.scalar_type());
+    at::ScalarType real = random_real_dtype(self.scalar_type());
 
     at::TensorIterator iter = at::TensorIterator::borrowing_nullary_op(self);
     uint64_t numel = iter.numel();

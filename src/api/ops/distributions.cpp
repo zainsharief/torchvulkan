@@ -54,7 +54,7 @@ at::Tensor dispatch_distribution_shader(
         .push(numel)
         .push(seed)
         .push(offset)
-        .push(random_real_bits(tiny, random_real_dtype(device, dtype)));
+        .push(random_real_bits(tiny, random_real_dtype(dtype)));
     PushConstants pushConstants = pcs.build();
 
     uint32_t groupX = static_cast<uint32_t>((numel + workgroupSizeX - 1) / workgroupSizeX);
@@ -100,7 +100,7 @@ at::Tensor binomial_vulkan(const at::Tensor& count, const at::Tensor& prob, std:
 at::Tensor sample_dirichlet_vulkan(const at::Tensor& alpha, std::optional<at::Generator> generator)
 {
     check_floating(alpha, "_sample_dirichlet");
-    at::ScalarType real = random_real_dtype(get_device_context(alpha), alpha.scalar_type());
+    at::ScalarType real = random_real_dtype(alpha.scalar_type());
     // small shapes underflow float32 gamma samples to 0 (the CPU works in float64): in log space instead, from
     // Gamma(a) = Gamma(a + 1) U^(1/a), and the softmax of the log samples
     at::Tensor a = alpha.to(real);

@@ -22,5 +22,4 @@ public extension float : ITorchVulkan
     public static float castFromU64(uint64_t v) { return float(v); }
     public static float castFromF32(float v) { return v; }
     public static float castFromF64(double v) { return float(v); }
-    public static float castFromEmulatedF64(Float64Emulated v) { return v.toF32(); }
 }

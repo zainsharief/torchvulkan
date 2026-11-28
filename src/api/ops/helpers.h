@@ -626,12 +626,10 @@ inline std::vector<int64_t> to_ints(c10::SymIntArrayRef sizes)
     return values;
 }
 
-// the dtype a random kernel samples in: float64 for float64 outputs where the device has it, float32 otherwise
-// (T.Real in philox.slang; Float64Emulated samples in float32)
-inline c10::ScalarType random_real_dtype(const DeviceContext* device, c10::ScalarType dtype)
+// the dtype a random kernel samples in: float64 for float64 outputs, float32 otherwise (T.Real in philox.slang)
+inline c10::ScalarType random_real_dtype(c10::ScalarType dtype)
 {
-    bool native = device->dtype_mode[static_cast<size_t>(at::kDouble)] == torchvulkan::DtypeMode::NATIVE;
-    return dtype == at::kDouble && native ? at::kDouble : at::kFloat;
+    return dtype == at::kDouble ? at::kDouble : at::kFloat;
 }
 
 // the dtype a random kernel generates in when the device cannot write `dtype`

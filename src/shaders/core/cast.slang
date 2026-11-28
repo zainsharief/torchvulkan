@@ -11,7 +11,7 @@ built from each of the four wide types:
     int8..int64                -> int64_t
     uint8..uint64              -> uint64_t
     float16, bfloat16, float32 -> float
-    float64                    -> double, or Float64Emulated without shaderFloat64
+    float64                    -> double
 
 The path is picked by type, so a cast not involving float64 never emits Float64. 
 Each dtype's conversions are in its ITorchVulkan conformance in dtype.slang.
@@ -27,7 +27,6 @@ public interface ICastable
     static This castFromU64(uint64_t v);
     static This castFromF32(float v);
     static This castFromF64(double v);
-    static This castFromEmulatedF64(Float64Emulated v);
 }
 
 public interface ICastWide

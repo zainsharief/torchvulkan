@@ -26,7 +26,6 @@ public extension BFloat16 : ITorchVulkan
     public static BFloat16 castFromU64(uint64_t v) { return bf16FromFloat(float(v)); }
     public static BFloat16 castFromF32(float v) { return bf16FromFloat(v); }
     public static BFloat16 castFromF64(double v) { return bf16FromFloat(float(v)); }
-    public static BFloat16 castFromEmulatedF64(Float64Emulated v) { return bf16FromFloat(v.toF32()); }
 }
 
 public extension BFloat16 : IDtypeOps

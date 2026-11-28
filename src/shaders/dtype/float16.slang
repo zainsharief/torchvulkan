@@ -83,7 +83,6 @@ public extension half : ITorchVulkan
     public static half castFromF32(float v) { return halfFromFloat(v); }
     // through float32, as PyTorch's c10::Half(double) does
     public static half castFromF64(double v) { return halfFromFloat(float(v)); }
-    public static half castFromEmulatedF64(Float64Emulated v) { return halfFromFloat(v.toF32()); }
 }
 
 // float16 computes in float32 and rounds once, as the CPU and CUDA do: Vulkan lets native float16
