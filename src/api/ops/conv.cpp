@@ -77,24 +77,24 @@ at::Tensor col2im_nd(
         ", stride=", g.stride, ", expected size of input's dimension 2 to match the calculated number of sliding blocks ", c10::multiply_integers(windows), ", but got input.size(2)=", cols.size(2), "."
     );
 
-    auto padded_strides = c10::contiguous_strides(padded);
-    at::TensorOptions long_options = cols.options().dtype(at::kLong);
-    at::Tensor positions = at::zeros({}, long_options);
-    for (int64_t d = 0; d < dims; d++) {
-        std::vector<int64_t> k_view(2 * dims, 1), o_view(2 * dims, 1);
-        k_view[d] = g.kernel[d];
-        o_view[dims + d] = windows[d];
-        at::Tensor k = at::mul(at::arange(g.kernel[d], long_options), g.dilation[d] * padded_strides[d]).view(k_view);
-        at::Tensor o = at::mul(at::arange(windows[d], long_options), g.stride[d] * padded_strides[d]).view(o_view);
-        positions = at::add(positions, at::add(k, o));
-    }
-    positions = positions.reshape({-1});
-
-    at::Tensor image = at::zeros({n, channels, c10::multiply_integers(padded)}, cols.options());
-    image.index_add_(2, positions, cols.reshape({n, channels, kernel_volume * c10::multiply_integers(windows)}));
     std::vector<int64_t> shape = {n, channels};
     shape.insert(shape.end(), padded.begin(), padded.end());
-    at::Tensor result = image.view(shape);
+    at::Tensor result = at::zeros(shape, cols.options());
+    std::vector<int64_t> block_shape = {n, channels, kernel_volume};
+    block_shape.insert(block_shape.end(), windows.begin(), windows.end());
+    at::Tensor blocks = cols.reshape(block_shape);
+    // one kernel offset's windows land on distinct pixels: a strided add per offset (index_add_ would sort), in the
+    // CPU's order
+    for (int64_t offset = 0; offset < kernel_volume; offset++) {
+        at::Tensor target = result;
+        int64_t rest = offset;
+        for (int64_t d = dims - 1; d >= 0; d--) {
+            int64_t start = (rest % g.kernel[d]) * g.dilation[d];
+            rest /= g.kernel[d];
+            target = target.slice(2 + d, start, start + (windows[d] - 1) * g.stride[d] + 1, g.stride[d]);
+        }
+        target.add_(blocks.select(2, offset));
+    }
     for (int64_t d = 0; d < dims; d++) result = result.narrow(2 + d, g.padding[d], output_size[d]);
     return result.contiguous();
 }
