@@ -68,7 +68,7 @@ vector<T, VEC> loadWords<T : ITorchVulkan, let VEC : int>(uint64_t address, uint
     return bit_cast<vector<T, VEC>>(((uint*)address)[idx / VEC]);
 }
 
-vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k)
+vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k) where T.Accum : __BuiltinArithmeticType
 {
     T* tensor_a = (T*)pcs.tensor_a;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -95,7 +95,7 @@ vector<T, VEC> loadVectorA<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopT
     return v;
 }
 
-vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k)
+vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint i, uint k) where T.Accum : __BuiltinArithmeticType
 {
     T* tensor_b = (T*)pcs.tensor_b;
     vector<T, VEC> v = zeroVector<T, VEC>();
@@ -123,7 +123,7 @@ vector<T, VEC> loadVectorB<T : ITorchVulkan & ICoopElement, let VEC : int>(CoopT
 }
 
 void loadTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
-    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B])
+    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -147,7 +147,7 @@ bool tileInBounds<A : ITorchVulkan>(CoopTile tile, CoopPushConstants<A> pcs)
 
 // no bounds checks, so the prefetch isn't waited on before the current tile's MMAs
 void loadTileFast<T : ITorchVulkan & ICoopElement, let VEC : int>(
-    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B])
+    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, inout vector<T, VEC> regA[LOADS_A], inout vector<T, VEC> regB[LOADS_B]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -196,7 +196,7 @@ void loadTileFast<T : ITorchVulkan & ICoopElement, let VEC : int>(
 }
 
 void storeTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
-    uint ti, uint stage, vector<T, VEC> regA[LOADS_A], vector<T, VEC> regB[LOADS_B])
+    uint ti, uint stage, vector<T, VEC> regA[LOADS_A], vector<T, VEC> regB[LOADS_B]) where T.Accum : __BuiltinArithmeticType
 {
     [unroll] for (uint j = 0; j < LOADS_A; ++j)
     {
@@ -222,7 +222,7 @@ void storeTile<T : ITorchVulkan & ICoopElement, let VEC : int>(
     }
 }
 
-void multiplyStage<T : ITorchVulkan & ICoopElement>(CoopTile tile, uint stage, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+void multiplyStage<T : ITorchVulkan & ICoopElement>(CoopTile tile, uint stage, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     uint base_a = stage * stageA();
     uint base_b = stage * stageB();
@@ -268,7 +268,7 @@ void multiplyStage<T : ITorchVulkan & ICoopElement>(CoopTile tile, uint stage, i
 }
 
 void accumulateStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
-    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     vector<T, VEC> regA[LOADS_A];
     vector<T, VEC> regB[LOADS_B];
@@ -306,7 +306,7 @@ void accumulateStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
     }
 }
 
-FragmentA<T> loadA<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint row, uint k)
+FragmentA<T> loadA<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint row, uint k) where T.Accum : __BuiltinArithmeticType
 {
     T* tensor_a = (T*)pcs.tensor_a;
     uint idx = tile.batch_offset_a + row * pcs.strides_a.row + k * pcs.strides_a.col;
@@ -316,7 +316,7 @@ FragmentA<T> loadA<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConst
     return m.Load<linalg::CoopMatMatrixLayout.RowMajor>(tensor_a, idx, pcs.strides_a.row);
 }
 
-FragmentB<T> loadB<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, uint col)
+FragmentB<T> loadB<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConstants<T.Accum> pcs, uint k, uint col) where T.Accum : __BuiltinArithmeticType
 {
     T* tensor_b = (T*)pcs.tensor_b;
     uint idx = tile.batch_offset_b + k * pcs.strides_b.row + col * pcs.strides_b.col;
@@ -329,7 +329,7 @@ FragmentB<T> loadB<T : ITorchVulkan & ICoopElement>(CoopTile tile, CoopPushConst
 // STEPS slices of K: all loads first, then all multiplies, so the loads overlap
 void accumulateSteps<T : ITorchVulkan & ICoopElement, let STEPS : uint>(
     CoopTile tile, CoopPushConstants<T.Accum> pcs, uint a_rows[WARP_FRAGS_M], uint b_cols[WARP_FRAGS_N], uint k,
-    inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+    inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     FragmentA<T> matA[STEPS][WARP_FRAGS_M];
     [ForceUnroll] for (uint s = 0; s < STEPS; ++s)
@@ -357,7 +357,7 @@ void accumulateSteps<T : ITorchVulkan & ICoopElement, let STEPS : uint>(
 }
 
 void accumulateDirect<T : ITorchVulkan & ICoopElement>(
-    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+    uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     T* tensor_a = (T*)pcs.tensor_a;
     T* tensor_b = (T*)pcs.tensor_b;
@@ -446,7 +446,7 @@ void accumulateDirect<T : ITorchVulkan & ICoopElement>(
 }
 
 void finishTile<T : ITorchVulkan & ICoopElement>(
-    uint3 wg, uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N])
+    uint3 wg, uint ti, CoopTile tile, CoopPushConstants<T.Accum> pcs, inout Accumulator<T.Accum> acc[WARP_FRAGS_M * WARP_FRAGS_N]) where T.Accum : __BuiltinArithmeticType
 {
     typealias A = T.Accum;
     T* tensor_out = (T*)pcs.tensor_out;
@@ -499,7 +499,7 @@ void finishTile<T : ITorchVulkan & ICoopElement>(
 }
 
 void coopMatmulStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
-    uint3 wg, uint ti, CoopPushConstants<T.Accum> pcs)
+    uint3 wg, uint ti, CoopPushConstants<T.Accum> pcs) where T.Accum : __BuiltinArithmeticType
 {
     CoopTile tile = makeTile<T.Accum>(wg, ti, pcs);
 
@@ -512,7 +512,7 @@ void coopMatmulStaged<T : ITorchVulkan & ICoopElement, let VEC : int>(
 }
 
 void coopMatmulDirect<T : ITorchVulkan & ICoopElement>(
-    uint3 wg, uint ti, CoopPushConstants<T.Accum> pcs)
+    uint3 wg, uint ti, CoopPushConstants<T.Accum> pcs) where T.Accum : __BuiltinArithmeticType
 {
     CoopTile tile = makeTile<T.Accum>(wg, ti, pcs);
 
@@ -529,7 +529,7 @@ void coopMatmulDirect<T : ITorchVulkan & ICoopElement>(
 void matmul_coop_main<T : ITorchVulkan & ICoopElement, let VEC : int>(
     uint3 wg : SV_GroupID,
     uint ti : SV_GroupIndex,
-    uniform CoopPushConstants<T.Accum> pcs)
+    uniform CoopPushConstants<T.Accum> pcs) where T.Accum : __BuiltinArithmeticType
 {
     if (USE_SHARED_MEMORY == 1) coopMatmulStaged<T, VEC>(wg, ti, pcs);
     else coopMatmulDirect<T>(wg, ti, pcs);

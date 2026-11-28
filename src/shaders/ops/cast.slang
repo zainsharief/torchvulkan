@@ -42,11 +42,8 @@ public void castKernel<Src : ITorchVulkan, Dst : ITorchVulkan, let VEC_SIZE : in
     {
         if (idx * VEC_SIZE >= numel) return;
 
-        Src* tensor_in = (Src*)address_in;
-        Dst* tensor_out = (Dst*)address_out;
-
         Src v[VEC_SIZE];
-        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) v[k] = tensor_in[idx * VEC_SIZE + k];
+        [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++) v[k] = Src.load(address_in, idx * VEC_SIZE + k);
 
         Dst res[VEC_SIZE];
         [ForceUnroll] for (int k = 0; k < VEC_SIZE; k++)
@@ -55,16 +52,13 @@ public void castKernel<Src : ITorchVulkan, Dst : ITorchVulkan, let VEC_SIZE : in
         }
 
         uint64_t remainder = numel - (idx * VEC_SIZE);
-        uint64_t count = (remainder >= VEC_SIZE) ? VEC_SIZE : remainder;
-        for (uint i = 0; i < count; i++) tensor_out[idx * VEC_SIZE + i] = res[i];
+        uint count = (remainder >= VEC_SIZE) ? VEC_SIZE : uint(remainder);
+        Dst.storeVec<VEC_SIZE>(address_out, idx * VEC_SIZE, res, count);
 
         return;
     }
 
     if (idx >= numel) return;
-
-    Src* tensor_in = (Src*)address_in;
-    Dst* tensor_out = (Dst*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_in = (uint*)md.strides_in;
@@ -81,8 +75,7 @@ public void castKernel<Src : ITorchVulkan, Dst : ITorchVulkan, let VEC_SIZE : in
         idx_out += coord * strides_out[i];
     }
 
-    Src value = tensor_in[idx_in];
-    tensor_out[idx_out] = convertElement<Src, Dst>(value);
+    Dst.store(address_out, idx_out, convertElement<Src, Dst>(Src.load(address_in, idx_in)));
 }
 
 [shader("compute")]

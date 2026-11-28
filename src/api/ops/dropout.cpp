@@ -20,7 +20,7 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
     double keep_prob = 1.0 - p;
     double scale = keep_prob == 0 ? 0.0 : 1.0 / keep_prob;
 
-    if (!at::isFloatingType(input.scalar_type()) || !is_dtype_supported(input, input.scalar_type()) || !is_dtype_supported(input, at::kBool) || !fits_32bit_indexing({input})) {
+    if (!at::isFloatingType(input.scalar_type()) || !can_dispatch(get_device_context(input), torchvulkan::Kernel::DROPOUT, input.scalar_type(), at::kBool) || !fits_32bit_indexing({input})) {
         at::Tensor mask = at::empty_like(input, input.options().dtype(at::kBool));
         mask.bernoulli_(keep_prob);
         return std::make_tuple(input.mul(mask).mul_(scale), mask);
@@ -51,14 +51,14 @@ std::tuple<at::Tensor, at::Tensor> native_dropout_vulkan(const at::Tensor& input
         .push(seed)
         .push(offset)
         .push(random_real_bits(keep_prob, real))
-        .push(random_real_bits(scale, real));
+        .push_scalar(scale, reduce_accumulate_dtype(src.scalar_type()));
     PushConstants pushConstants = pcs.build();
 
     uint64_t threads = (numel + vecSize - 1) / vecSize;
     uint32_t groupX = static_cast<uint32_t>((threads + workgroupSizeX - 1) / workgroupSizeX);
 
     device->shader_manager->dispatchShader(
-        ShaderKey{torchvulkan::Kernel::DROPOUT, src.scalar_type()},
+        ShaderKey{torchvulkan::Kernel::DROPOUT, src.scalar_type(), at::kBool},
         device->default_subgroup_size,
         specialization,
         pushConstants,

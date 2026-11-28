@@ -25,7 +25,7 @@ struct MatmulPushConstants<T : ITorchVulkan>
 void matmul_simd_main<T : ITorchVulkan, let VEC : int>(
     uint3 li : SV_GroupThreadID,
     uint3 wg : SV_GroupID,
-    uniform MatmulPushConstants<T.Accum> pcs)
+    uniform MatmulPushConstants<T.Accum> pcs) where T.Accum : __BuiltinArithmeticType
 {
     typealias Acc = T.Accum;
     typealias Epilogue = LinearEpilogue<Acc, Activation<Acc>, AccumMatrix<T>>;

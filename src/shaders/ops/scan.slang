@@ -67,8 +67,6 @@ public void scanKernel<T : ITorchVulkan, Op : ICumScanOp<T>, let SMEM_SIZE : int
 {
     if (line >= num_lines || scan_size == 0) return;
 
-    T* tensor_in = (T*)address_in;
-    T* tensor_out = (T*)address_out;
 
     Metadata md = *(Metadata*)address_metadata;
     uint* strides_in = (uint*)md.strides_in;
@@ -93,7 +91,7 @@ public void scanKernel<T : ITorchVulkan, Op : ICumScanOp<T>, let SMEM_SIZE : int
         GroupMemoryBarrierWithGroupSync();
 
         uint j = chunk_start + lane;
-        T value = (j < scan_size) ? tensor_in[base_in + j * scan_stride_in] : Op.identity();
+        T value = (j < scan_size) ? T.load(address_in, base_in + j * scan_stride_in) : Op.identity();
         smem[lane] = value;
         GroupMemoryBarrierWithGroupSync();
 
@@ -106,7 +104,7 @@ public void scanKernel<T : ITorchVulkan, Op : ICumScanOp<T>, let SMEM_SIZE : int
             GroupMemoryBarrierWithGroupSync(); // every lane sees this step's result before the next
         }
 
-        if (j < scan_size) tensor_out[base_out + j * scan_stride_out] = Op.combine(carry, smem[lane]);
+        if (j < scan_size) T.store(address_out, base_out + j * scan_stride_out, Op.combine(carry, smem[lane]));
 
         uint last_lane = min(WG_x, scan_size - chunk_start) - 1;
         carry = Op.combine(carry, smem[last_lane]);

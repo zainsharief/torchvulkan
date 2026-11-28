@@ -21,22 +21,6 @@ at::Tensor& fill_scalar_vulkan(
         return self;
     }
 
-    if (c10::isFloat8Type(self.scalar_type()) && self.numel() > 0) 
-    {
-        float v = value.toFloat();
-        uint8_t bits = 0;
-        switch (self.scalar_type()) {
-            case at::kFloat8_e4m3fn: bits = c10::Float8_e4m3fn(v).x; break;
-            case at::kFloat8_e5m2: bits = c10::Float8_e5m2(v).x; break;
-            case at::kFloat8_e4m3fnuz: bits = c10::Float8_e4m3fnuz(v).x; break;
-            case at::kFloat8_e5m2fnuz: bits = c10::Float8_e5m2fnuz(v).x; break;
-            case at::kFloat8_e8m0fnu: bits = c10::Float8_e8m0fnu(v).x; break;
-            default: TORCH_CHECK(false, "torchvulkan [ERROR]: no fill for ", self.scalar_type());
-        }
-        self.view(at::kByte).fill_(bits);
-        return self;
-    }
-
     for (int64_t d = 0; d < self.dim(); d++) 
     {
         if (self.stride(d) == 0 && self.size(d) > 1) 
@@ -59,7 +43,7 @@ at::Tensor& fill_scalar_vulkan(
         return self;
     }
 
-    if (!is_dtype_supported(self, self.scalar_type()) && value.equal(0) && !self.is_complex())
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::FILL, self.scalar_type()) && value.equal(0) && !self.is_complex())
     {
         at::ScalarType bits = c10::elementSize(self.scalar_type()) == 1 ? at::kByte
                             : c10::elementSize(self.scalar_type()) == 2 ? at::kShort
@@ -75,7 +59,7 @@ at::Tensor& fill_scalar_vulkan(
     if (numel == 0) return self;
     
     int32_t out_dims = static_cast<int32_t>(iter.ndim());
-    if (!is_dtype_supported(self, iter.dtype()) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::FILL, iter.dtype()) || out_dims > MAX_DIMS || !fits_32bit_indexing(iter)) {
         TORCHVULKAN_FALLBACK("Can't fill a ", iter.dtype(), " tensor of this shape on the Vulkan device. Falling back to CPU.");
         self.copy_(at::empty(self.sizes(), self.options().device(at::kCPU)).fill_(value));
         return self;

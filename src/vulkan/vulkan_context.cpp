@@ -87,6 +87,30 @@ static c10::ScalarType coop_component_to_scalar(VkComponentTypeKHR type)
     }
 }
 
+// A dtype the device can't run natively runs as its emulated type. TORCHVULKAN_EMULATE=1 emulates every dtype that
+// has one, to test those paths on devices that run them all natively. float64 has none: without shaderFloat64 no
+// variant matches, so it falls back to the CPU.
+static void chooseModes(DeviceContext& device)
+{
+    using Mode = torchvulkan::DtypeMode;
+    bool force = isEnvSet("TORCHVULKAN_EMULATE");
+    auto set = [&](c10::ScalarType dtype, bool native) { device.dtype_mode[static_cast<size_t>(dtype)] = native && !force ? Mode::NATIVE : Mode::EMULATED; };
+
+    device.dtype_mode.fill(Mode::NATIVE);
+    device.dtype_mode[static_cast<size_t>(c10::ScalarType::Double)] = device.support_float64 ? Mode::NATIVE : Mode::EMULATED;
+    set(c10::ScalarType::Half, device.support_float16);
+    set(c10::ScalarType::BFloat16, device.support_bfloat16);
+    for (c10::ScalarType f8 : {c10::ScalarType::Float8_e4m3fn, c10::ScalarType::Float8_e5m2, c10::ScalarType::Float8_e4m3fnuz,
+                               c10::ScalarType::Float8_e5m2fnuz, c10::ScalarType::Float8_e8m0fnu}) {
+        set(f8, false);
+    }
+    set(c10::ScalarType::Short, device.support_int16);
+    set(c10::ScalarType::UInt16, device.support_int16);
+    set(c10::ScalarType::Char, device.support_int8);
+    set(c10::ScalarType::Byte, device.support_int8);
+    set(c10::ScalarType::Bool, device.support_int8);
+}
+
 static std::atomic<bool> contextInitialized{false};
 static std::atomic<bool> inBadFork{false};
 static std::atomic<bool> contextShutDown{false};
@@ -454,8 +478,6 @@ void VulkanContext::createDeviceWithExtensions()
             continue;
         }
 
-        device->support_float32 = true;
-        device->support_int32 = true;
         device->support_float64 = supportedFeatures2.features.shaderFloat64;
         device->support_int64 = true;
         device->support_float16 = supported12.shaderFloat16 && enable11.storageBuffer16BitAccess;
@@ -482,6 +504,8 @@ void VulkanContext::createDeviceWithExtensions()
             enable12.pNext = &enableBfloat16;
             deviceExtensions.push_back(VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME);
         }
+
+        chooseModes(*device);
 
         if (hasExt(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) && supportedCoopMat.cooperativeMatrix)
         {

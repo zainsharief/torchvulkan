@@ -96,6 +96,9 @@ public extension double : IRandomDtype { public typealias Real = double; }
 public extension float : IRandomDtype { public typealias Real = float; }
 public extension half : IRandomDtype { public typealias Real = float; }
 public extension BFloat16 : IRandomDtype { public typealias Real = float; }
+// the emulated dtypes sample in float32
+public extension<C : IFloatCodec> EmulatedFloat<C> : IRandomDtype { public typealias Real = float; }
+public extension<C : IIntCodec> EmulatedInt<C> : IRandomDtype { public typealias Real = float; }
 
 public struct RandomStream<R : __BuiltinFloatingPointType & IRandomReal>
 {

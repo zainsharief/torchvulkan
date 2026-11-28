@@ -98,7 +98,7 @@ std::tuple<at::Tensor, at::Tensor> nll_loss_forward_vulkan(
     TORCH_CHECK(!has_weight || (weight->dim() <= 1 && weight->numel() == classes), "weight tensor should be defined either for all ", classes,
         " classes or no classes but got weight tensor of shape: ", has_weight ? weight->sizes() : at::IntArrayRef());
 
-    if (!is_dtype_supported(self, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::NLLLOSS, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
         TORCHVULKAN_FALLBACK("Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
         c10::optional<at::Tensor> cpu_weight = weight.has_value() && weight->defined() ? c10::optional<at::Tensor>(weight->cpu()) : c10::nullopt;
         auto [cpu_output, cpu_total_weight] = at::nll_loss_forward(self.cpu(), target.cpu(), cpu_weight, reduction, ignore_index);
@@ -141,7 +141,7 @@ at::Tensor nll_loss_backward_vulkan(
 {
     TORCH_CHECK(self.dim() == 1 || self.dim() == 2, "torchvulkan [ERROR]: nll_loss only supports 1D (unbatched) or 2D input.");
 
-    if (!is_dtype_supported(self, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
+    if (!can_dispatch(get_device_context(self), torchvulkan::Kernel::NLLLOSS, self.scalar_type()) || self.numel() > std::numeric_limits<int32_t>::max()) {
         TORCHVULKAN_FALLBACK("Vulkan device does not support ", self.scalar_type(), ". Falling back to CPU.");
         c10::optional<at::Tensor> cpu_weight = weight.has_value() && weight->defined() ? c10::optional<at::Tensor>(weight->cpu()) : c10::nullopt;
         at::Tensor cpu_grad_input = at::nll_loss_backward(

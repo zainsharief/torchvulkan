@@ -70,9 +70,6 @@ public void specialKernel<T : ITorchVulkan>(uint3 gi, SpecialPushConstants pcs)
     uint idx = flat_thread(gi, WG_x);
     if (idx >= pcs.numel) return;
 
-    T* tensor_a = (T*)pcs.tensor_a;
-    T* tensor_b = (T*)pcs.tensor_b;
-    T* tensor_out = (T*)pcs.tensor_out;
 
     uint idx_a = idx;
     uint idx_b = idx;
@@ -99,10 +96,10 @@ public void specialKernel<T : ITorchVulkan>(uint3 gi, SpecialPushConstants pcs)
         }
     }
 
-    float a = castValue<T, float>(tensor_a[idx_a]);
+    float a = castValue<T, float>(T.load(pcs.tensor_a, idx_a));
     float b = pcs.scalar_value;
-    if (USE_SCALAR == 0) b = castValue<T, float>(tensor_b[idx_b]);
-    tensor_out[idx_out] = castValue<float, T>(evalSpecial(a, b));
+    if (USE_SCALAR == 0) b = castValue<T, float>(T.load(pcs.tensor_b, idx_b));
+    T.store(pcs.tensor_out, idx_out, castValue<float, T>(evalSpecial(a, b)));
 }
 
 [shader("compute")]

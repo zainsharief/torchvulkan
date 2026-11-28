@@ -126,7 +126,7 @@ at::Tensor& gather_out_vulkan(const at::Tensor& self, int64_t dim, const at::Ten
     }
 
     at::Tensor result = out.dim() == 0 ? out.view({1}) : out;
-    if (src.size(dim) == 0 || !is_dtype_copyable(self, self.scalar_type()) ||
+    if (src.size(dim) == 0 || !is_dtype_copyable(self, self.scalar_type(), torchvulkan::Kernel::INDEX_GATHER) ||
         !dispatch_index_gather_shader(result, restride_for_dim(src, dim, idx.sizes()), {idx}, {src.size(dim)}, {src.stride(dim)}, false))
     {
         TORCHVULKAN_FALLBACK("This gather can't run on the Vulkan device. Falling back to CPU.");
@@ -169,7 +169,7 @@ at::Tensor index_select_vulkan(const at::Tensor& self, int64_t dim, const at::Te
     index_view[dim] = count;
     at::Tensor idx = index.to(at::kLong).reshape(index_view).expand(out_sizes);
 
-    if (self.size(dim) == 0 || !is_dtype_copyable(self, self.scalar_type()) ||
+    if (self.size(dim) == 0 || !is_dtype_copyable(self, self.scalar_type(), torchvulkan::Kernel::INDEX_GATHER) ||
         !dispatch_index_gather_shader(out, restride_for_dim(self, dim, out_sizes), {idx}, {self.size(dim)}, {self.stride(dim)}, false))
     {
         TORCHVULKAN_FALLBACK("This index_select can't run on the Vulkan device. Falling back to CPU.");
@@ -283,7 +283,7 @@ at::Tensor& index_out_vulkan(const at::Tensor& self, const c10::List<std::option
     if (out.numel() == 0) return out;
     fold_extra_indices(plan);
 
-    if (!is_dtype_copyable(self, self.scalar_type()) ||
+    if (!is_dtype_copyable(self, self.scalar_type(), torchvulkan::Kernel::INDEX_GATHER) ||
         !dispatch_index_gather_shader(out, plan.src, plan.indices, plan.index_sizes, plan.index_strides, /*wrap_negative=*/true))
     {
         TORCHVULKAN_FALLBACK("This index can't run on the Vulkan device. Falling back to CPU.");
@@ -332,7 +332,7 @@ at::Tensor embedding_dense_backward_vulkan(
 
     at::Tensor flat_grad = grad_output.reshape({n, dim}).contiguous();
     DeviceContext* device = get_device_context(grad_output);
-    if (!at::isFloatingType(grad_output.scalar_type()) || !is_dtype_supported(device, grad_output.scalar_type()) ||
+    if (!at::isFloatingType(grad_output.scalar_type()) || !can_dispatch(device, torchvulkan::Kernel::EMBEDDING_BACKWARD, grad_output.scalar_type()) ||
         !fits_32bit_indexing({flat_grad, grad_weight}))
     {
         TORCHVULKAN_FALLBACK("This embedding backward can't run on the Vulkan device. Falling back to CPU.");

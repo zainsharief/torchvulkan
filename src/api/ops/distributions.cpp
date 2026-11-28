@@ -24,7 +24,7 @@ at::Tensor dispatch_distribution_shader(
 {
     at::ScalarType dtype = input0.scalar_type();
 
-    if (!is_dtype_supported(input0, dtype)) {
+    if (!can_dispatch(get_device_context(input0), torchvulkan::Kernel::DISTRIBUTION, dtype)) {
         TORCH_WARN_ONCE("torchvulkan [WARNING]: Vulkan device does not support ", dtype, ". Sampling in Float instead.");
         dtype = at::kFloat;
     }

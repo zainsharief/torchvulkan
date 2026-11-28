@@ -249,7 +249,8 @@ at::Tensor soft_margin_loss_vulkan(const at::Tensor& self, const at::Tensor& tar
     bool low = is_low_prec(odt);
     at::Tensor s = low ? self.to(at::kFloat) : self;
     at::Tensor t = low ? target.to(at::kFloat) : target;
-    at::Tensor loss = at::softplus(at::neg(at::mul(s, t)), 1, 20);
+    at::Tensor margin = at::neg(at::mul(s, t));
+    at::Tensor loss = margin.is_complex() ? at::log1p(at::exp(margin)) : at::softplus(margin, 1, 20);
     at::Tensor r = reduce_loss(loss, reduction);
     return low ? r.to(odt) : r;
 }
@@ -435,11 +436,6 @@ at::Tensor roll_vulkan(const at::Tensor& self, at::IntArrayRef shifts, at::IntAr
     return result.is_same(self) ? self.clone() : result;
 }
 
-at::Tensor silu_vulkan(const at::Tensor& self)
-{
-    return at::mul(self, at::sigmoid(self));
-}
-
 at::Tensor hardtanh_vulkan(const at::Tensor& self, const at::Scalar& min_val, const at::Scalar& max_val)
 {
     // keeps an integer dtype: the bounds truncate to integers
@@ -535,7 +531,7 @@ at::Tensor log_softmax_backward_vulkan(
 
     // half and bfloat16 in float32, rounded once, as softmax_backward_vulkan and the CPU's opmath
     at::ScalarType out_type = grad_output.scalar_type();
-    bool upcast = out_type == at::kHalf || out_type == at::kBFloat16;
+    bool upcast = is_low_prec(out_type);
     at::Tensor go = upcast ? grad_output.to(at::kFloat) : grad_output;
     at::Tensor out = upcast ? output.to(at::kFloat) : output;
     at::Tensor sum_grad = at::sum(go, {dim}, /*keepdim=*/true);
@@ -561,7 +557,7 @@ at::Tensor softmax_backward_vulkan(
     if (grad_output.numel() == 0) return grad_output.clone();
 
     at::ScalarType out_type = grad_output.scalar_type();
-    bool upcast = out_type == at::kHalf || out_type == at::kBFloat16;
+    bool upcast = is_low_prec(out_type);
     at::Tensor go = upcast ? grad_output.to(at::kFloat) : grad_output;
     at::Tensor out = upcast ? output.to(at::kFloat) : output;
 
@@ -665,6 +661,8 @@ at::Tensor std_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
+    // float8 has no sqrt: root the float32 variance and round once
+    if (at::isFloat8Type(self.scalar_type())) return std_correction_vulkan(self.to(at::kFloat), dim, correction, keepdim).to(self.scalar_type());
     return at::sqrt(std::get<0>(compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std")));
 }
 
@@ -683,6 +681,10 @@ std::tuple<at::Tensor, at::Tensor> std_mean_correction_vulkan(
     const c10::optional<at::Scalar>& correction,
     bool keepdim)
 {
+    if (at::isFloat8Type(self.scalar_type())) {
+        auto [stdev, mean] = std_mean_correction_vulkan(self.to(at::kFloat), dim, correction, keepdim);
+        return std::make_tuple(stdev.to(self.scalar_type()), mean.to(self.scalar_type()));
+    }
     at::Tensor var, mean;
     std::tie(var, mean) = compute_var_mean(self, dim, correction_or_default(correction), keepdim, "std_mean");
     return std::make_tuple(at::sqrt(var), mean);
@@ -1117,6 +1119,10 @@ at::Tensor addbmm_vulkan(const at::Tensor& self, const at::Tensor& batch1, const
     TORCH_CHECK(batch1.size(0) == batch2.size(0), "batch1 and batch2 must have same number of batches, got ", batch1.size(0), " and ", batch2.size(0));
     TORCH_CHECK(batch1.size(2) == batch2.size(1), "Incompatible matrix sizes for bmm (", batch1.size(1), "x", batch1.size(2), " and ", batch2.size(1), "x", batch2.size(2), ")");
     int64_t b = batch1.size(0), n = batch1.size(1), k = batch1.size(2), p = batch2.size(2);
+    // float8 has no add: run in float32 and round once
+    if (at::isFloat8Type(self.scalar_type())) {
+        return addbmm_vulkan(self.to(at::kFloat), batch1.to(at::kFloat), batch2.to(at::kFloat), beta, alpha).to(self.scalar_type());
+    }
 
     at::Tensor product = (b == 0 || k == 0)
         ? at::zeros({n, p}, batch1.options())
@@ -1248,11 +1254,6 @@ at::Tensor& logit_vulkan_(at::Tensor& self, c10::optional<double> eps)
 at::Tensor& mish_out_vulkan(const at::Tensor& self, at::Tensor& out)
 {
     return fill_out(out, mish_vulkan(self));
-}
-
-at::Tensor& silu_out_vulkan(const at::Tensor& self, at::Tensor& out)
-{
-    return fill_out(out, silu_vulkan(self));
 }
 
 at::Tensor& softplus_out_vulkan(const at::Tensor& self, const at::Scalar& beta, const at::Scalar& threshold, at::Tensor& out)
@@ -1513,7 +1514,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("tril_indices", &tril_indices_vulkan);
     m.impl("triu_indices", &triu_indices_vulkan);
     m.impl("logit", &logit_vulkan);
-    m.impl("silu", &silu_vulkan);
     m.impl("hardtanh", &hardtanh_vulkan);
     m.impl("hardsigmoid", &hardsigmoid_vulkan);
     m.impl("hardswish", &hardswish_vulkan);
@@ -1609,7 +1609,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
     m.impl("logit.out", &logit_out_vulkan);
     m.impl("logit_", &logit_vulkan_);
     m.impl("mish.out", &mish_out_vulkan);
-    m.impl("silu.out", &silu_out_vulkan);
     m.impl("softplus.out", &softplus_out_vulkan);
     m.impl("norm.dtype_out", &norm_dtype_out_vulkan);
     m.impl("var.correction_out", &var_correction_out_vulkan);

@@ -6,8 +6,7 @@ import core.indexing;
 [[vk::constant_id(0)]] public const uint MODE = 0;
 [[vk::constant_id(1)]] public const uint INCLUDE_SELF = 0;
 [[vk::constant_id(2)]] public const uint INTEGRAL = 0;
-[[vk::constant_id(3)]] public const uint ROUND_BF16 = 0;
-[[vk::constant_id(4)]] public const uint WG_x = 0;
+[[vk::constant_id(3)]] public const uint WG_x = 0;
 
 public struct ScatterPushConstants
 {
@@ -17,17 +16,6 @@ public struct ScatterPushConstants
     public uint64_t keys;
     public uint64_t order;
     public uint64_t count;
-}
-
-T roundStep<T : ITorchVulkan>(T v)
-{
-    if (ROUND_BF16 == 0) return v;
-    float f = castValue<T, float>(v);
-    if (isnan(f)) return v;
-    uint bits = asuint(f);
-    bits += 0x7FFFu + ((bits >> 16) & 1u);
-    bits &= 0xFFFF0000u;
-    return castValue<float, T>(asfloat(bits));
 }
 
 T combine<T : ITorchVulkan>(T acc, T v)
@@ -59,16 +47,13 @@ public void scatterKernel<T : ITorchVulkan>(uint3 gi, ScatterPushConstants pcs)
     uint64_t i = uint64_t(flat_thread(gi, WG_x));
     if (i >= pcs.count) return;
 
-    T* out = (T*)pcs.out;
-    T* self = (T*)pcs.self;
-    T* src = (T*)pcs.src;
     int64_t* keys = (int64_t*)pcs.keys;
     int64_t* order = (int64_t*)pcs.order;
 
     int64_t key = keys[i];
     if (MODE == 0)
     {
-        if (key >= 0) out[key] = src[i];
+        if (key >= 0) T.store(pcs.out, key, T.load(pcs.src, i));
         return;
     }
 
@@ -79,27 +64,27 @@ public void scatterKernel<T : ITorchVulkan>(uint3 gi, ScatterPushConstants pcs)
     uint64_t j = i;
     if (INCLUDE_SELF != 0)
     {
-        acc = self[key];
+        acc = T.load(pcs.self, key);
         n = 1;
     }
     else if (MODE != 6)
     {
-        acc = src[order[j]];
+        acc = T.load(pcs.src, order[j]);
         n = 1;
         j++;
     }
     for (; j < pcs.count && keys[j] == key; j++)
     {
-        acc = roundStep<T>(combine<T>(acc, src[order[j]]));
+        acc = (combine<T>(acc, T.load(pcs.src, order[j])));
         n++;
     }
 
     if (MODE == 3)
     {
         T divisor = castValue<uint64_t, T>(n);
-        acc = roundStep<T>((INTEGRAL != 0) ? T.ext_floor_divide(acc, divisor) : T.ext_div(acc, divisor));
+        acc = ((INTEGRAL != 0) ? T.ext_floor_divide(acc, divisor) : T.ext_div(acc, divisor));
     }
-    out[key] = acc;
+    T.store(pcs.out, key, acc);
 }
 
 [shader("compute")]

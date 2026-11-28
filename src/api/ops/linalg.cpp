@@ -37,7 +37,7 @@ enum class LdlMode {
 at::ScalarType linalg_dtype(const at::Tensor& t, const char* name)
 {
     TORCH_CHECK(at::isFloatingType(t.scalar_type()), name, ": Expected a floating point tensor as input. Got ", t.scalar_type());
-    return (t.scalar_type() == at::kDouble && is_dtype_supported(t, at::kDouble)) ? at::kDouble : at::kFloat;
+    return (t.scalar_type() == at::kDouble && can_dispatch(get_device_context(t), torchvulkan::Kernel::LU, at::kDouble)) ? at::kDouble : at::kFloat;
 }
 
 void check_square(const at::Tensor& A, const char* name)
@@ -1106,7 +1106,7 @@ std::tuple<at::Tensor&, at::Tensor&> linalg_eigh_out_vulkan(const at::Tensor& A,
 at::ScalarType ldl_dtype(const at::Tensor& t, const char* name)
 {
     if (!t.is_complex()) return linalg_dtype(t, name);
-    return (t.scalar_type() == at::kComplexDouble && is_dtype_supported(t, at::kDouble)) ? at::kComplexDouble : at::kComplexFloat;
+    return (t.scalar_type() == at::kComplexDouble && can_dispatch(get_device_context(t), torchvulkan::Kernel::LU, at::kDouble)) ? at::kComplexDouble : at::kComplexFloat;
 }
 
 std::tuple<at::Tensor&, at::Tensor&, at::Tensor&> linalg_ldl_factor_ex_out_vulkan(

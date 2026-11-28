@@ -23,10 +23,8 @@ public void embeddingBackwardKernel<T : ITorchVulkan>(uint3 gi, EmbeddingBackwar
     uint idx = flat_thread(gi, WG_x);
     if (idx >= pcs.numel_out) return;
 
-    T* grad = (T*)pcs.grad;
     int64_t* sorted_indices = (int64_t*)pcs.sorted_indices;
     int64_t* permutation = (int64_t*)pcs.permutation;
-    T* grad_weight = (T*)pcs.grad_weight;
 
     int64_t row = int64_t(idx / pcs.d);
     uint col = idx % pcs.d;
@@ -47,13 +45,13 @@ public void embeddingBackwardKernel<T : ITorchVulkan>(uint3 gi, EmbeddingBackwar
         for (; i < pcs.n && sorted_indices[i] == row; i++)
         {
             uint64_t source = uint64_t(permutation[i]) * pcs.d + col;
-            acc = T.Accum.ext_add(acc, grad[source].toAccum());
+            acc = T.Accum.ext_add(acc, T.load(pcs.grad, source).toAccum());
         }
 
         if (pcs.scale_by_frequency == 1 && i > lo) acc = T.Accum.ext_div(acc, T.Accum.castFromI64(int64_t(i - lo)));
     }
 
-    grad_weight[idx] = T.fromAccum(acc);
+    T.store(pcs.grad_weight, idx, T.fromAccum(acc));
 }
 
 [shader("compute")]

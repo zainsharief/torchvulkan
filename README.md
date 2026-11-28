@@ -186,13 +186,13 @@ TORCHVULKAN_STRICT=1 python your_script.py
 | `TORCHVULKAN_CACHE_DIR` | Directory for the pipeline cache. |
 | `TORCHVULKAN_TUNE_BUDGET_S` | Seconds the autotuner may spend searching for one operation's fastest kernel configuration before it settles for the best found so far (default `20`; `0` for no limit). |
 | `TORCHVULKAN_TUNE_LOG=1` | Print each configuration the autotuner times and the one it chooses. |
+| `TORCHVULKAN_EMULATE=1` | Run every dtype the device supports natively but torchvulkan can also emulate (`float16`, `bfloat16`, the 8- and 16-bit integers and `bool`) as its emulated type, as on devices without them. For testing. |
 
 ## Limitations
 
 - `torch.compile` with the default Inductor backend doesn't support the `vulkan` device. Run eagerly, or use `torch.compile(model, backend="aot_eager")`.
 - Optimizers created with `fused=True` (such as `torch.optim.AdamW(..., fused=True)`) run their update on the CPU. The default (foreach) implementation runs on the GPU.
 - `float64` runs on the GPU only on devices with `shaderFloat64`; elsewhere it falls back to the CPU. Transcendental functions such as `exp`, `sin` and `tanh` are computed in `float32` precision for `float64` tensors.
-- `bfloat16` runs on the GPU only on devices with `VK_KHR_shader_bfloat16`; elsewhere it falls back to the CPU.
 - Complex tensors can live on the device and FFTs run on the GPU, but most complex arithmetic falls back to the CPU.
 - APIs and coverage may change before `1.0.0`.
 
