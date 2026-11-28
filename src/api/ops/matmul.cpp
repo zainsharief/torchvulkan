@@ -174,8 +174,10 @@ uint64_t matmul_tune_key(const MatmulOperands& ops, uint32_t M, uint32_t N, uint
 bool matmul_simd_fits(DeviceContext* device, c10::ScalarType compute_type, uint32_t tile_m, uint32_t subgroup, uint32_t M, uint32_t N)
 {
     const auto& limits = device->properties.limits;
-    // 8- and 16-bit integers accumulate in int32
-    size_t element = at::isIntegralType(compute_type, /*includeBool=*/true) ? std::max<size_t>(4, c10::elementSize(compute_type)) : c10::elementSize(compute_type);
+    // emulated 8- and 16-bit integers accumulate in int32
+    bool emulated_int = at::isIntegralType(compute_type, /*includeBool=*/true) &&
+        device->dtype_mode[static_cast<size_t>(compute_type)] == torchvulkan::DtypeMode::EMULATED;
+    size_t element = emulated_int ? std::max<size_t>(4, c10::elementSize(compute_type)) : c10::elementSize(compute_type);
     uint64_t shared_bytes = element * ((tile_m * (MATMUL_TILE_K + 1)) + (MATMUL_TILE_K * MATMUL_TILE_N));
     uint64_t max_m = uint64_t(1) << log2_ceil(M);
     uint64_t max_n = uint64_t(1) << log2_ceil(N);
